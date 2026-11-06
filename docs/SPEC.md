@@ -199,8 +199,8 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 
 - [ ] Spike ScreenCaptureKit + VideoToolbox (macOS)
 - [x] Spike Windows.Graphics.Capture + Media Foundation — results: `docs/spikes/us-1.2-windows.md`
-- [ ] Spike PipeWire portal (Wayland) and XShm (X11) + VA-API / software fallback
-- [ ] Spike Wayland bar placement (layer-shell vs. portal limits) and write the decision record
+- [ ] Spike PipeWire portal (Wayland) and XShm (X11) + VA-API / software fallback — spike encodes through an ffmpeg pipe (never shipped); in-process encoder decided in US-5.1
+- [ ] Spike Wayland bar placement (layer-shell vs. portal limits) and write the decision record — proposed, untested: `docs/spikes/us-1.2-wayland-bar.md`; needs its test matrix run on Linux
 
 ### E2 · Floating bar
 
