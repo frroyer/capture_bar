@@ -45,8 +45,11 @@ only if a spike shows a need.
 - Builds and runs: floating, borderless, transparent, always-on-top bar; mode switch;
   Capture / Record buttons; buffer counter and tray; collapse pill; drag by the grip.
 - Global shortcuts registered (Ctrl+Shift / ⌥⇧ map from M3).
-- Platform backends are **stubs**: captures appear in the buffer, then show
-  "not implemented on this platform yet". Next step is **US-1.2** (capture spikes).
+- Windows: display listing and Display/Region stills work (Windows.Graphics.Capture). Window
+  capture and `start_stream` are stubs. The US-1.2 spike records MP4 via `windows_spike`; results
+  in `docs/spikes/us-1.2-windows.md`.
+- macOS and Linux backends are still **stubs**: captures appear in the buffer, then show
+  "not implemented on this platform yet". Next step is the rest of **US-1.2** (macOS, Linux spikes).
 
 ## Useful commands
 

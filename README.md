@@ -5,8 +5,8 @@ global shortcut, with a buffer so you can keep capturing without saving each sho
 
 Single self-contained executable for **Windows, macOS and Linux**. Written in Rust.
 
-> Status: scaffold. The bar, shortcuts and buffer UI run; the OS capture backends are stubs
-> (next: US-1.2 spikes). See `docs/SPEC.md` and `CLAUDE.md`.
+> Status: scaffold. The bar, shortcuts and buffer UI run. Screen and region stills work on Windows;
+> the macOS and Linux backends are stubs (next: their US-1.2 spikes). See `docs/SPEC.md` and `CLAUDE.md`.
 
 ## Build
 
