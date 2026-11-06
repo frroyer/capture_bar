@@ -47,6 +47,8 @@ only if a spike shows a need.
 - Global shortcuts registered (Ctrl+Shift / ⌥⇧ map from M3).
 - Bar UI follows M2.1 (vector icons in `crates/ui/src/icons.rs`; shortcuts in tooltips only). The window
   follows its content and grows while hovered to give tooltips room. The buffer tray is not restyled yet.
+- Bar position is saved per monitor layout through eframe storage and pulled back on-screen when monitors
+  change. Near a screen's bottom edge, tooltips overlap the bar and the tray runs off-screen (US-2.3).
 - Windows: the bar is excluded from captures and has no OS frame; display listing and Display/Region stills work (Windows.Graphics.Capture). Window
   capture and `start_stream` are stubs. The US-1.2 spike records MP4 via `windows_spike`; results
   in `docs/spikes/us-1.2-windows.md`.

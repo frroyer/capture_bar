@@ -18,6 +18,11 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
 /// Only for the first frame: after that the window follows its content.
 const INITIAL_SIZE: [f32; 2] = [900.0, 54.0];
+const POSITIONS_STORAGE_KEY: &str = "bar_positions";
+/// Catches monitor changes that do not move the bar.
+const DISPLAY_POLL: Duration = Duration::from_secs(2);
+/// How long to wait for a requested move before trusting the position again.
+const MOVE_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt()
@@ -40,6 +45,8 @@ fn main() -> eframe::Result<()> {
             .with_always_on_top()
             .with_resizable(false)
             .with_taskbar(false),
+        // Restored per monitor layout by `App::track_position` instead.
+        persist_window: false,
         ..Default::default()
     };
 
@@ -104,6 +111,15 @@ struct App {
     shortcut_map: HashMap<u32, Command>,
     window_size: egui::Vec2,
     bar_hovered: bool,
+    screen: Arc<dyn cb_core::ScreenSource>,
+    displays: Vec<cb_core::DisplayInfo>,
+    displays_checked: Option<Instant>,
+    layout: Option<String>,
+    /// Top-left window corner in physical pixels, per monitor layout (FR-2).
+    positions: HashMap<String, (i32, i32)>,
+    position: Option<(i32, i32)>,
+    /// A move this app requested and has not seen land yet: not the user's position.
+    moving_to: Option<((i32, i32), Instant)>,
 }
 
 impl App {
@@ -165,7 +181,7 @@ impl App {
             },
             collapsed: false,
             buffer: Buffer::new(),
-            capture: CaptureService::new(source),
+            capture: CaptureService::new(source.clone()),
             pending: HashMap::new(),
             record_started: None,
             toast: None,
@@ -174,6 +190,16 @@ impl App {
             shortcut_map,
             window_size: INITIAL_SIZE.into(),
             bar_hovered: false,
+            screen: source,
+            displays: Vec::new(),
+            displays_checked: None,
+            layout: None,
+            positions: cc
+                .storage
+                .and_then(|s| eframe::get_value(s, POSITIONS_STORAGE_KEY))
+                .unwrap_or_default(),
+            position: None,
+            moving_to: None,
         }
     }
 
@@ -330,10 +356,86 @@ impl App {
         }
     }
 
+    /// Remember where the user puts the bar, and restore it when the monitors change.
+    fn track_position(&mut self, ctx: &egui::Context) {
+        let Some(outer) = ctx.input(|i| i.viewport().outer_rect) else {
+            return;
+        };
+        let ppp = ctx.pixels_per_point();
+        let position = (
+            (outer.min.x * ppp).round() as i32,
+            (outer.min.y * ppp).round() as i32,
+        );
+        let moved = self.position != Some(position);
+        self.position = Some(position);
+
+        // The OS moves windows off a removed monitor, so the layout is checked before
+        // any move is taken as the user's: that move must not overwrite the old layout.
+        let poll_due = self
+            .displays_checked
+            .is_none_or(|at| at.elapsed() >= DISPLAY_POLL);
+        if moved || poll_due {
+            self.displays_checked = Some(Instant::now());
+            match self.screen.displays() {
+                Ok(displays) => self.displays = displays,
+                Err(e) => tracing::debug!(error = %e, "display list unavailable"),
+            }
+        }
+        let layout = cb_core::layout_key(&self.displays);
+
+        if self
+            .moving_to
+            .is_some_and(|(to, at)| to == position || at.elapsed() >= MOVE_TIMEOUT)
+        {
+            self.moving_to = None;
+        }
+
+        if self.layout.as_ref() != Some(&layout) {
+            let wanted = self.positions.get(&layout).copied().unwrap_or(position);
+            let target = cb_core::pull_on_screen(self.bar_rect(wanted, ppp), &self.displays);
+            if target != position {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                    target.0 as f32 / ppp,
+                    target.1 as f32 / ppp,
+                )));
+                self.moving_to = Some((target, Instant::now()));
+            }
+            self.layout = Some(layout);
+        } else if moved && self.moving_to.is_none() {
+            self.positions.insert(layout, position);
+        }
+    }
+
+    fn bar_rect(&self, position: (i32, i32), ppp: f32) -> Rect {
+        Rect {
+            x: position.0,
+            y: position.1,
+            width: (self.window_size.x * ppp).ceil() as u32,
+            height: (self.window_size.y * ppp).ceil() as u32,
+        }
+    }
+
+    /// Whether a tooltip band below `used` stays on a display.
+    fn tooltip_band_fits(&self, used: egui::Vec2, ppp: f32) -> bool {
+        self.position.is_none_or(|(x, y)| {
+            let rect = Rect {
+                x,
+                y,
+                width: (used.x * ppp).ceil() as u32,
+                height: ((used.y + cb_ui::TOOLTIP_ROOM) * ppp).ceil() as u32,
+            };
+            cb_core::is_fully_visible(rect, &self.displays)
+        })
+    }
+
     /// Keep the window exactly as large as what is drawn, so nothing but the bar shows.
     fn fit_window(&mut self, ctx: &egui::Context, used: egui::Vec2) {
-        // The open tray gives tooltips enough room already.
-        let tooltip_room = if self.bar_hovered && !self.bar.tray_open {
+        // The open tray gives tooltips enough room already. Off the bottom of a display
+        // a tooltip would be invisible, so there it stays in the window, over the bar.
+        let tooltip_room = if self.bar_hovered
+            && !self.bar.tray_open
+            && self.tooltip_band_fits(used, ctx.pixels_per_point())
+        {
             cb_ui::TOOLTIP_ROOM
         } else {
             0.0
@@ -347,6 +449,20 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, POSITIONS_STORAGE_KEY, &self.positions);
+    }
+
+    /// The bar has no quit button yet, so a killed process should lose little.
+    /// The file is only written when something changed.
+    fn auto_save_interval(&self) -> Duration {
+        Duration::from_secs(5)
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
+
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 0.0] // transparent window: only the bar is visible
     }
@@ -362,6 +478,7 @@ impl eframe::App for App {
             }
         }
         self.poll_captures();
+        self.track_position(ctx);
 
         if let Some(start) = self.record_started {
             self.bar.elapsed_secs = start.elapsed().as_secs();

@@ -217,9 +217,9 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 
 - AC: dragging across monitors with different DPI keeps the bar crisp. Position is restored per display layout after relaunch.
 
-- [ ] Drag via grip with OS move loop
-- [ ] Persist position keyed by monitor-set fingerprint
-- [ ] Handle monitor hot-plug: pull the bar back on-screen
+- [x] Drag via grip with OS move loop
+- [x] Persist position keyed by monitor-set fingerprint — Windows verified; macOS and Linux lack display listing, so they keep one position
+- [x] Handle monitor hot-plug: pull the bar back on-screen — Windows verified; needs display listing on macOS and Linux
 
 **US-2.3** As a user, I want the bar to dock vertically on a screen edge. (M2.5 · FR-3)
 
