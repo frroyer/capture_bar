@@ -45,7 +45,9 @@ only if a spike shows a need.
 - Builds and runs: floating, borderless, transparent, always-on-top bar; mode switch;
   Capture / Record buttons; buffer counter and tray; collapse pill; drag by the grip.
 - Global shortcuts registered (Ctrl+Shift / ⌥⇧ map from M3).
-- Windows: display listing and Display/Region stills work (Windows.Graphics.Capture). Window
+- Bar UI follows M2.1 (vector icons in `crates/ui/src/icons.rs`; shortcuts in tooltips only). The window
+  follows its content and grows while hovered to give tooltips room. The buffer tray is not restyled yet.
+- Windows: the bar is excluded from captures and has no OS frame; display listing and Display/Region stills work (Windows.Graphics.Capture). Window
   capture and `start_stream` are stubs. The US-1.2 spike records MP4 via `windows_spike`; results
   in `docs/spikes/us-1.2-windows.md`.
 - macOS and Linux backends are still **stubs**: captures appear in the buffer, then show
@@ -57,4 +59,6 @@ only if a spike shows a need.
 cargo run -p capture-bar                 # run the bar (debug)
 cargo build -p capture-bar --release     # optimised single binary in target/release
 RUST_LOG=debug cargo run -p capture-bar  # verbose logs (PowerShell: $env:RUST_LOG="debug")
+CB_SHOW_IN_CAPTURE=1 cargo run -p capture-bar  # debug builds only: let screenshots include the bar
+cargo test -p cb-platform --test exclude_from_capture -- --ignored  # Windows, needs a desktop
 ```

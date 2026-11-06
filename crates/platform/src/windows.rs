@@ -14,13 +14,17 @@ use windows::Graphics::Capture::{
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
-use windows::Win32::Foundation::{HMODULE, LPARAM, POINT, RECT, TRUE};
+use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, TRUE, WPARAM};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
     D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
     D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
     D3D11_USAGE_STAGING,
+};
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
@@ -34,12 +38,103 @@ use windows::Win32::System::WinRT::Direct3D11::{
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+use windows::Win32::UI::WindowsAndMessaging::{
+    SetWindowDisplayAffinity, SetWindowPos, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, WDA_EXCLUDEFROMCAPTURE, WM_NCCALCSIZE,
+};
 
 /// How long to wait for the first frame of a capture session.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub(crate) fn platform_err(e: windows::core::Error) -> CaptureError {
     CaptureError::Platform(e.to_string())
+}
+
+fn hwnd_of(window: &impl raw_window_handle::HasWindowHandle) -> CaptureResult<HWND> {
+    let handle = window
+        .window_handle()
+        .map_err(|e| CaptureError::Platform(e.to_string()))?;
+    let raw_window_handle::RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return Err(CaptureError::Platform("not a Win32 window".into()));
+    };
+    Ok(HWND(handle.hwnd.get() as *mut core::ffi::c_void))
+}
+
+/// Call from the thread that owns the window.
+pub(crate) fn exclude_from_capture(
+    window: &impl raw_window_handle::HasWindowHandle,
+) -> CaptureResult<()> {
+    let hwnd = hwnd_of(window)?;
+    // SAFETY: `hwnd` comes from a live window borrowed for this call.
+    unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) }.map_err(platform_err)
+}
+
+/// winit keeps a 1 px strip above the client area of borderless windows, which
+/// shows wherever the bar's rounded corners leave the window transparent. Answering
+/// the message here makes the client area cover the whole window.
+unsafe extern "system" fn fill_window_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    if msg == WM_NCCALCSIZE && wparam.0 != 0 {
+        return LRESULT(0);
+    }
+    // SAFETY: forwards the arguments the system passed in.
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+/// Turns off the drop shadow egui-winit requests for borderless windows, the
+/// strip winit leaves at the top, and Windows 11's rounded clipping, which would
+/// cut the bar's own corners. Call from the thread that owns the window.
+pub(crate) fn remove_window_frame(
+    window: &impl raw_window_handle::HasWindowHandle,
+) -> CaptureResult<()> {
+    let hwnd = hwnd_of(window)?;
+    // SAFETY: `hwnd` comes from a live window; each pointer is valid for its stated size.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY,
+            std::ptr::from_ref(&DWMNCRP_DISABLED).cast(),
+            size_of_val(&DWMNCRP_DISABLED) as u32,
+        )
+        .map_err(platform_err)?;
+        // Windows 10 has no such attribute and no rounding to turn off.
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            std::ptr::from_ref(&DWMWCP_DONOTROUND).cast(),
+            size_of_val(&DWMWCP_DONOTROUND) as u32,
+        );
+        if !SetWindowSubclass(hwnd, Some(fill_window_proc), 1, 0).as_bool() {
+            return Err(CaptureError::Platform("SetWindowSubclass failed".into()));
+        }
+        // Makes Windows ask for the new client area straight away.
+        SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+        .map_err(platform_err)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn system_ui_fonts() -> Option<(Vec<u8>, Vec<u8>)> {
+    let fonts = std::path::PathBuf::from(std::env::var_os("WINDIR")?).join("Fonts");
+    Some((
+        std::fs::read(fonts.join("segoeui.ttf")).ok()?,
+        std::fs::read(fonts.join("seguisb.ttf")).ok()?,
+    ))
 }
 
 /// WinRT and Media Foundation need a multithreaded apartment; keep one alive

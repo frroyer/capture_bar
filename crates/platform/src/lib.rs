@@ -57,6 +57,56 @@ pub fn spike_record(
     }
 }
 
+/// Keep a window out of every screenshot and recording (FR-6).
+///
+/// Windows only for now. macOS excludes the bar through the ScreenCaptureKit
+/// filter once that backend exists. Linux has no exclusion and must hide the
+/// bar while capturing: see `docs/spikes/us-1.2-wayland-bar.md`.
+pub fn exclude_from_capture(
+    window: &impl raw_window_handle::HasWindowHandle,
+) -> cb_core::CaptureResult<()> {
+    #[cfg(windows)]
+    {
+        windows::exclude_from_capture(window)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        Err(cb_core::CaptureError::NotImplemented(
+            "exclude_from_capture",
+        ))
+    }
+}
+
+/// Remove the frame the OS draws around a borderless window, so only what the
+/// app paints is visible. macOS uses `ViewportBuilder::with_has_shadow` instead.
+pub fn remove_window_frame(
+    window: &impl raw_window_handle::HasWindowHandle,
+) -> cb_core::CaptureResult<()> {
+    #[cfg(windows)]
+    {
+        windows::remove_window_frame(window)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        Ok(())
+    }
+}
+
+/// The OS interface font as `(regular, semibold)` file bytes, when it can be
+/// loaded as a file. Not bundled: NFR-15 does not allow the OFL fonts.
+pub fn system_ui_fonts() -> Option<(Vec<u8>, Vec<u8>)> {
+    #[cfg(windows)]
+    {
+        windows::system_ui_fonts()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// The screen source for the current OS.
 pub fn screen_source() -> Box<dyn ScreenSource> {
     #[cfg(target_os = "macos")]

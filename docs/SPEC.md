@@ -208,10 +208,10 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 
 - AC: the bar stays on top when switching apps and over full-screen windows where the OS allows. It never appears in a capture.
 
-- [ ] Borderless transparent always-on-top window (winit) per OS
-- [ ] Exclude the bar from capture (SCK exclusion / SetWindowDisplayAffinity / compositor hint)
-- [ ] Render the bar layout of M2.1 in egui: grip, mode switch, Capture, Record, Buffer, mic, cam, settings, collapse
-- [ ] Hover, pressed and focus states; tooltips with shortcuts
+- [ ] Borderless transparent always-on-top window (winit) per OS — Windows done; macOS and Linux not run
+- [ ] Exclude the bar from capture (SCK exclusion / SetWindowDisplayAffinity / compositor hint) — Windows done (10 1903–1909 untested); macOS waits for its backend; Linux has no exclusion, see `docs/spikes/us-1.2-wayland-bar.md`
+- [x] Render the bar layout of M2.1 in egui: grip, mode switch, Capture, Record, Buffer, mic, cam, settings, collapse
+- [x] Hover, pressed and focus states; tooltips with shortcuts — shortcuts appear in tooltips only, not on button labels, to keep the bar narrow
 
 **US-2.2** As a user, I want to drag the bar anywhere, on any monitor, and find it there next time. (M1, M2.5 · FR-2)
 

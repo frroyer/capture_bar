@@ -36,6 +36,7 @@ pub enum Command {
     RepeatLastRegion,
     ToggleBuffer,
     CopyNewest,
+    OpenSettings,
     Cancel,
 }
 
