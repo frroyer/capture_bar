@@ -1,0 +1,10 @@
+[package]
+name = "cb-buffer"
+description = "The non-blocking capture buffer (Epic E6)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cb-core.workspace = true
+serde.workspace = true

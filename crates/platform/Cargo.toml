@@ -1,0 +1,15 @@
+[package]
+name = "cb-platform"
+description = "OS backends implementing the cb-core traits (macOS, Windows, Linux)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cb-core.workspace = true
+tracing.workspace = true
+
+# Per-OS native bindings are added here during the E1 spikes (US-1.2), e.g.:
+# [target.'cfg(target_os = "macos")'.dependencies]   objc2 + ScreenCaptureKit bindings
+# [target.'cfg(windows)'.dependencies]                windows (Graphics.Capture, Media Foundation)
+# [target.'cfg(target_os = "linux")'.dependencies]   x11rb, ashpd (portals), pipewire

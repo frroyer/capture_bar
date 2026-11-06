@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "app",
+    "crates/core",
+    "crates/buffer",
+    "crates/capture",
+    "crates/encode",
+    "crates/platform",
+    "crates/ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[workspace.dependencies]
+cb-core = { path = "crates/core" }
+cb-buffer = { path = "crates/buffer" }
+cb-capture = { path = "crates/capture" }
+cb-encode = { path = "crates/encode" }
+cb-platform = { path = "crates/platform" }
+cb-ui = { path = "crates/ui" }
+
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+crossbeam-channel = "0.5"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+directories = "6"
+png = "0.18"
+arboard = "3"
+egui = "0.37"
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+global-hotkey = "0.9"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+strip = true
+panic = "abort"

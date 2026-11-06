@@ -1,0 +1,10 @@
+[package]
+name = "cb-core"
+description = "Shared types, commands and platform traits for Capture Bar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true

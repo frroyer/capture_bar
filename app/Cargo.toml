@@ -1,0 +1,23 @@
+[package]
+name = "capture-bar"
+description = "Capture Bar — one permanent, movable bar for screenshots and recordings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "capture-bar"
+path = "src/main.rs"
+
+[dependencies]
+cb-core.workspace = true
+cb-buffer.workspace = true
+cb-capture.workspace = true
+cb-encode.workspace = true
+cb-platform.workspace = true
+cb-ui.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+eframe.workspace = true
+global-hotkey.workspace = true
