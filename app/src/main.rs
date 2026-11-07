@@ -91,6 +91,20 @@ fn points_for_pixel(pixel: i32, ppp: f32) -> f32 {
     (pixel as f32 + nudge) / ppp
 }
 
+/// Whether to ask for `wanted` as the window size. Asking once is not enough: on Windows the
+/// end of a drag puts back the size the window had when the drag began, which would leave a
+/// bar undocked from a side clipped until its size changed again.
+fn needs_resize(
+    wanted: egui::Vec2,
+    requested: egui::Vec2,
+    actual: Option<egui::Vec2>,
+    dragging: bool,
+) -> bool {
+    // Within a point: the size comes back from whole pixels.
+    let off = |size: egui::Vec2| (size - wanted).abs().max_elem() >= 1.0;
+    wanted != requested || (!dragging && actual.is_some_and(off))
+}
+
 /// The opacity of everything (hide and show), and of the bar on top of that (fade),
 /// easing towards where they should be. Requests its own repaints while moving.
 fn animated_opacity(ctx: &egui::Context, hidden: bool, cursor_near: bool) -> (f32, f32) {
@@ -963,7 +977,8 @@ impl App {
     /// wherever it sits inside the window.
     fn place_window(&mut self, ctx: &egui::Context, used: egui::Vec2) {
         let size = used.ceil();
-        if size != self.window_size {
+        let actual = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
+        if needs_resize(size, self.window_size, actual, self.dragging) {
             self.window_size = size;
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         }
@@ -1159,6 +1174,27 @@ mod tests {
         }
         let ids: std::collections::HashSet<_> = map.iter().map(|(hk, _)| hk.id()).collect();
         assert_eq!(ids.len(), map.len(), "two actions share a key");
+    }
+
+    #[test]
+    fn a_size_the_os_put_back_is_asked_for_again() {
+        let wanted = egui::vec2(1000.0, 230.0);
+        let docked = egui::vec2(700.0, 500.0);
+        assert!(
+            needs_resize(wanted, docked, Some(docked), false),
+            "new size"
+        );
+        assert!(
+            needs_resize(wanted, wanted, Some(docked), false),
+            "the end of the drag undid it"
+        );
+        assert!(
+            !needs_resize(wanted, wanted, Some(docked), true),
+            "mid-drag"
+        );
+        let rounded = wanted - egui::vec2(0.4, 0.8);
+        assert!(!needs_resize(wanted, wanted, Some(rounded), false));
+        assert!(!needs_resize(wanted, wanted, None, false));
     }
 
     #[test]
