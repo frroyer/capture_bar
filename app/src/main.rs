@@ -23,6 +23,7 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 const INITIAL_SIZE: [f32; 2] = [900.0, 54.0];
 const PLACEMENTS_STORAGE_KEY: &str = "bar_placements";
 const MODE_STORAGE_KEY: &str = "capture_mode";
+const REGION_STORAGE_KEY: &str = "last_region";
 /// FR-3: a drop this close to an edge docks the bar.
 const SNAP_DISTANCE: f32 = 24.0;
 /// How far a docked bar sits from the edge, in points.
@@ -175,6 +176,7 @@ struct App {
     /// The desktop grab an overlay is waiting for, and that overlay's mode.
     overlay_request: Option<(u64, CaptureMode)>,
     overlay: Option<Overlay>,
+    last_region: Option<Rect>,
     record_started: Option<Instant>,
     toast: Option<Toast>,
     captures_dir: PathBuf,
@@ -310,6 +312,9 @@ impl App {
             pending: HashMap::new(),
             overlay_request: None,
             overlay: None,
+            last_region: cc
+                .storage
+                .and_then(|s| eframe::get_value(s, REGION_STORAGE_KEY)),
             record_started: None,
             toast,
             captures_dir,
@@ -362,20 +367,10 @@ impl App {
         }
         match mode {
             CaptureMode::Screen => self.capture_still(mode, self.screen_target()),
-            CaptureMode::Window => {
+            CaptureMode::Window | CaptureMode::Region => {
                 let request = self.capture.request_still(CaptureTarget::Desktop);
                 self.overlay_request = Some((request, mode));
             }
-            // TODO(US-4.2): open the region overlay first.
-            CaptureMode::Region => self.capture_still(
-                mode,
-                CaptureTarget::Region(Rect {
-                    x: 0,
-                    y: 0,
-                    width: 800,
-                    height: 600,
-                }),
-            ),
         }
     }
 
@@ -390,7 +385,13 @@ impl App {
             tracing::warn!(error = %e, "window list unavailable");
             Vec::new()
         });
-        self.overlay = Some(Overlay::new(mode, desktop, origin, windows));
+        self.overlay = Some(Overlay::new(
+            mode,
+            desktop,
+            origin,
+            windows,
+            self.last_region,
+        ));
     }
 
     fn show_overlay(&mut self, ctx: &egui::Context) {
@@ -404,6 +405,19 @@ impl App {
             Some(OverlayResult::Window(id)) => {
                 self.overlay = None;
                 self.capture_still(mode, CaptureTarget::Window(id));
+            }
+            Some(OverlayResult::Region { rect, record }) => {
+                let frame = overlay.crop(rect);
+                self.overlay = None;
+                self.last_region = Some(rect);
+                match frame {
+                    _ if record => self.flash("Recording a region: not implemented yet (US-5.1)"),
+                    Some(frame) => {
+                        let item = self.add_capture(mode);
+                        self.store(item, frame);
+                    }
+                    None => self.flash("Capture failed: the region is off screen"),
+                }
             }
         }
     }
@@ -420,7 +434,12 @@ impl App {
             Command::TogglePause => self.flash("Pause: not implemented yet (US-5.2)"),
             Command::ToggleBuffer => self.bar.tray_open = !self.bar.tray_open,
             Command::ToggleBar => self.hidden = !self.hidden,
-            Command::RepeatLastRegion => self.begin_capture(CaptureMode::Region),
+            Command::RepeatLastRegion => match self.last_region {
+                Some(rect) if self.overlay.is_none() => {
+                    self.capture_still(CaptureMode::Region, CaptureTarget::Region(rect));
+                }
+                _ => self.begin_capture(CaptureMode::Region),
+            },
             Command::CopyNewest => self.copy_newest(),
             Command::OpenSettings => self.flash("Settings: not implemented yet (US-8.2)"),
             Command::Cancel => {}
@@ -429,14 +448,19 @@ impl App {
 
     /// FR-20: the item appears in the buffer immediately; the frame arrives later.
     fn capture_still(&mut self, mode: CaptureMode, target: CaptureTarget) {
+        let item = self.add_capture(mode);
+        let req = self.capture.request_still(target);
+        self.pending.insert(req, item);
+    }
+
+    fn add_capture(&mut self, mode: CaptureMode) -> ItemId {
         let item = self.buffer.push(ItemKind::Image, mode);
         if let Some(i) = self.buffer.get_mut(item) {
             i.state = ItemState::Encoding { progress_pct: 0 };
         }
-        let req = self.capture.request_still(target);
-        self.pending.insert(req, item);
         let message = format!("Added to buffer · {}", self.buffer.len());
         self.toast = Some(Toast::new(message, Some(item)));
+        item
     }
 
     fn copy_newest(&mut self) {
@@ -852,6 +876,7 @@ impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, PLACEMENTS_STORAGE_KEY, &self.placements);
         eframe::set_value(storage, MODE_STORAGE_KEY, &self.bar.mode);
+        eframe::set_value(storage, REGION_STORAGE_KEY, &self.last_region);
     }
 
     /// The bar has no quit button yet, so a killed process should lose little.

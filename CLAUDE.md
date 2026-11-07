@@ -51,8 +51,8 @@ only if a spike shows a need.
 - Bar position and dock are saved per monitor layout through eframe storage and pulled back on-screen when
   monitors change. The bar docks to screen edges, vertical on left and right. `App::bar_pos` is the source of
   truth; the window follows it, because the tray, toast and tooltip band open on whichever side has room.
-- Windows: the bar is excluded from captures and has no OS frame; display listing and Display/Region stills work (Windows.Graphics.Capture). Window
-  capture and `start_stream` are stubs. The US-1.2 spike records MP4 via `windows_spike`; results
+- Screenshots work on Windows (Windows.Graphics.Capture): Screen takes the monitor under the cursor; Window and Region open one overlay window across all monitors, over a frozen image. Each capture goes to the buffer, the clipboard and a PNG in `~/Captures` on a worker thread, with an Undo toast. The buffer tray has no thumbnails yet (US-6.3) and the buffer does not survive a restart (US-6.1).
+- Windows: the bar is excluded from captures and has no OS frame. `start_stream` is a stub. The US-1.2 spike records MP4 via `windows_spike`; results
   in `docs/spikes/us-1.2-windows.md`.
 - macOS and Linux backends are still **stubs**: captures appear in the buffer, then show
   "not implemented on this platform yet". Next step is the rest of **US-1.2** (macOS, Linux spikes).

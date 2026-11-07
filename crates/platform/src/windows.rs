@@ -587,6 +587,17 @@ impl ScreenSource for WinScreenSource {
         let (monitor, region) = match target {
             CaptureTarget::Display(id) => (resolve_display(*id)?, None),
             CaptureTarget::Region(rect) => {
+                let displays = self.displays()?;
+                if displays.iter().filter(|d| d.bounds.overlaps(rect)).count() > 1 {
+                    let desktop = desktop_bounds(&displays)
+                        .ok_or_else(|| CaptureError::Platform("no display".into()))?;
+                    return crop(
+                        &self.grab(&CaptureTarget::Desktop)?,
+                        (desktop.x, desktop.y),
+                        *rect,
+                    )
+                    .ok_or_else(|| CaptureError::Platform("region is off screen".into()));
+                }
                 let r = RECT {
                     left: rect.x,
                     top: rect.y,

@@ -1,4 +1,4 @@
-//! The full-desktop overlay over a frozen image of the screens (M2.4, FR-9).
+//! The full-desktop overlay over a frozen image of the screens (M2.4, FR-8, FR-9).
 
 use cb_core::{window_at, CaptureMode, Rect, WindowId, WindowInfo};
 use egui::{
@@ -10,12 +10,146 @@ use egui::{
 use crate::palette;
 
 const DIM: Color32 = Color32::from_black_alpha(120);
+/// How close to a handle the pointer has to be, in points.
+const HANDLE_REACH: f32 = 8.0;
+const HANDLE_SIZE: f32 = 8.0;
 
 /// What the user decided, which ends the overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlayResult {
     Cancelled,
     Window(WindowId),
+    /// A selection in global pixels, to capture or to record.
+    Region {
+        rect: Rect,
+        record: bool,
+    },
+}
+
+/// Which sides of the selection a handle moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Edges {
+    left: bool,
+    right: bool,
+    top: bool,
+    bottom: bool,
+}
+
+const fn edges(left: bool, right: bool, top: bool, bottom: bool) -> Edges {
+    Edges {
+        left,
+        right,
+        top,
+        bottom,
+    }
+}
+
+/// The eight handles, with their position as fractions of the selection.
+const HANDLES: [(Edges, f32, f32); 8] = [
+    (edges(true, false, true, false), 0.0, 0.0),
+    (edges(false, false, true, false), 0.5, 0.0),
+    (edges(false, true, true, false), 1.0, 0.0),
+    (edges(true, false, false, false), 0.0, 0.5),
+    (edges(false, true, false, false), 1.0, 0.5),
+    (edges(true, false, false, true), 0.0, 1.0),
+    (edges(false, false, false, true), 0.5, 1.0),
+    (edges(false, true, false, true), 1.0, 1.0),
+];
+
+/// What a drag is doing, from where it started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Grab {
+    New((i32, i32)),
+    Move { from: (i32, i32), rect: Rect },
+    Resize { rect: Rect, edges: Edges },
+}
+
+/// A rectangle from two opposite corners, at least one pixel in size.
+fn from_corners(a: (i32, i32), b: (i32, i32)) -> Rect {
+    Rect {
+        x: a.0.min(b.0),
+        y: a.1.min(b.1),
+        width: a.0.abs_diff(b.0).max(1),
+        height: a.1.abs_diff(b.1).max(1),
+    }
+}
+
+/// The selection `grab` gives with the pointer at `at`. `lock` is ⇧: a new selection
+/// is square and a resized one keeps its proportions (FR-8).
+fn drag_to(grab: Grab, at: (i32, i32), lock: bool) -> Rect {
+    match grab {
+        Grab::New(anchor) => {
+            if !lock {
+                return from_corners(anchor, at);
+            }
+            let side = anchor.0.abs_diff(at.0).max(anchor.1.abs_diff(at.1)) as i32;
+            let corner = (
+                anchor.0 + side * (at.0 - anchor.0).signum(),
+                anchor.1 + side * (at.1 - anchor.1).signum(),
+            );
+            from_corners(anchor, corner)
+        }
+        Grab::Move { from, rect } => Rect {
+            x: rect.x + at.0 - from.0,
+            y: rect.y + at.1 - from.1,
+            ..rect
+        },
+        Grab::Resize { rect, edges } => {
+            let right = rect.x + rect.width as i32;
+            let bottom = rect.y + rect.height as i32;
+            let x0 = if edges.left { at.0 } else { rect.x };
+            let x1 = if edges.right { at.0 } else { right };
+            let y0 = if edges.top { at.1 } else { rect.y };
+            let y1 = if edges.bottom { at.1 } else { bottom };
+            let free = from_corners((x0, y0), (x1, y1));
+            if !lock {
+                return free;
+            }
+            let ratio = rect.width as f32 / rect.height.max(1) as f32;
+            let horizontal = edges.left || edges.right;
+            let (width, height) = if horizontal {
+                (
+                    free.width,
+                    ((free.width as f32 / ratio).round() as u32).max(1),
+                )
+            } else {
+                (
+                    ((free.height as f32 * ratio).round() as u32).max(1),
+                    free.height,
+                )
+            };
+            // The side or corner opposite the handle stays where it is.
+            let x = if edges.left {
+                right - width as i32
+            } else {
+                rect.x
+            };
+            let y = if edges.top {
+                bottom - height as i32
+            } else {
+                rect.y
+            };
+            Rect {
+                x,
+                y,
+                width,
+                height,
+            }
+        }
+    }
+}
+
+/// `rect` moved just far enough to be inside `area`, without resizing it if it fits.
+fn keep_inside(rect: Rect, area: Rect) -> Rect {
+    let fit = |pos: i32, size: u32, start: i32, room: u32| {
+        pos.clamp(start, start + room.saturating_sub(size) as i32)
+    };
+    Rect {
+        x: fit(rect.x, rect.width, area.x, area.width),
+        y: fit(rect.y, rect.height, area.y, area.height),
+        width: rect.width.min(area.width),
+        height: rect.height.min(area.height),
+    }
 }
 
 pub struct Overlay {
@@ -26,6 +160,9 @@ pub struct Overlay {
     windows: Vec<WindowInfo>,
     texture: Option<TextureHandle>,
     focused: bool,
+    selection: Option<Rect>,
+    grab: Option<Grab>,
+    last_region: Option<Rect>,
 }
 
 /// A window position to global physical pixels.
@@ -87,6 +224,7 @@ impl Overlay {
         desktop: cb_core::Frame,
         origin: (i32, i32),
         windows: Vec<WindowInfo>,
+        last_region: Option<Rect>,
     ) -> Self {
         Self {
             mode,
@@ -95,11 +233,28 @@ impl Overlay {
             windows,
             texture: None,
             focused: false,
+            selection: None,
+            grab: None,
+            last_region,
         }
     }
 
     pub fn mode(&self) -> CaptureMode {
         self.mode
+    }
+
+    /// The pixels of a selection: what was on screen when the overlay opened.
+    pub fn crop(&self, rect: Rect) -> Option<cb_core::Frame> {
+        cb_core::crop(&self.desktop, self.origin, rect)
+    }
+
+    fn area(&self) -> Rect {
+        Rect {
+            x: self.origin.0,
+            y: self.origin.1,
+            width: self.desktop.width,
+            height: self.desktop.height,
+        }
     }
 
     /// Draw it in its own OS window. Call each frame until it returns a result.
@@ -145,12 +300,20 @@ impl Overlay {
     }
 
     fn draw(&mut self, ui: &mut Ui, texture: &TextureHandle) -> Option<OverlayResult> {
-        let ppp = ui.ctx().pixels_per_point();
         let screen = ui.max_rect();
         // One image pixel per screen pixel: an `Image` widget would read pixels as points.
         let whole = egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
         ui.painter()
             .image(texture.id(), screen, whole, Color32::WHITE);
+        if self.mode == CaptureMode::Region {
+            self.draw_region(ui, screen)
+        } else {
+            self.draw_window(ui, screen)
+        }
+    }
+
+    fn draw_window(&mut self, ui: &mut Ui, screen: egui::Rect) -> Option<OverlayResult> {
+        let ppp = ui.ctx().pixels_per_point();
         let response = ui.interact(screen, ui.scope_id().with("overlay"), Sense::click());
         ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
 
@@ -171,9 +334,7 @@ impl Overlay {
             let at = rect.left_top() + vec2(8.0, 8.0);
             paint_label(painter, screen, at, Align2::LEFT_TOP, &window.title);
         }
-        let hint = "Click a window to capture it  ·  Esc cancels";
-        let top = screen.center_top() + vec2(0.0, 16.0);
-        paint_label(painter, screen, top, Align2::CENTER_TOP, hint);
+        paint_hints(painter, screen, &["Click a window", "Esc cancel"]);
 
         if ui.input(|i| i.key_pressed(Key::Escape)) || response.secondary_clicked() {
             return Some(OverlayResult::Cancelled);
@@ -183,11 +344,266 @@ impl Overlay {
         }
         None
     }
+
+    /// What a press at `pos` starts: a handle, a move, or a new selection.
+    fn grab_at(&self, pos: Pos2, ppp: f32) -> Grab {
+        let at = to_global(pos, ppp, self.origin);
+        let Some(rect) = self.selection else {
+            return Grab::New(at);
+        };
+        let local = to_local(rect, ppp, self.origin);
+        let handle = HANDLES.iter().find(|(_, fx, fy)| {
+            let center = local.min + local.size() * vec2(*fx, *fy);
+            center.distance(pos) <= HANDLE_REACH
+        });
+        match handle {
+            Some((edges, ..)) => Grab::Resize {
+                rect,
+                edges: *edges,
+            },
+            None if local.contains(pos) => Grab::Move { from: at, rect },
+            None => Grab::New(at),
+        }
+    }
+
+    fn draw_region(&mut self, ui: &mut Ui, screen: egui::Rect) -> Option<OverlayResult> {
+        let ppp = ui.ctx().pixels_per_point();
+        let response = ui.interact(
+            screen,
+            ui.scope_id().with("overlay"),
+            Sense::click_and_drag(),
+        );
+        let lock = ui.input(|i| i.modifiers.shift);
+
+        if response.drag_started() {
+            let start = ui.input(|i| i.pointer.press_origin());
+            self.grab = start.map(|pos| self.grab_at(pos, ppp));
+        }
+        if let (Some(grab), Some(pos)) = (self.grab, response.interact_pointer_pos()) {
+            let rect = drag_to(grab, to_global(pos, ppp, self.origin), lock);
+            let area = self.area();
+            self.selection = match grab {
+                Grab::Move { .. } => Some(keep_inside(rect, area)),
+                _ => rect.clamped_to(area),
+            };
+        }
+        if response.drag_stopped() {
+            self.grab = None;
+        }
+        let hover = response.hover_pos();
+        let hovered_window =
+            hover.and_then(|pos| window_at(to_global(pos, ppp, self.origin), &self.windows));
+        if response.clicked() {
+            // A click without a drag snaps to the window under it (FR-8).
+            let on_selection =
+                hover.is_some_and(|pos| !matches!(self.grab_at(pos, ppp), Grab::New(_)));
+            if !on_selection {
+                self.selection = hovered_window.map(|w| w.bounds).or(self.selection);
+            }
+        }
+
+        ui.ctx().set_cursor_icon(match (self.grab, hover) {
+            (None, Some(pos)) => match self.grab_at(pos, ppp) {
+                Grab::Move { .. } => CursorIcon::Move,
+                Grab::Resize { edges, .. } => resize_cursor(edges),
+                Grab::New(_) => CursorIcon::Crosshair,
+            },
+            (Some(Grab::Move { .. }), _) => CursorIcon::Grabbing,
+            (Some(Grab::Resize { edges, .. }), _) => resize_cursor(edges),
+            _ => CursorIcon::Crosshair,
+        });
+
+        let painter = ui.painter();
+        let snap_hint = (self.selection.is_none() && self.grab.is_none())
+            .then_some(hovered_window)
+            .flatten();
+        if let Some(rect) = self.selection {
+            let local = to_local(rect, ppp, self.origin);
+            paint_dim(painter, screen, Some(local));
+            painter.rect_stroke(
+                local,
+                0.0,
+                Stroke::new(1.5, palette::ACCENT),
+                StrokeKind::Outside,
+            );
+            for (_, fx, fy) in HANDLES {
+                let center = local.min + local.size() * vec2(fx, fy);
+                let handle = egui::Rect::from_center_size(center, vec2(HANDLE_SIZE, HANDLE_SIZE));
+                painter.rect_filled(handle, 2.0, Color32::WHITE);
+                painter.rect_stroke(
+                    handle,
+                    2.0,
+                    Stroke::new(1.0, palette::ACCENT),
+                    StrokeKind::Outside,
+                );
+            }
+            let size = format!("{} × {} px", rect.width, rect.height);
+            let at = local.left_top() - vec2(0.0, 8.0);
+            paint_label(painter, screen, at, Align2::LEFT_BOTTOM, &size);
+        } else if let Some(window) = snap_hint {
+            let local = to_local(window.bounds, ppp, self.origin);
+            paint_dim(painter, screen, Some(local));
+            painter.rect_stroke(
+                local,
+                0.0,
+                Stroke::new(1.0, palette::ACCENT),
+                StrokeKind::Inside,
+            );
+        } else {
+            paint_dim(painter, screen, None);
+        }
+        paint_hints(
+            painter,
+            screen,
+            &[
+                "Drag to select",
+                "Click a window",
+                "Enter capture",
+                "R record",
+                "Space last region",
+                "Shift lock ratio",
+                "Esc cancel",
+            ],
+        );
+
+        if ui.input(|i| i.key_pressed(Key::Escape)) || response.secondary_clicked() {
+            return Some(OverlayResult::Cancelled);
+        }
+        if ui.input(|i| i.key_pressed(Key::Space)) {
+            if let Some(last) = self.last_region.and_then(|r| r.clamped_to(self.area())) {
+                self.selection = Some(last);
+            }
+        }
+        let rect = self.selection?;
+        if ui.input(|i| i.key_pressed(Key::Enter)) {
+            return Some(OverlayResult::Region {
+                rect,
+                record: false,
+            });
+        }
+        ui.input(|i| i.key_pressed(Key::R))
+            .then_some(OverlayResult::Region { rect, record: true })
+    }
+}
+
+fn resize_cursor(edges: Edges) -> CursorIcon {
+    match (edges.left || edges.right, edges.top || edges.bottom) {
+        (true, false) => CursorIcon::ResizeHorizontal,
+        (false, true) => CursorIcon::ResizeVertical,
+        _ if edges.left == edges.top => CursorIcon::ResizeNwSe,
+        _ => CursorIcon::ResizeNeSw,
+    }
+}
+
+/// The key hints, as a row of chips along the top of the screen.
+fn paint_hints(painter: &Painter, screen: egui::Rect, hints: &[&str]) {
+    let font = FontId::new(13.0, FontFamily::Proportional);
+    let galleys: Vec<_> = hints
+        .iter()
+        .map(|hint| painter.layout_no_wrap((*hint).to_owned(), font.clone(), palette::TEXT))
+        .collect();
+    let (pad, gap) = (vec2(16.0, 8.0), 6.0);
+    let total: f32 = galleys
+        .iter()
+        .map(|g| g.size().x + pad.x + gap)
+        .sum::<f32>()
+        - gap;
+    let mut x = screen.center().x - total / 2.0;
+    let y = screen.top() + 16.0;
+    for galley in galleys {
+        let rect = egui::Rect::from_min_size(pos2(x, y), galley.size() + pad);
+        painter.rect_filled(rect, 6.0, palette::BAR);
+        x += rect.width() + gap;
+        painter.galley(rect.min + pad / 2.0, galley, palette::TEXT);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rect(x: i32, y: i32, width: u32, height: u32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn a_new_selection_works_in_every_direction() {
+        let grab = Grab::New((100, 100));
+        assert_eq!(drag_to(grab, (150, 180), false), rect(100, 100, 50, 80));
+        assert_eq!(drag_to(grab, (50, 20), false), rect(50, 20, 50, 80));
+        assert_eq!(drag_to(grab, (100, 100), false), rect(100, 100, 1, 1));
+    }
+
+    #[test]
+    fn shift_makes_a_new_selection_square_in_the_drag_direction() {
+        let grab = Grab::New((100, 100));
+        assert_eq!(drag_to(grab, (150, 180), true), rect(100, 100, 80, 80));
+        assert_eq!(drag_to(grab, (50, 20), true), rect(20, 20, 80, 80));
+    }
+
+    #[test]
+    fn handles_move_only_their_sides_and_can_cross_over() {
+        let start = rect(100, 100, 200, 100);
+        let resize = |handle: usize, at| {
+            let grab = Grab::Resize {
+                rect: start,
+                edges: HANDLES[handle].0,
+            };
+            drag_to(grab, at, false)
+        };
+        assert_eq!(resize(0, (50, 80)), rect(50, 80, 250, 120), "top left");
+        assert_eq!(resize(4, (350, 999)), rect(100, 100, 250, 100), "right");
+        assert_eq!(resize(6, (999, 250)), rect(100, 100, 200, 150), "bottom");
+        assert_eq!(
+            resize(4, (50, 0)),
+            rect(50, 100, 50, 100),
+            "right past left"
+        );
+    }
+
+    #[test]
+    fn shift_keeps_proportions_and_the_opposite_corner_when_resizing() {
+        let start = rect(100, 100, 200, 100);
+        let locked = |handle: usize, at| {
+            let grab = Grab::Resize {
+                rect: start,
+                edges: HANDLES[handle].0,
+            };
+            drag_to(grab, at, true)
+        };
+        assert_eq!(
+            locked(7, (500, 110)),
+            rect(100, 100, 400, 200),
+            "bottom right"
+        );
+        assert_eq!(
+            locked(0, (0, 90)),
+            rect(0, 50, 300, 150),
+            "top left, corner fixed"
+        );
+        assert_eq!(locked(6, (0, 300)), rect(100, 100, 400, 200), "bottom");
+    }
+
+    #[test]
+    fn moving_keeps_the_size_and_stays_on_the_desktop() {
+        let area = rect(-100, 0, 1000, 500);
+        let grab = Grab::Move {
+            from: (10, 10),
+            rect: rect(0, 0, 200, 100),
+        };
+        let moved = drag_to(grab, (30, 50), false);
+        assert_eq!(moved, rect(20, 40, 200, 100));
+        assert_eq!(keep_inside(moved, area), moved);
+        let too_far = drag_to(grab, (5000, 5000), false);
+        assert_eq!(keep_inside(too_far, area), rect(700, 400, 200, 100));
+        let off_left = drag_to(grab, (-5000, 10), false);
+        assert_eq!(keep_inside(off_left, area), rect(-100, 0, 200, 100));
+    }
 
     #[test]
     fn global_and_local_agree_at_fractional_scales_and_negative_origins() {

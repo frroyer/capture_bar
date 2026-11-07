@@ -265,9 +265,9 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 
 - AC: the overlay shows dimensions and handles; Enter, R, Space, Esc and ⇧ behave as in M2.4, across all monitors.
 
-- [ ] Full-screen overlay per monitor with frozen-frame background
-- [ ] Handles, aspect lock, window snap
-- [ ] Key hints chip row
+- [x] Full-screen overlay with frozen-frame background — one window across all monitors, not one per monitor; Windows verified on one monitor
+- [x] Handles, aspect lock, window snap — R only reports that recording waits for US-5.1
+- [x] Key hints chip row — built from the M2.4 description without the artboard
 
 **US-4.3** As a user, I want to capture a window or a whole screen in one click. (M1 · FR-9, FR-10)
 

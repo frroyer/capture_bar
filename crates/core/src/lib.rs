@@ -66,6 +66,25 @@ impl Rect {
         w.max(0) * h.max(0)
     }
 
+    pub fn overlaps(&self, other: &Self) -> bool {
+        self.overlap_area(other) > 0
+    }
+
+    /// The part inside `area`, if any.
+    pub fn clamped_to(&self, area: Self) -> Option<Self> {
+        let right = (i64::from(self.x) + i64::from(self.width))
+            .min(i64::from(area.x) + i64::from(area.width));
+        let bottom = (i64::from(self.y) + i64::from(self.height))
+            .min(i64::from(area.y) + i64::from(area.height));
+        let (x, y) = (self.x.max(area.x), self.y.max(area.y));
+        (right > i64::from(x) && bottom > i64::from(y)).then(|| Self {
+            x,
+            y,
+            width: (right - i64::from(x)) as u32,
+            height: (bottom - i64::from(y)) as u32,
+        })
+    }
+
     /// Squared distance between centres, to pick the nearest of several rectangles.
     fn center_distance(&self, other: &Self) -> i64 {
         let center = |r: &Self| {
@@ -181,6 +200,36 @@ pub fn stitch(parts: &[(Rect, Frame)], desktop: Rect) -> Frame {
         rgba,
         captured_at: SystemTime::now(),
     }
+}
+
+/// The part of a desktop image at `rect`, in global pixels. `origin` is where the image
+/// starts on the desktop. `None` when `rect` is outside the image.
+pub fn crop(desktop: &Frame, origin: (i32, i32), rect: Rect) -> Option<Frame> {
+    let area = Rect {
+        x: origin.0,
+        y: origin.1,
+        width: desktop.width,
+        height: desktop.height,
+    };
+    let rect = rect.clamped_to(area)?;
+    let left = (i64::from(rect.x) - i64::from(origin.0)) as usize * 4;
+    let top = (i64::from(rect.y) - i64::from(origin.1)) as usize;
+    let row_bytes = rect.width as usize * 4;
+    let mut rgba = Vec::with_capacity(row_bytes * rect.height as usize);
+    for line in desktop
+        .rgba
+        .chunks_exact(desktop.width as usize * 4)
+        .skip(top)
+        .take(rect.height as usize)
+    {
+        rgba.extend_from_slice(&line[left..left + row_bytes]);
+    }
+    Some(Frame {
+        width: rect.width,
+        height: rect.height,
+        rgba,
+        captured_at: desktop.captured_at,
+    })
 }
 
 /// A screen edge the bar can dock to (FR-3).
@@ -539,6 +588,31 @@ mod tests {
         assert_eq!(red, [0, 200, 200, 100, 200, 200]);
         assert!(out.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
         assert!(desktop_bounds(&[]).is_none());
+    }
+
+    #[test]
+    fn crop_takes_the_right_pixels_with_a_negative_origin_and_clamps() {
+        // 3x2 image at (-1, 10), each pixel's red value being its index.
+        let desktop = Frame {
+            width: 3,
+            height: 2,
+            rgba: (0..6u8).flat_map(|i| [i, 0, 0, 255]).collect(),
+            captured_at: SystemTime::now(),
+        };
+        let rect = |x, y, width, height| Rect {
+            x,
+            y,
+            width,
+            height,
+        };
+        let red = |f: Frame| f.rgba.iter().step_by(4).copied().collect::<Vec<u8>>();
+        let middle = crop(&desktop, (-1, 10), rect(0, 10, 2, 2)).unwrap();
+        assert_eq!((middle.width, middle.height), (2, 2));
+        assert_eq!(red(middle), [1, 2, 4, 5]);
+        let clamped = crop(&desktop, (-1, 10), rect(1, 11, 50, 50)).unwrap();
+        assert_eq!((clamped.width, clamped.height), (1, 1));
+        assert_eq!(red(clamped), [5]);
+        assert!(crop(&desktop, (-1, 10), rect(500, 500, 2, 2)).is_none());
     }
 
     #[test]
