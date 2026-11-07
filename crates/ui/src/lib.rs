@@ -63,6 +63,8 @@ pub struct BarOutput {
     pub toggle_mic: bool,
     pub toggle_cam: bool,
     pub collapse: bool,
+    /// The collapsed pill was clicked: back to the full bar.
+    pub expand: bool,
     /// The pointer is on the bar, so a tooltip may be about to open.
     pub hovered: bool,
     pub grip_double_clicked: bool,
@@ -283,6 +285,77 @@ fn fmt_time(secs: u64) -> String {
     format!("{:02}:{:02}", secs / 60, secs % 60)
 }
 
+/// The bar's outline colour for the current state.
+fn border_color(state: &BarState) -> Color32 {
+    if state.snap_preview {
+        palette::ACCENT
+    } else if state.recording {
+        palette::RECORD
+    } else {
+        palette::BORDER
+    }
+}
+
+/// Drag to move, double-click to dock.
+fn grip(ui: &mut Ui, vertical: bool, out: &mut BarOutput) {
+    let (size, icon) = if vertical {
+        (vec2(H, 22.0), Icon::GripWide)
+    } else {
+        (vec2(22.0, H), Icon::Grip)
+    };
+    let (rect, grip) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    icons::paint(ui.painter(), rect.center(), icon, palette::MUTED);
+    let grip = grip.on_hover_cursor(CursorIcon::Grab);
+    show_tooltip(&grip, "Drag to move. Double-click to dock");
+    if grip.drag_started() {
+        out.start_drag = true;
+    }
+    if grip.double_clicked() {
+        out.grip_double_clicked = true;
+    }
+}
+
+/// Draw the collapsed pill (M2.3): the count, and the time while recording.
+pub fn pill(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
+    use palette::*;
+    let mut out = BarOutput::default();
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(Id::NULL, state.tooltip_side));
+    let frame = Frame::new()
+        .fill(BAR)
+        .stroke(Stroke::new(1.0, border_color(state)))
+        .corner_radius(CornerRadius::same(24))
+        .inner_margin(Margin::same(5))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                grip(ui, false, &mut out);
+                let count = buffer.len().to_string();
+                let badge = if buffer.is_empty() { SELECTED } else { ACCENT };
+                let time = fmt_time(state.elapsed_secs);
+                let [first, second] = if state.recording {
+                    [Piece::Tinted(Icon::RecordDot, RECORD), Piece::Text(&time)]
+                } else {
+                    [Piece::Icon(Icon::Layers), Piece::Text("Capture Bar")]
+                };
+                if chip(
+                    ui,
+                    &[first, second, Piece::Badge(&count, badge)],
+                    &ChipStyle::new(Color32::TRANSPARENT, TEXT),
+                    "Expand the bar",
+                )
+                .clicked()
+                {
+                    out.expand = true;
+                }
+            });
+        });
+    out.hovered = ui.rect_contains_pointer(frame.response.rect);
+    out.top_left = frame.response.rect.min.to_vec2();
+    out.size = frame.response.rect.size();
+    out
+}
+
 /// Draw the full bar (M2.1) or the recording bar (M2.2).
 pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
     use palette::*;
@@ -290,39 +363,17 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
     let vertical = state.vertical;
     ui.ctx()
         .data_mut(|d| d.insert_temp(Id::NULL, state.tooltip_side));
-    let border = if state.snap_preview {
-        ACCENT
-    } else if state.recording {
-        RECORD
-    } else {
-        BORDER
-    };
 
     let frame = Frame::new()
         .fill(BAR)
-        .stroke(Stroke::new(1.0, border))
+        .stroke(Stroke::new(1.0, border_color(state)))
         .corner_radius(CornerRadius::same(20))
         .inner_margin(Margin::same(8))
         .show(ui, |ui| {
             let content = |ui: &mut Ui| {
                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
 
-                // Grip (drag to move, double-click to dock).
-                let (grip_size, grip_icon) = if vertical {
-                    (vec2(H, 22.0), Icon::GripWide)
-                } else {
-                    (vec2(22.0, H), Icon::Grip)
-                };
-                let (rect, grip) = ui.allocate_exact_size(grip_size, Sense::click_and_drag());
-                icons::paint(ui.painter(), rect.center(), grip_icon, MUTED);
-                let grip = grip.on_hover_cursor(CursorIcon::Grab);
-                show_tooltip(&grip, "Drag to move. Double-click to dock");
-                if grip.drag_started() {
-                    out.start_drag = true;
-                }
-                if grip.double_clicked() {
-                    out.grip_double_clicked = true;
-                }
+                grip(ui, vertical, &mut out);
 
                 if !state.recording {
                     mode_switch(ui, state.mode, &mut out);
@@ -463,14 +514,7 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                     if chip(ui, &[Piece::Icon(Icon::Sliders)], &quiet, "Settings").clicked() {
                         out.commands.push(Command::OpenSettings);
                     }
-                    if chip(
-                        ui,
-                        &[Piece::Icon(Icon::Minus)],
-                        &quiet,
-                        &format!("Collapse ({})", shortcut("Space")),
-                    )
-                    .clicked()
-                    {
+                    if chip(ui, &[Piece::Icon(Icon::Minus)], &quiet, "Collapse").clicked() {
                         out.collapse = true;
                     }
                 }
@@ -640,6 +684,64 @@ mod tests {
             output.textures_delta.clear();
         }
         size
+    }
+
+    /// Run `pill` on a clean context, clicking at `click` if given.
+    fn run_pill(click: Option<egui::Pos2>) -> BarOutput {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx, None);
+        let buffer = Buffer::new();
+        let mut out = BarOutput::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(600.0, 200.0));
+        let frames: Vec<Vec<egui::Event>> = match click {
+            None => vec![Vec::new(), Vec::new()],
+            Some(pos) => {
+                let button = |pressed| egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                vec![
+                    Vec::new(),
+                    vec![egui::Event::PointerMoved(pos)],
+                    vec![button(true)],
+                    vec![button(false)],
+                ]
+            }
+        };
+        let mut expanded = false;
+        for events in frames {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                out = pill(ui, &BarState::default(), &buffer);
+                expanded |= out.expand;
+            });
+            output.textures_delta.clear();
+        }
+        out.expand = expanded;
+        out
+    }
+
+    #[test]
+    fn pill_is_much_smaller_than_the_bar() {
+        let pill = run_pill(None).size;
+        let full = bar_size(&BarState::default(), 2000.0);
+        assert!(pill.x < full.x / 2.0, "pill {pill:?}, bar {full:?}");
+        assert!(pill.y <= 48.0, "pill {pill:?}");
+    }
+
+    #[test]
+    fn clicking_the_pill_expands_and_its_grip_does_not() {
+        let size = run_pill(None).size;
+        let on_chip = egui::pos2(size.x / 2.0 + 10.0, size.y / 2.0);
+        let on_grip = egui::pos2(14.0, size.y / 2.0);
+        assert!(run_pill(Some(on_chip)).expand);
+        assert!(!run_pill(Some(on_grip)).expand);
     }
 
     #[test]

@@ -232,9 +232,9 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 
 - AC: the collapse button shows the pill of M2.3; ⌥⇧Space hides and shows. The bar fades to 40% when the cursor is away.
 
-- [ ] Pill layout
-- [ ] Show/hide and fade animation (≤ 150 ms)
-- [ ] Tray/menu-bar icon fallback
+- [x] Pill layout — built from the M2.3 description without the artboard; shows the count, and the time while recording
+- [x] Show/hide and fade animation (≤ 150 ms) — Windows verified; hidden keeps the window open, transparent and click-through
+- [x] Tray/menu-bar icon fallback — Windows verified; macOS untested; Linux has none yet, because the tray-icon crate links GTK (NFR-1)
 
 ### E3 · Global shortcuts
 

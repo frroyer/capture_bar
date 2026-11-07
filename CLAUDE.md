@@ -45,6 +45,7 @@ only if a spike shows a need.
 - Builds and runs: floating, borderless, transparent, always-on-top bar; mode switch;
   Capture / Record buttons; buffer counter and tray; collapse pill; drag by the grip.
 - Global shortcuts registered (Ctrl+Shift / ⌥⇧ map from M3).
+- The collapse button shows the M2.3 pill; Ctrl+Shift+Space hides and shows. Hidden means transparent and click-through, not an OS-hidden window, because eframe stops running hidden windows. The bar fades to 40% when the cursor is away. A tray icon (not on Linux yet) toggles the bar and quits.
 - Bar UI follows M2.1 (vector icons in `crates/ui/src/icons.rs`; shortcuts in tooltips only). The window
   follows its content and grows while hovered to give tooltips room. The buffer tray is not restyled yet.
 - Bar position and dock are saved per monitor layout through eframe storage and pulled back on-screen when

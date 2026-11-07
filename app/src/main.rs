@@ -5,12 +5,13 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use cb_buffer::{Buffer, ItemId, ItemKind, ItemState};
 use cb_capture::{CaptureEvent, CaptureService};
 use cb_core::{CaptureMode, CaptureTarget, Command, DisplayId, Edge, Rect};
+use cb_platform::TrayAction;
 use cb_ui::{palette, BarState, TooltipSide};
 use eframe::egui;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
@@ -30,6 +31,10 @@ const HOVER_GRACE: Duration = Duration::from_millis(300);
 const DISPLAY_POLL: Duration = Duration::from_secs(2);
 /// How long to wait for a requested move before trusting the position again.
 const MOVE_TIMEOUT: Duration = Duration::from_secs(1);
+/// FR-5: the bar's opacity while the cursor is away.
+const FADED_OPACITY: f32 = 0.4;
+/// Show, hide and fade animations, in seconds (US-2.4: at most 150 ms).
+const FADE_TIME: f32 = 0.15;
 
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt()
@@ -77,6 +82,15 @@ fn points_for_pixel(pixel: i32, ppp: f32) -> f32 {
     (pixel as f32 + nudge) / ppp
 }
 
+/// The opacity of everything (hide and show), and of the bar on top of that (fade),
+/// easing towards where they should be. Requests its own repaints while moving.
+fn animated_opacity(ctx: &egui::Context, hidden: bool, cursor_near: bool) -> (f32, f32) {
+    let shown = ctx.animate_bool_with_time(egui::Id::unique("bar shown"), !hidden, FADE_TIME);
+    let target = if cursor_near { 1.0 } else { FADED_OPACITY };
+    let fade = ctx.animate_value_with_time(egui::Id::unique("bar fade"), target, FADE_TIME);
+    (shown, fade)
+}
+
 /// Default shortcut map (mockup M3). ⌥⇧ on macOS, Ctrl+Shift elsewhere.
 fn shortcut_modifiers() -> Modifiers {
     if cfg!(target_os = "macos") {
@@ -114,6 +128,12 @@ fn default_shortcuts() -> Vec<(HotKey, Command)> {
 struct App {
     bar: BarState,
     collapsed: bool,
+    /// FR-4: nothing is drawn and clicks go through. The window stays open, because
+    /// eframe stops running a hidden window and it would never hear the shortcut again.
+    hidden: bool,
+    click_through: bool,
+    /// The bar's own opacity this frame, without what opens beside it.
+    bar_fade: f32,
     buffer: Buffer,
     capture: CaptureService,
     pending: HashMap<u64, ItemId>,
@@ -122,7 +142,9 @@ struct App {
     captures_dir: PathBuf,
     // Kept alive for the lifetime of the app; dropping it unregisters the keys.
     _hotkeys: Option<GlobalHotKeyManager>,
-    shortcut_map: HashMap<u32, Command>,
+    _tray: Option<cb_platform::Tray>,
+    /// From global shortcuts and the tray icon.
+    commands: mpsc::Receiver<Command>,
     window_size: egui::Vec2,
     bar_hovered: bool,
     hover_seen: Option<Instant>,
@@ -186,11 +208,32 @@ impl App {
             }
         };
 
-        // Wake the UI whenever a shortcut fires, even if it is idle.
+        // With a handler set, the crate no longer fills `GlobalHotKeyEvent::receiver()`.
+        // Waking the UI here makes shortcuts work even if it is idle.
+        let (commands_tx, commands) = mpsc::channel();
         let ctx = cc.egui_ctx.clone();
-        GlobalHotKeyEvent::set_event_handler(Some(move |_ev: GlobalHotKeyEvent| {
-            ctx.request_repaint()
+        let tx = commands_tx.clone();
+        GlobalHotKeyEvent::set_event_handler(Some(move |ev: GlobalHotKeyEvent| {
+            if ev.state == HotKeyState::Pressed {
+                if let Some(cmd) = shortcut_map.get(&ev.id) {
+                    let _ = tx.send(cmd.clone());
+                    ctx.request_repaint();
+                }
+            }
         }));
+
+        let ctx = cc.egui_ctx.clone();
+        let tray = cb_platform::create_tray(move |action| {
+            match action {
+                TrayAction::ToggleBar => {
+                    let _ = commands_tx.send(Command::ToggleBar);
+                }
+                TrayAction::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            }
+            ctx.request_repaint();
+        })
+        .inspect_err(|e| tracing::warn!(error = %e, "no tray icon"))
+        .ok();
 
         let captures_dir = std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"))
@@ -206,6 +249,9 @@ impl App {
                 ..Default::default()
             },
             collapsed: false,
+            hidden: false,
+            click_through: false,
+            bar_fade: 1.0,
             buffer: Buffer::new(),
             capture: CaptureService::new(source.clone()),
             pending: HashMap::new(),
@@ -213,7 +259,8 @@ impl App {
             toast: None,
             captures_dir,
             _hotkeys: hotkeys,
-            shortcut_map,
+            _tray: tray,
+            commands,
             window_size: INITIAL_SIZE.into(),
             bar_hovered: false,
             hover_seen: None,
@@ -267,7 +314,7 @@ impl App {
             Command::ToggleRecording => self.toggle_recording(),
             Command::TogglePause => self.flash("Pause: not implemented yet (US-5.2)"),
             Command::ToggleBuffer => self.bar.tray_open = !self.bar.tray_open,
-            Command::ToggleBar => self.collapsed = !self.collapsed,
+            Command::ToggleBar => self.hidden = !self.hidden,
             Command::RepeatLastRegion => self.capture_still(CaptureMode::Region),
             Command::CopyNewest => self.flash("Copy: not implemented yet (US-4.4)"),
             Command::OpenSettings => self.flash("Settings: not implemented yet (US-8.2)"),
@@ -341,26 +388,6 @@ impl App {
     }
 
     fn draw(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        if self.collapsed {
-            self.bar_hovered = false;
-            // M2.3 collapsed pill.
-            let r = ui.add(
-                egui::Button::new(
-                    egui::RichText::new(format!("Capture Bar · {}", self.buffer.len()))
-                        .color(palette::TEXT),
-                )
-                .fill(palette::BAR)
-                .corner_radius(egui::CornerRadius::same(24))
-                .min_size(egui::vec2(240.0, 48.0)),
-            );
-            self.bar_offset = r.rect.min.to_vec2();
-            self.bar_size = r.rect.size();
-            if r.clicked() {
-                self.handle(Command::ToggleBar);
-            }
-            return;
-        }
-
         // Frozen during a drag: changing the band would move the bar under the pointer.
         if !self.dragging {
             self.band = self.bar_hovered && !self.bar.tray_open;
@@ -405,7 +432,18 @@ impl App {
     }
 
     fn draw_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let out = cb_ui::bar(ui, &self.bar, &self.buffer);
+        // Only the bar fades: the tray and the toast stay readable.
+        let fade = self.bar_fade;
+        let out = ui
+            .scope(|ui| {
+                ui.multiply_opacity(fade);
+                if self.collapsed {
+                    cb_ui::pill(ui, &self.bar, &self.buffer)
+                } else {
+                    cb_ui::bar(ui, &self.bar, &self.buffer)
+                }
+            })
+            .inner;
         self.bar_offset = out.top_left;
         self.bar_size = out.size;
         if out.hovered {
@@ -435,7 +473,10 @@ impl App {
             self.bar.cam_on = !self.bar.cam_on;
         }
         if out.collapse {
-            self.handle(Command::ToggleBar);
+            self.collapsed = true;
+        }
+        if out.expand {
+            self.collapsed = false;
         }
         for cmd in out.commands {
             self.handle(cmd);
@@ -444,9 +485,12 @@ impl App {
 
     /// What opens on the bar's roomy side: the tray, the toast, the tooltip band.
     fn draw_extras(&mut self, ui: &mut egui::Ui) {
-        let vertical = self.bar.vertical;
+        let beside = matches!(
+            self.bar.tooltip_side,
+            TooltipSide::Left | TooltipSide::Right
+        );
         if self.bar.tray_open {
-            let width = if vertical {
+            let width = if beside || self.collapsed {
                 TRAY_WIDTH_BESIDE_BAR
             } else {
                 self.bar_size.x
@@ -458,7 +502,7 @@ impl App {
             ui.label(egui::RichText::new(msg).color(palette::MUTED).size(12.0));
         }
         if self.band {
-            let room = if vertical {
+            let room = if beside {
                 egui::vec2(cb_ui::TOOLTIP_ROOM_SIDE, 1.0)
             } else {
                 egui::vec2(1.0, cb_ui::TOOLTIP_ROOM)
@@ -648,13 +692,8 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
-        // Global shortcuts -> commands.
-        while let Ok(ev) = GlobalHotKeyEvent::receiver().try_recv() {
-            if ev.state == HotKeyState::Pressed {
-                if let Some(cmd) = self.shortcut_map.get(&ev.id).cloned() {
-                    self.handle(cmd);
-                }
-            }
+        while let Ok(cmd) = self.commands.try_recv() {
+            self.handle(cmd);
         }
         self.poll_captures();
         self.track_position(ctx);
@@ -663,12 +702,24 @@ impl eframe::App for App {
             self.bar.elapsed_secs = start.elapsed().as_secs();
         }
 
+        if self.click_through != self.hidden {
+            self.click_through = self.hidden;
+            ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(self.hidden));
+        }
+        let cursor_near =
+            self.dragging || self.bar_hovered || ctx.input(|i| i.pointer.hover_pos().is_some());
+        let (shown, fade) = animated_opacity(ctx, self.hidden, cursor_near);
+        self.bar_fade = fade;
+
         let mut used = self.window_size;
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE)
-            .show(ui, |ui| {
-                used = content_size(ui, |ui| self.draw(ui, ctx));
-            });
+        if shown > 0.0 {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    ui.multiply_opacity(shown);
+                    used = content_size(ui, |ui| self.draw(ui, ctx));
+                });
+        }
         self.place_window(ctx, used);
 
         // Keep the timer and toast fresh without spinning the CPU (NFR-7). A drag polls
@@ -691,6 +742,44 @@ mod tests {
                 assert_eq!(back.round() as i32, pixel, "rounding at {ppp}");
             }
         }
+    }
+
+    /// Frames at 60 Hz until `FADE_TIME` is over, for `animated_opacity`.
+    fn run_opacity(ctx: &egui::Context, time: &mut f64, hidden: bool, near: bool) -> (f32, f32) {
+        let mut result = (0.0, 0.0);
+        for _ in 0..=(f64::from(FADE_TIME) * 60.0).ceil() as u32 {
+            *time += 1.0 / 60.0;
+            let input = egui::RawInput {
+                time: Some(*time),
+                predicted_dt: 1.0 / 60.0,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                result = animated_opacity(ui.ctx(), hidden, near);
+            });
+            output.textures_delta.clear();
+        }
+        result
+    }
+
+    #[test]
+    fn bar_fades_to_40_percent_and_back_within_150_ms() {
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        assert_eq!(run_opacity(&ctx, &mut time, false, true), (1.0, 1.0));
+        let (_, away) = run_opacity(&ctx, &mut time, false, false);
+        assert!((away - 0.4).abs() < 1e-3, "away at {away}");
+        let (_, back) = run_opacity(&ctx, &mut time, false, true);
+        assert!((back - 1.0).abs() < 1e-3, "back at {back}");
+    }
+
+    #[test]
+    fn hiding_and_showing_finish_within_150_ms() {
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        run_opacity(&ctx, &mut time, false, true);
+        assert_eq!(run_opacity(&ctx, &mut time, true, true).0, 0.0);
+        assert_eq!(run_opacity(&ctx, &mut time, false, true).0, 1.0);
     }
 
     /// The window follows this measurement, so it must not report the panel's size.
