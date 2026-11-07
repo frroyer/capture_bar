@@ -30,6 +30,7 @@ pub enum Icon {
     Save,
     Pen,
     Trash,
+    Pin,
 }
 
 /// Draw `icon` centred on `center`. Coordinates below run from -8 to 8.
@@ -186,6 +187,11 @@ pub fn paint(p: &Painter, center: Pos2, icon: Icon, color: Color32) {
                 s,
             ));
             seg(1.0, -4.0, 4.0, -1.0);
+        }
+        Icon::Pin => {
+            p.circle_stroke(at(0.0, -3.0), 3.5, s);
+            seg(-5.0, 1.5, 5.0, 1.5);
+            seg(0.0, 1.5, 0.0, 7.5);
         }
         Icon::Trash => {
             seg(-7.0, -4.5, 7.0, -4.5);

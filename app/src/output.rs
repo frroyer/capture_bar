@@ -42,6 +42,11 @@ pub enum Job {
         files: Vec<PathBuf>,
         dir: PathBuf,
     },
+    /// Make the thumbnail of a capture restored from the last run (FR-25).
+    Thumbnail {
+        item: ItemId,
+        path: PathBuf,
+    },
 }
 
 pub enum Done {
@@ -132,6 +137,12 @@ fn copy(clipboard: &mut Option<arboard::Clipboard>, frame: &Frame) -> Result<(),
         .map_err(|e| e.to_string())
 }
 
+fn read_thumbnail(path: &Path) -> Result<Frame, String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let frame = cb_encode::read_png(std::io::BufReader::new(file)).map_err(|e| e.to_string())?;
+    cb_encode::thumbnail(&frame, THUMBNAIL_PIXELS.0, THUMBNAIL_PIXELS.1).map_err(|e| e.to_string())
+}
+
 /// Copy `from` into `dir` under its own name, or `-2`, `-3`… when that is taken.
 fn save_into(from: &Path, dir: &Path) -> std::io::Result<PathBuf> {
     let name = from.file_name().ok_or(ErrorKind::InvalidInput)?;
@@ -206,7 +217,9 @@ fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
                 ),
             }
         }
-        Job::Store { .. } | Job::Copy(_) => unreachable!("not a one-off job"),
+        Job::Store { .. } | Job::Copy(_) | Job::Thumbnail { .. } => {
+            unreachable!("not a one-off job")
+        }
     }
 }
 
@@ -222,6 +235,17 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> (mpsc::Sender<Job>, mpsc::Rece
             for job in jobs {
                 let frame = match &job {
                     Job::Store { frame, .. } | Job::Copy(frame) => frame,
+                    Job::Thumbnail { item, path } => {
+                        match read_thumbnail(path) {
+                            Ok(thumbnail) => {
+                                let item = *item;
+                                let _ = done_tx.send(Done::Thumbnail { item, thumbnail });
+                                wake();
+                            }
+                            Err(e) => tracing::warn!(error = %e, ?path, "no thumbnail"),
+                        }
+                        continue;
+                    }
                     Job::CopyFile(_)
                     | Job::SaveAs { .. }
                     | Job::Trash(_)

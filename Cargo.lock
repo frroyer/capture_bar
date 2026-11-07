@@ -312,6 +312,7 @@ name = "cb-buffer"
 version = "0.1.0"
 dependencies = [
  "cb-core",
+ "ron",
  "serde",
 ]
 

@@ -775,6 +775,8 @@ pub enum ItemAction {
     DragOut,
     /// The picture was clicked, to pick it for a batch action (FR-24).
     Select(SelectHow),
+    /// Keep it past the retention period, or let it go again (FR-25).
+    TogglePin,
 }
 
 /// How a click on a picture changes the selection.
@@ -885,6 +887,29 @@ fn tray_card(
                     egui::Image::new(texture)
                         .corner_radius(CornerRadius::same(4))
                         .paint_at(ui, picture);
+                }
+                // On top of the picture, so it takes the clicks there.
+                let pin_rect = egui::Rect::from_min_size(
+                    slot.right_top() + vec2(-26.0, 4.0),
+                    vec2(22.0, 22.0),
+                );
+                let pin = ui.interact(
+                    pin_rect,
+                    ui.make_persistent_id(("tray pin", item.id)),
+                    Sense::click(),
+                );
+                if has_file && (item.pinned || response.hovered() || pin.hovered()) {
+                    let color = if item.pinned { ACCENT } else { TEXT };
+                    ui.painter().circle_filled(pin_rect.center(), 11.0, BAR);
+                    icons::paint(ui.painter(), pin_rect.center(), Icon::Pin, color);
+                    let tip = if item.pinned {
+                        "Pinned: kept past the retention period. Click to unpin"
+                    } else {
+                        "Pin: keep it past the retention period"
+                    };
+                    if pin.on_hover_text(tip).clicked() {
+                        action = Some(ItemAction::TogglePin);
+                    }
                 }
                 if !status.is_empty() {
                     ui.painter().text(
@@ -1368,6 +1393,10 @@ mod tests {
         assert_eq!(dragged, vec![(item, ItemAction::DragOut)]);
         let clicked = press_on_card(&buffer, picture, vec2(0.0, 0.0));
         assert_eq!(clicked, vec![(item, ItemAction::Select(SelectHow::Only))]);
+        // The pin sits in the picture's top-right corner, above the name and details.
+        let pin = |details: egui::Rect| details.left_top() + vec2(145.0, -105.0);
+        let pinned = press_on_card(&buffer, pin, vec2(0.0, 0.0));
+        assert_eq!(pinned, vec![(item, ItemAction::TogglePin)]);
     }
 
     #[test]

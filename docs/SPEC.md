@@ -365,8 +365,8 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: after a kill -9 or reboot, every item is back; items older than the retention period are purged unless pinned.
 
-- [ ] Recovery on launch from the index
-- [ ] Retention sweeper + pin flag
+- [x] Recovery on launch from the index — `~/Captures/.buffer/index.ron`, rewritten atomically (temp file, fsync, rename) by a writer thread on every change; items whose file is gone are dropped; a damaged index is kept as `.bad`
+- [x] Retention sweeper + pin flag — 7 days (constant until US-8.2), swept at launch and hourly; expired captures leave the buffer but their files stay; pin from the card's picture corner
 
 **US-6.7** As a user, I want to export clips as GIF and images as a single PDF. (M3 · FR-18, FR-24)
 

@@ -6,11 +6,11 @@
 mod output;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-use cb_buffer::{Buffer, ItemId, ItemKind, ItemState, Selection};
+use cb_buffer::{index, Buffer, BufferItem, ItemId, ItemKind, ItemState, Selection};
 use cb_capture::{CaptureEvent, CaptureService};
 use cb_core::{CaptureMode, CaptureTarget, Command, DisplayId, Edge, Frame, Rect};
 use cb_platform::TrayAction;
@@ -31,6 +31,23 @@ const SNAP_DISTANCE: f32 = 24.0;
 /// How far a docked bar sits from the edge, in points.
 const DOCK_GAP: f32 = 8.0;
 const TRAY_WIDTH_BESIDE_BAR: f32 = 640.0;
+/// How often captures past the retention period are looked for (FR-25).
+const SWEEP_EVERY: Duration = Duration::from_secs(60 * 60);
+
+/// The buffer the last run left (FR-25), and whether its index was damaged. A damaged
+/// index is kept beside as `.bad`, never overwritten, so nothing in it is lost for good.
+fn load_buffer(path: &Path) -> (Buffer, bool) {
+    match index::read(path) {
+        Ok(items) => (Buffer::restore(items), false),
+        Err(error) => {
+            tracing::error!(%error, ?path, "buffer index unreadable");
+            if let Err(e) = std::fs::rename(path, path.with_extension("ron.bad")) {
+                tracing::warn!(error = %e, "damaged index left in place");
+            }
+            (Buffer::new(), true)
+        }
+    }
+}
 const TOAST_TIME: Duration = Duration::from_secs(2);
 const HOVER_GRACE: Duration = Duration::from_millis(300);
 /// Catches monitor changes that do not move the bar.
@@ -205,6 +222,12 @@ struct App {
     /// When the first frame was drawn.
     launched_at: Option<Instant>,
     buffer: Buffer,
+    /// Gets each new state of the buffer, to keep its index on disk (FR-25).
+    index: mpsc::Sender<Vec<BufferItem>>,
+    /// The buffer generation last sent to `index`.
+    indexed: u64,
+    /// When expired captures were last taken out of the buffer.
+    swept_at: Option<Instant>,
     /// What Copy all, Save all and Clear act on; none means all (FR-24).
     selection: Selection,
     /// What the tray shows for each capture (FR-22).
@@ -338,16 +361,24 @@ impl App {
         .inspect_err(|e| tracing::warn!(error = %e, "no tray icon"))
         .ok();
 
+        let default_dir = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Captures");
         let captures_dir = cc
             .storage
             .and_then(|s| eframe::get_value(s, FOLDER_STORAGE_KEY))
-            .unwrap_or_else(|| {
-                std::env::var_os("HOME")
-                    .or_else(|| std::env::var_os("USERPROFILE"))
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join("Captures")
-            });
+            .unwrap_or_else(|| default_dir.clone());
+        // Where the default folder is, whichever folder captures go to now (FR-25).
+        let index_path = default_dir.join(".buffer").join(index::INDEX_FILE);
+        let (buffer, damaged) = load_buffer(&index_path);
+        let toast = toast.or_else(|| {
+            damaged.then(|| Toast::new("The buffer index was damaged: started empty", None))
+        });
+        let index = index::spawn_writer(index_path, |error| {
+            tracing::warn!(%error, "buffer index not written");
+        });
         let prefix = cc
             .storage
             .and_then(|s| eframe::get_value(s, PREFIX_STORAGE_KEY))
@@ -356,6 +387,12 @@ impl App {
         let source: Arc<dyn cb_core::ScreenSource> = Arc::from(cb_platform::screen_source());
         let ctx = cc.egui_ctx.clone();
         let (output, output_done) = output::spawn(move || ctx.request_repaint());
+        for item in buffer.newest_first() {
+            if let Some(path) = item.path.clone() {
+                let item = item.id;
+                let _ = output.send(output::Job::Thumbnail { item, path });
+            }
+        }
         let ctx = cc.egui_ctx.clone();
         let capture = CaptureService::new(source.clone(), move || ctx.request_repaint());
 
@@ -371,7 +408,10 @@ impl App {
             click_through: false,
             bar_fade: 1.0,
             launched_at: None,
-            buffer: Buffer::new(),
+            indexed: buffer.generation(),
+            buffer,
+            index,
+            swept_at: None,
             selection: Selection::default(),
             thumbnails: HashMap::new(),
             capture,
@@ -545,12 +585,49 @@ impl App {
     }
 
     fn copy_newest(&mut self) {
+        // After a restart the newest capture is only on disk.
+        let newest_file = || {
+            let newest = self.buffer.newest()?;
+            (newest.state == ItemState::Ready).then(|| newest.path.clone())?
+        };
         match &self.newest_frame {
             Some((_, frame)) => {
                 let _ = self.output.send(output::Job::Copy(frame.clone()));
                 self.flash("Copied");
             }
-            None => self.flash("Nothing to copy yet"),
+            None => match newest_file() {
+                Some(path) => {
+                    let _ = self.output.send(output::Job::CopyFile(path));
+                }
+                None => self.flash("Nothing to copy yet"),
+            },
+        }
+    }
+
+    /// Take captures past the retention period out of the buffer, hourly. Pinned ones
+    /// stay, and every file stays on disk: only the buffer forgets them (FR-25).
+    fn sweep(&mut self) {
+        if self.swept_at.is_some_and(|at| at.elapsed() < SWEEP_EVERY) {
+            return;
+        }
+        self.swept_at = Some(Instant::now());
+        let expired = self.buffer.expired(SystemTime::now(), cb_buffer::RETENTION);
+        if !expired.is_empty() {
+            tracing::info!(
+                count = expired.len(),
+                "captures past retention left the buffer"
+            );
+        }
+        for item in expired {
+            self.forget(item);
+        }
+    }
+
+    /// Send the buffer to the index writer if it changed since the last time.
+    fn save_index(&mut self) {
+        if self.buffer.generation() != self.indexed {
+            self.indexed = self.buffer.generation();
+            let _ = self.index.send(self.buffer.snapshot());
         }
     }
 
@@ -606,6 +683,11 @@ impl App {
                 }
             },
             (ItemAction::Delete, _) => self.delete(item),
+            (ItemAction::TogglePin, _) => {
+                if let Some(found) = self.buffer.get_mut(item) {
+                    found.pinned = !found.pinned;
+                }
+            }
             (ItemAction::Annotate, _) => self.flash("Annotate: not implemented yet (US-7.1)"),
             (ItemAction::Copy, Some(path)) => {
                 let _ = self.output.send(output::Job::CopyFile(path));
@@ -1214,6 +1296,7 @@ impl eframe::App for App {
         self.poll_captures();
         self.poll_output(ctx);
         self.poll_folder_choice();
+        self.sweep();
         self.track_position(ctx);
 
         if let Some(start) = self.record_started {
@@ -1257,6 +1340,7 @@ impl eframe::App for App {
         if let Some(action) = self.batch_action.take() {
             self.batch_action(frame, action);
         }
+        self.save_index();
 
         // Keep the timer and toast fresh without spinning the CPU (NFR-7). A drag polls
         // faster, to show the snap preview and catch the drop.
