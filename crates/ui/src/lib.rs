@@ -45,6 +45,8 @@ pub struct BarState {
     /// Being dragged within snapping distance of an edge.
     pub snap_preview: bool,
     pub tooltip_side: TooltipSide,
+    /// How strongly the bar flashes to get noticed, from 0 (not at all) to 1.
+    pub attention: f32,
 }
 
 /// Which side of the bar has room for tooltips, reserved by the host.
@@ -299,6 +301,21 @@ fn border_color(state: &BarState) -> Color32 {
     }
 }
 
+/// A flash over the bar. It takes no room, so the bar does not move while it plays.
+fn paint_attention(ui: &Ui, rect: egui::Rect, radius: CornerRadius, level: f32) {
+    if level <= 0.0 {
+        return;
+    }
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, palette::ACCENT.gamma_multiply(0.3 * level));
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(3.0, palette::ACCENT.gamma_multiply(level)),
+        StrokeKind::Inside,
+    );
+}
+
 /// Drag to move, double-click to dock.
 fn grip(ui: &mut Ui, vertical: bool, out: &mut BarOutput) {
     let (size, icon) = if vertical {
@@ -353,6 +370,12 @@ pub fn pill(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                 }
             });
         });
+    paint_attention(
+        ui,
+        frame.response.rect,
+        CornerRadius::same(24),
+        state.attention,
+    );
     out.hovered = ui.rect_contains_pointer(frame.response.rect);
     out.top_left = frame.response.rect.min.to_vec2();
     out.size = frame.response.rect.size();
@@ -529,6 +552,12 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
             }
         });
 
+    paint_attention(
+        ui,
+        frame.response.rect,
+        CornerRadius::same(20),
+        state.attention,
+    );
     out.hovered = ui.rect_contains_pointer(frame.response.rect);
     out.top_left = frame.response.rect.min.to_vec2();
     out.size = frame.response.rect.size();
@@ -975,6 +1004,18 @@ mod tests {
                 "vertical bar should be tall: {size:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_flash_does_not_resize_the_bar() {
+        let flashing = BarState {
+            attention: 1.0,
+            ..Default::default()
+        };
+        assert_eq!(
+            bar_size(&flashing, 2000.0),
+            bar_size(&BarState::default(), 2000.0)
+        );
     }
 
     /// The window is sized to the bar, so the bar must not size itself to the window.

@@ -39,6 +39,9 @@ const MOVE_TIMEOUT: Duration = Duration::from_secs(1);
 const FADED_OPACITY: f32 = 0.4;
 /// Show, hide and fade animations, in seconds (US-2.4: at most 150 ms).
 const FADE_TIME: f32 = 0.15;
+/// The flash at launch, so the bar can be found before it fades.
+const ATTENTION_TIME: Duration = Duration::from_secs(3);
+const ATTENTION_PULSES: f32 = 3.0;
 
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt()
@@ -93,6 +96,18 @@ fn animated_opacity(ctx: &egui::Context, hidden: bool, cursor_near: bool) -> (f3
     let target = if cursor_near { 1.0 } else { FADED_OPACITY };
     let fade = ctx.animate_value_with_time(egui::Id::unique("bar fade"), target, FADE_TIME);
     (shown, fade)
+}
+
+/// How strongly the bar flashes this long after launch: smooth pulses from and back
+/// to 0, then 0 for good.
+fn attention_level(elapsed: Duration) -> f32 {
+    if elapsed >= ATTENTION_TIME {
+        return 0.0;
+    }
+    let progress = elapsed.as_secs_f32() / ATTENTION_TIME.as_secs_f32();
+    (progress * ATTENTION_PULSES * std::f32::consts::PI)
+        .sin()
+        .powi(2)
 }
 
 /// FR-7: the mode chosen in an earlier session.
@@ -170,6 +185,8 @@ struct App {
     click_through: bool,
     /// The bar's own opacity this frame, without what opens beside it.
     bar_fade: f32,
+    /// When the first frame was drawn.
+    launched_at: Option<Instant>,
     buffer: Buffer,
     capture: CaptureService,
     pending: HashMap<u64, ItemId>,
@@ -307,6 +324,7 @@ impl App {
             hidden: false,
             click_through: false,
             bar_fade: 1.0,
+            launched_at: None,
             buffer: Buffer::new(),
             capture,
             pending: HashMap::new(),
@@ -670,6 +688,7 @@ impl App {
         }
         if out.collapse {
             self.collapsed = true;
+            self.bar.tray_open = false;
         }
         if out.expand {
             self.collapsed = false;
@@ -910,8 +929,16 @@ impl eframe::App for App {
             self.click_through = self.hidden;
             ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(self.hidden));
         }
-        let cursor_near =
-            self.dragging || self.bar_hovered || ctx.input(|i| i.pointer.hover_pos().is_some());
+        let launched_at = *self.launched_at.get_or_insert_with(Instant::now);
+        let flashing = launched_at.elapsed() < ATTENTION_TIME;
+        self.bar.attention = attention_level(launched_at.elapsed());
+        if flashing {
+            ctx.request_repaint();
+        }
+        let cursor_near = flashing
+            || self.dragging
+            || self.bar_hovered
+            || ctx.input(|i| i.pointer.hover_pos().is_some());
         let (shown, fade) = animated_opacity(ctx, self.hidden, cursor_near);
         self.bar_fade = fade;
 
@@ -952,6 +979,18 @@ mod tests {
             self.0.remove(key);
         }
         fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn attention_pulses_smoothly_and_then_stops() {
+        let at = |millis| attention_level(Duration::from_millis(millis));
+        assert!(at(0) < 0.01, "starts from nothing");
+        assert!(at(500) > 0.99, "first pulse peaks");
+        assert!(at(1000) < 0.01, "and falls before the next");
+        assert!(at(2500) > 0.99, "third pulse peaks");
+        assert!(at(2999) < 0.01, "ends smoothly");
+        assert_eq!(at(3000), 0.0);
+        assert_eq!(at(60_000), 0.0);
     }
 
     #[test]
