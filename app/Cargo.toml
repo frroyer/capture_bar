@@ -22,3 +22,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 eframe.workspace = true
 global-hotkey.workspace = true
+rfd.workspace = true
+chrono.workspace = true

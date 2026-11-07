@@ -1,13 +1,16 @@
 //! Where finished frames go: the clipboard and a PNG file, on a worker thread, so the
 //! UI thread never waits for them (FR-12, FR-20).
 
+use std::fs::{File, OpenOptions};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::time::SystemTime;
 
 use cb_buffer::ItemId;
 use cb_core::Frame;
+use chrono::{DateTime, Local};
 
 /// Twice the tray's card size in points, to stay sharp on HiDPI screens.
 const THUMBNAIL_PIXELS: (u32, u32) = (
@@ -33,28 +36,66 @@ pub enum Done {
     },
     Stored {
         item: ItemId,
-        path: PathBuf,
-        result: Result<(), String>,
+        /// Where the file went.
+        result: Result<PathBuf, String>,
     },
     ClipboardFailed(String),
 }
 
-/// A name no other capture has: item ids start over at each launch.
-pub fn file_name(frame: &Frame, item: ItemId) -> String {
-    let millis = frame
-        .captured_at
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    format!("capture-{millis}-{}.png", item.0)
+/// The prefix new captures get until the user picks one (FR-30).
+pub const DEFAULT_PREFIX: &str = "capture";
+
+/// `prefix` without what a file name cannot hold on any of our systems.
+pub fn clean_prefix(prefix: &str) -> String {
+    prefix
+        .chars()
+        .filter(|c| !c.is_control() && !r#"<>:"/\|?*"#.contains(*c))
+        .collect()
 }
 
-fn write_png(frame: &Frame, path: &Path) -> Result<(), String> {
+/// `<prefix>_<local date and time>.png`, or the timestamp alone without a prefix (FR-30).
+pub fn file_name(prefix: &str, at: SystemTime) -> String {
+    let stamp = DateTime::<Local>::from(at).format("%Y-%m-%d_%H-%M-%S");
+    match clean_prefix(prefix).trim() {
+        "" => format!("{stamp}.png"),
+        prefix => format!("{prefix}_{stamp}.png"),
+    }
+}
+
+/// Create `path`, or `<stem>-2.png`, `-3`… when it exists: a file is never overwritten.
+fn create_unique(path: &Path) -> std::io::Result<(File, PathBuf)> {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = path.extension().unwrap_or_default().to_string_lossy();
+    for n in 1u32.. {
+        let candidate = match n {
+            1 => path.to_path_buf(),
+            n => path.with_file_name(format!("{stem}-{n}.{extension}")),
+        };
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            opened => return opened.map(|file| (file, candidate)),
+        }
+    }
+    unreachable!("every name from -2 to -{} exists", u32::MAX)
+}
+
+/// Returns where the file went, which differs from `path` when that was taken.
+fn write_png(frame: &Frame, path: &Path) -> Result<PathBuf, String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    cb_encode::write_png(frame, std::io::BufWriter::new(file)).map_err(|e| e.to_string())
+    let (file, path) = create_unique(path).map_err(|e| e.to_string())?;
+    cb_encode::write_png(frame, std::io::BufWriter::new(file))
+        .map(|()| path.clone())
+        .map_err(|e| {
+            // Our own half-written file: no use to anyone.
+            let _ = std::fs::remove_file(&path);
+            e.to_string()
+        })
 }
 
 fn copy(clipboard: &mut Option<arboard::Clipboard>, frame: &Frame) -> Result<(), String> {
@@ -101,7 +142,7 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> (mpsc::Sender<Job>, mpsc::Rece
                 }
                 if let Job::Store { item, frame, path } = job {
                     let result = write_png(&frame, &path);
-                    let _ = done_tx.send(Done::Stored { item, path, result });
+                    let _ = done_tx.send(Done::Stored { item, result });
                 }
                 wake();
             }
@@ -125,30 +166,40 @@ mod tests {
     }
 
     #[test]
-    fn file_names_differ_across_sessions_with_the_same_item_id() {
-        let start = SystemTime::now();
-        let first = file_name(&frame_at(start), ItemId(1));
-        let later = file_name(&frame_at(start + Duration::from_secs(60)), ItemId(1));
-        assert_ne!(first, later);
-        assert!(first.starts_with("capture-") && first.ends_with("-1.png"));
+    fn file_name_is_the_prefix_and_the_local_time() {
+        let at = SystemTime::now();
+        let stamp = DateTime::<Local>::from(at)
+            .format("%Y-%m-%d_%H-%M-%S")
+            .to_string();
+        assert_eq!(file_name("acme", at), format!("acme_{stamp}.png"));
+        assert_eq!(file_name("", at), format!("{stamp}.png"));
+        assert_eq!(file_name("  ", at), format!("{stamp}.png"));
+        assert_eq!(file_name(" a b ", at), format!("a b_{stamp}.png"));
+        let later = file_name("acme", at + Duration::from_secs(1));
+        assert_ne!(later, file_name("acme", at));
     }
 
     #[test]
-    fn store_writes_a_png_even_without_a_clipboard() {
-        let dir = std::env::temp_dir().join(format!("cb-output-test-{}", std::process::id()));
-        let path = dir.join("nested").join("a.png");
+    fn prefixes_cannot_leave_the_folder_or_break_the_name() {
+        assert_eq!(clean_prefix(r#"../a\b:c*d?"e<f>g|h/"#), "..abcdefgh");
+        assert_eq!(clean_prefix("tab\there\n"), "tabhere");
+        assert_eq!(clean_prefix("Équipe 3 — été"), "Équipe 3 — été");
+    }
+
+    /// Runs one Store job to the end and returns where the file went.
+    fn store(path: &Path, item: u64) -> Result<PathBuf, String> {
         let (jobs, done) = spawn(|| {});
         jobs.send(Job::Store {
-            item: ItemId(3),
+            item: ItemId(item),
             frame: Arc::new(frame_at(SystemTime::now())),
-            path: path.clone(),
+            path: path.to_path_buf(),
         })
         .unwrap();
         let mut thumbnail_seen = None;
         let stored = done
             .iter()
             .find_map(|d| match d {
-                Done::Stored { item, result, .. } => Some((item, result)),
+                Done::Stored { item, result } => Some((item, result)),
                 Done::Thumbnail { item, thumbnail } => {
                     thumbnail_seen = Some((item, thumbnail.width));
                     None
@@ -156,10 +207,26 @@ mod tests {
                 Done::ClipboardFailed(_) => None,
             })
             .unwrap();
-        assert_eq!(stored, (ItemId(3), Ok(())));
-        assert_eq!(thumbnail_seen, Some((ItemId(3), 2)), "before the file");
+        assert_eq!(stored.0, ItemId(item));
+        assert_eq!(thumbnail_seen, Some((ItemId(item), 2)), "before the file");
+        stored.1
+    }
+
+    #[test]
+    fn store_writes_a_png_and_never_overwrites() {
+        let dir = std::env::temp_dir().join(format!("cb-output-test-{}", std::process::id()));
+        let path = dir.join("nested").join("a.png");
+        assert_eq!(store(&path, 3), Ok(path.clone()));
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[1..4], b"PNG");
+
+        std::fs::write(dir.join("nested").join("a-2.png"), "keep me").unwrap();
+        assert_eq!(store(&path, 4), Ok(dir.join("nested").join("a-3.png")));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("nested").join("a-2.png")).unwrap(),
+            "keep me"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

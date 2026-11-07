@@ -24,6 +24,8 @@ const INITIAL_SIZE: [f32; 2] = [900.0, 54.0];
 const PLACEMENTS_STORAGE_KEY: &str = "bar_placements";
 const MODE_STORAGE_KEY: &str = "capture_mode";
 const REGION_STORAGE_KEY: &str = "last_region";
+const PREFIX_STORAGE_KEY: &str = "file_prefix";
+const FOLDER_STORAGE_KEY: &str = "captures_dir";
 /// FR-3: a drop this close to an edge docks the bar.
 const SNAP_DISTANCE: f32 = 24.0;
 /// How far a docked bar sits from the edge, in points.
@@ -155,6 +157,7 @@ fn default_shortcuts() -> Vec<(HotKey, Command)> {
         (HotKey::new(m, Code::KeyA), Command::RepeatLastRegion),
         (HotKey::new(m, Code::KeyB), Command::ToggleBuffer),
         (HotKey::new(m, Code::KeyC), Command::CopyNewest),
+        (HotKey::new(m, Code::KeyL), Command::ToggleDestination),
     ]
 }
 
@@ -198,7 +201,15 @@ struct App {
     last_region: Option<Rect>,
     record_started: Option<Instant>,
     toast: Option<Toast>,
+    /// Where new captures go (FR-30). Their prefix is `bar.prefix`.
     captures_dir: PathBuf,
+    /// Put the keyboard in the prefix field on the next frame.
+    focus_prefix: bool,
+    destination_size: egui::Vec2,
+    /// The answer of the folder dialog, which runs on its own thread: `None` if cancelled.
+    folder_choice: Option<mpsc::Receiver<Option<PathBuf>>>,
+    /// "Choose…" was clicked: the dialog opens once the frame's window handle is at hand.
+    folder_requested: bool,
     output: mpsc::Sender<output::Job>,
     output_done: mpsc::Receiver<output::Done>,
     /// What Copy puts on the clipboard (M3).
@@ -304,11 +315,20 @@ impl App {
         .inspect_err(|e| tracing::warn!(error = %e, "no tray icon"))
         .ok();
 
-        let captures_dir = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("Captures");
+        let captures_dir = cc
+            .storage
+            .and_then(|s| eframe::get_value(s, FOLDER_STORAGE_KEY))
+            .unwrap_or_else(|| {
+                std::env::var_os("HOME")
+                    .or_else(|| std::env::var_os("USERPROFILE"))
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("Captures")
+            });
+        let prefix = cc
+            .storage
+            .and_then(|s| eframe::get_value(s, PREFIX_STORAGE_KEY))
+            .unwrap_or_else(|| output::DEFAULT_PREFIX.to_owned());
 
         let source: Arc<dyn cb_core::ScreenSource> = Arc::from(cb_platform::screen_source());
         let ctx = cc.egui_ctx.clone();
@@ -320,6 +340,7 @@ impl App {
             bar: BarState {
                 mic_on: true,
                 mode: saved_mode(cc.storage),
+                prefix,
                 ..Default::default()
             },
             collapsed: false,
@@ -339,6 +360,10 @@ impl App {
             record_started: None,
             toast,
             captures_dir,
+            focus_prefix: false,
+            destination_size: egui::Vec2::ZERO,
+            folder_choice: None,
+            folder_requested: false,
             output,
             output_done,
             newest_frame: None,
@@ -463,6 +488,14 @@ impl App {
             },
             Command::CopyNewest => self.copy_newest(),
             Command::OpenSettings => self.flash("Settings: not implemented yet (US-8.2)"),
+            Command::ToggleDestination => {
+                self.bar.destination_open = !self.bar.destination_open;
+                if self.bar.destination_open {
+                    // From a shortcut, the bar may be hidden and another app has the keyboard.
+                    self.hidden = false;
+                    self.focus_prefix = true;
+                }
+            }
             Command::Cancel => {}
         }
     }
@@ -517,7 +550,8 @@ impl App {
         if self.buffer.get(item).is_none() {
             return;
         }
-        let path = self.captures_dir.join(output::file_name(&frame, item));
+        let name = output::file_name(&self.bar.prefix, frame.captured_at);
+        let path = self.captures_dir.join(name);
         let frame = Arc::new(frame);
         self.newest_frame = Some((item, frame.clone()));
         let _ = self.output.send(output::Job::Store { item, frame, path });
@@ -542,16 +576,16 @@ impl App {
                     tracing::warn!(%error, "clipboard");
                     self.flash("Saved, but not copied to the clipboard");
                 }
-                output::Done::Stored { item, path, result } => {
+                output::Done::Stored { item, result } => {
                     let Some(i) = self.buffer.get_mut(item) else {
                         // Undone while it was being written.
-                        if result.is_ok() {
+                        if let Ok(path) = result {
                             let _ = std::fs::remove_file(&path);
                         }
                         continue;
                     };
                     match result {
-                        Ok(()) => {
+                        Ok(path) => {
                             i.state = ItemState::Ready;
                             i.path = Some(path);
                         }
@@ -562,6 +596,46 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    /// Ask for a folder without blocking the bar: the dialog runs on its own thread. The
+    /// bar is its parent, or Windows opens it behind whatever app was last in front.
+    fn choose_folder(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        if self.folder_choice.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let dialog = rfd::FileDialog::new()
+            .set_title("Folder for new captures")
+            .set_directory(&self.captures_dir)
+            .set_parent(frame);
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("folder dialog".into())
+            .spawn(move || {
+                let choice = dialog.pick_folder();
+                let _ = tx.send(choice);
+                ctx.request_repaint();
+            })
+            .expect("spawn folder dialog thread");
+        self.folder_choice = Some(rx);
+    }
+
+    fn poll_folder_choice(&mut self) {
+        let Some(rx) = &self.folder_choice else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(choice) => {
+                tracing::debug!(?choice, "folder dialog closed");
+                self.folder_choice = None;
+                if let Some(dir) = choice {
+                    self.captures_dir = dir;
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => self.folder_choice = None,
         }
     }
 
@@ -620,7 +694,7 @@ impl App {
     fn draw(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         // Frozen during a drag: changing the band would move the bar under the pointer.
         if !self.dragging {
-            self.band = self.bar_hovered && !self.bar.tray_open;
+            self.band = self.bar_hovered && !self.bar.tray_open && !self.bar.destination_open;
         }
         if self
             .toast
@@ -630,7 +704,7 @@ impl App {
             self.toast = None;
         }
         let toast_on = self.toast.is_some();
-        let has_extras = self.band || self.bar.tray_open || toast_on;
+        let has_extras = self.band || self.bar.tray_open || self.bar.destination_open || toast_on;
 
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
         match self.bar.tooltip_side {
@@ -720,6 +794,24 @@ impl App {
             self.bar.tooltip_side,
             TooltipSide::Left | TooltipSide::Right
         );
+        if self.bar.destination_open {
+            let focus = std::mem::take(&mut self.focus_prefix);
+            if focus {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            let folder = self.captures_dir.display().to_string();
+            let next = output::file_name(&self.bar.prefix, std::time::SystemTime::now());
+            let prefix = &mut self.bar.prefix;
+            let mut out = cb_ui::DestinationOutput::default();
+            self.destination_size = content_size(ui, |ui| {
+                out = cb_ui::destination_panel(ui, prefix, &folder, &next, focus);
+            });
+            *prefix = output::clean_prefix(prefix);
+            self.folder_requested |= out.choose_folder;
+            if out.close {
+                self.bar.destination_open = false;
+            }
+        }
         if self.bar.tray_open {
             let width = if beside || self.collapsed {
                 TRAY_WIDTH_BESIDE_BAR
@@ -756,11 +848,16 @@ impl App {
             Some(Edge::Left) => TooltipSide::Right,
             Some(Edge::Right) => TooltipSide::Left,
             None => {
-                let extra = if self.bar.tray_open {
-                    self.tray_size.y + 6.0
-                } else {
-                    cb_ui::TOOLTIP_ROOM
-                };
+                let mut extra = 0.0;
+                if self.bar.tray_open {
+                    extra += self.tray_size.y + 6.0;
+                }
+                if self.bar.destination_open {
+                    extra += self.destination_size.y + 6.0;
+                }
+                if extra == 0.0 {
+                    extra = cb_ui::TOOLTIP_ROOM;
+                }
                 let fits_below = self.bar_pos.is_none_or(|position| {
                     let mut rect = self.bar_rect(position, ppp);
                     rect.height += (extra * ppp).ceil() as u32;
@@ -912,6 +1009,8 @@ impl eframe::App for App {
         eframe::set_value(storage, PLACEMENTS_STORAGE_KEY, &self.placements);
         eframe::set_value(storage, MODE_STORAGE_KEY, &self.bar.mode);
         eframe::set_value(storage, REGION_STORAGE_KEY, &self.last_region);
+        eframe::set_value(storage, PREFIX_STORAGE_KEY, &self.bar.prefix);
+        eframe::set_value(storage, FOLDER_STORAGE_KEY, &self.captures_dir);
     }
 
     /// The bar has no quit button yet, so a killed process should lose little.
@@ -928,13 +1027,14 @@ impl eframe::App for App {
         [0.0, 0.0, 0.0, 0.0] // transparent window: only the bar is visible
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
         while let Ok(cmd) = self.commands.try_recv() {
             self.handle(cmd);
         }
         self.poll_captures();
         self.poll_output(ctx);
+        self.poll_folder_choice();
         self.track_position(ctx);
 
         if let Some(start) = self.record_started {
@@ -969,6 +1069,9 @@ impl eframe::App for App {
         }
         self.place_window(ctx, used);
         self.show_overlay(ctx);
+        if std::mem::take(&mut self.folder_requested) {
+            self.choose_folder(ctx, frame);
+        }
 
         // Keep the timer and toast fresh without spinning the CPU (NFR-7). A drag polls
         // faster, to show the snap preview and catch the drop.
@@ -1050,6 +1153,7 @@ mod tests {
             (Code::Digit2, Command::CaptureWith(CaptureMode::Window)),
             (Code::Digit3, Command::CaptureWith(CaptureMode::Screen)),
             (Code::KeyB, Command::ToggleBuffer),
+            (Code::KeyL, Command::ToggleDestination),
         ] {
             assert_eq!(keys(code), Some((mods, cmd)));
         }

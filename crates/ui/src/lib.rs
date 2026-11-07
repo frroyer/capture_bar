@@ -11,7 +11,7 @@ use cb_core::{CaptureMode, Command};
 use chrono::{DateTime, Local};
 use egui::{
     emath::RectAlign, vec2, Align2, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions,
-    FontFamily, FontId, Frame, Id, Label, Margin, Response, RichText, Role, Sense, Stroke,
+    FontFamily, FontId, Frame, Id, Key, Label, Margin, Response, RichText, Role, Sense, Stroke,
     StrokeKind, TextureHandle, Tooltip, Ui, Vec2, WidgetInfo,
 };
 use icons::Icon;
@@ -55,6 +55,10 @@ pub struct BarState {
     pub tooltip_side: TooltipSide,
     /// How strongly the bar flashes to get noticed, from 0 (not at all) to 1.
     pub attention: f32,
+    /// What new capture file names start with (FR-30).
+    pub prefix: String,
+    /// The prefix and folder panel is open.
+    pub destination_open: bool,
 }
 
 /// Which side of the bar has room for tooltips, reserved by the host.
@@ -516,6 +520,24 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                 }
 
                 if !state.recording {
+                    let fill = if state.destination_open {
+                        SELECTED
+                    } else {
+                        CHIP
+                    };
+                    if chip(
+                        ui,
+                        &[
+                            Piece::Icon(Icon::Folder),
+                            Piece::Text(&prefix_label(&state.prefix)),
+                        ],
+                        &ChipStyle::new(fill, TEXT),
+                        &format!("Name and folder of new captures ({})", shortcut("L")),
+                    )
+                    .clicked()
+                    {
+                        out.commands.push(Command::ToggleDestination);
+                    }
                     divider(ui);
                     let toggle = |on: bool| {
                         if on {
@@ -639,6 +661,106 @@ pub fn toast(ui: &mut Ui, message: &str, can_undo: bool) -> bool {
             });
         });
     undo
+}
+
+/// The prefix as the bar shows it: short enough not to stretch the bar.
+fn prefix_label(prefix: &str) -> String {
+    const MAX: usize = 16;
+    match prefix.trim() {
+        "" => "No prefix".into(),
+        p if p.chars().count() > MAX => p.chars().take(MAX - 1).chain(['…']).collect(),
+        p => p.into(),
+    }
+}
+
+/// The width of the prefix and folder panel, in points.
+pub const DESTINATION_WIDTH: f32 = 460.0;
+
+/// What the user did in the prefix and folder panel this frame.
+#[derive(Debug, Default)]
+pub struct DestinationOutput {
+    pub choose_folder: bool,
+    pub close: bool,
+}
+
+/// Where new captures go and what they are called (FR-30). The prefix is edited in place;
+/// `focus` puts the keyboard in its field.
+pub fn destination_panel(
+    ui: &mut Ui,
+    prefix: &mut String,
+    folder: &str,
+    next_file: &str,
+    focus: bool,
+) -> DestinationOutput {
+    use palette::*;
+    let mut out = DestinationOutput::default();
+    let small_chip = ChipStyle {
+        fill: CHIP,
+        color: TEXT,
+        height: 28.0,
+    };
+    let caption = |ui: &mut Ui, text: &str| {
+        ui.add_sized(
+            vec2(48.0, 28.0),
+            Label::new(RichText::new(text).color(MUTED)),
+        );
+    };
+    Frame::new()
+        .fill(BAR)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(CornerRadius::same(16))
+        .inner_margin(Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_width(DESTINATION_WIDTH - 26.0);
+            ui.horizontal(|ui| {
+                caption(ui, "Prefix");
+                let edit = ui.add(
+                    egui::TextEdit::singleline(prefix)
+                        .char_limit(40)
+                        .desired_width(260.0)
+                        .hint_text("none: the timestamp alone")
+                        .text_color(TEXT)
+                        .background_color(CHIP)
+                        .margin(Margin::symmetric(8, 6)),
+                );
+                if focus {
+                    edit.request_focus();
+                }
+                let keys = ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape));
+                if edit.lost_focus() && keys {
+                    out.close = true;
+                }
+                if chip(ui, &[Piece::Text("Done")], &small_chip, "Close (Enter)").clicked() {
+                    out.close = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                caption(ui, "Folder");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if chip(
+                        ui,
+                        &[Piece::Icon(Icon::Folder), Piece::Text("Choose…")],
+                        &small_chip,
+                        "Pick the folder for new captures",
+                    )
+                    .clicked()
+                    {
+                        out.choose_folder = true;
+                    }
+                    ui.add(Label::new(RichText::new(folder).color(TEXT)).truncate())
+                        .on_hover_text(folder);
+                });
+            });
+            ui.add(
+                Label::new(
+                    RichText::new(format!("Next: {next_file}"))
+                        .color(MUTED)
+                        .size(12.0),
+                )
+                .truncate(),
+            );
+        });
+    out
 }
 
 /// One capture in the tray: its picture, then its name and details.
@@ -917,6 +1039,58 @@ mod tests {
         assert!(shapes[0].contains("3 captures"), "{shapes:?}");
         assert!(at("Saving…".into()) < at(format!("{:?}", new_pic.id())));
         assert!(at(format!("{:?}", new_pic.id())) < at(format!("{:?}", old_pic.id())));
+    }
+
+    #[test]
+    fn prefix_label_stays_short() {
+        assert_eq!(prefix_label(""), "No prefix");
+        assert_eq!(prefix_label("acme"), "acme");
+        let long = prefix_label("a very long client name indeed");
+        assert_eq!(long.chars().count(), 16);
+        assert!(long.ends_with('…'));
+    }
+
+    /// Opens the panel with the keyboard in the prefix, types `typed`, then presses `key`.
+    fn type_in_destination(prefix: &str, typed: &str, key: Key) -> (String, bool) {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx, None);
+        let mut prefix = prefix.to_owned();
+        let mut closed = false;
+        let press = |pressed| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let frames = [
+            vec![],
+            vec![egui::Event::Text(typed.into())],
+            vec![press(true), press(false)],
+            vec![],
+        ];
+        for (n, events) in frames.into_iter().enumerate() {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let out = destination_panel(ui, &mut prefix, "C:/Captures", "x.png", n == 0);
+                closed |= out.close;
+            });
+            output.textures_delta.clear();
+        }
+        (prefix, closed)
+    }
+
+    #[test]
+    fn the_prefix_is_typed_in_place_and_enter_or_escape_close() {
+        assert_eq!(
+            type_in_destination("", "acme", Key::Enter),
+            ("acme".into(), true)
+        );
+        assert!(type_in_destination("a", "b", Key::Escape).1);
+        assert!(!type_in_destination("a", "b", Key::Tab).1);
     }
 
     #[test]
