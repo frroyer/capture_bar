@@ -100,6 +100,13 @@ fn shortcut_modifiers() -> Modifiers {
     }
 }
 
+/// The command a hotkey event asks for. A shortcut fires once, on the press.
+fn shortcut_command(map: &HashMap<u32, Command>, ev: &GlobalHotKeyEvent) -> Option<Command> {
+    (ev.state == HotKeyState::Pressed)
+        .then(|| map.get(&ev.id).cloned())
+        .flatten()
+}
+
 fn default_shortcuts() -> Vec<(HotKey, Command)> {
     let m = Some(shortcut_modifiers());
     vec![
@@ -208,17 +215,23 @@ impl App {
             }
         };
 
+        let toast = shortcut_map.is_empty().then(|| {
+            (
+                "Global shortcuts unavailable: use the bar or the tray icon".to_owned(),
+                Instant::now(),
+            )
+        });
+
         // With a handler set, the crate no longer fills `GlobalHotKeyEvent::receiver()`.
         // Waking the UI here makes shortcuts work even if it is idle.
         let (commands_tx, commands) = mpsc::channel();
         let ctx = cc.egui_ctx.clone();
         let tx = commands_tx.clone();
         GlobalHotKeyEvent::set_event_handler(Some(move |ev: GlobalHotKeyEvent| {
-            if ev.state == HotKeyState::Pressed {
-                if let Some(cmd) = shortcut_map.get(&ev.id) {
-                    let _ = tx.send(cmd.clone());
-                    ctx.request_repaint();
-                }
+            if let Some(cmd) = shortcut_command(&shortcut_map, &ev) {
+                tracing::debug!(?cmd, "shortcut");
+                let _ = tx.send(cmd);
+                ctx.request_repaint();
             }
         }));
 
@@ -256,7 +269,7 @@ impl App {
             capture: CaptureService::new(source.clone()),
             pending: HashMap::new(),
             record_started: None,
-            toast: None,
+            toast,
             captures_dir,
             _hotkeys: hotkeys,
             _tray: tray,
@@ -732,6 +745,45 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hotkey_event(id: u32, state: HotKeyState) -> GlobalHotKeyEvent {
+        GlobalHotKeyEvent { id, state }
+    }
+
+    #[test]
+    fn a_shortcut_fires_on_press_only() {
+        let map = HashMap::from([(7, Command::Capture)]);
+        let fire = |id, state| shortcut_command(&map, &hotkey_event(id, state));
+        assert_eq!(fire(7, HotKeyState::Pressed), Some(Command::Capture));
+        assert_eq!(fire(7, HotKeyState::Released), None);
+        assert_eq!(fire(8, HotKeyState::Pressed), None);
+    }
+
+    /// FR-11, FR-14, FR-22, FR-4, FR-28: each action has one key, on the platform's modifiers.
+    #[test]
+    fn default_map_covers_every_action_once() {
+        let map = default_shortcuts();
+        let keys = |code| {
+            map.iter()
+                .find(|(hk, _)| hk.key == code)
+                .map(|(hk, cmd)| (hk.mods, cmd.clone()))
+        };
+        let mods = shortcut_modifiers();
+        for (code, cmd) in [
+            (Code::Space, Command::ToggleBar),
+            (Code::KeyS, Command::Capture),
+            (Code::KeyR, Command::ToggleRecording),
+            (Code::KeyP, Command::TogglePause),
+            (Code::Digit1, Command::CaptureWith(CaptureMode::Region)),
+            (Code::Digit2, Command::CaptureWith(CaptureMode::Window)),
+            (Code::Digit3, Command::CaptureWith(CaptureMode::Screen)),
+            (Code::KeyB, Command::ToggleBuffer),
+        ] {
+            assert_eq!(keys(code), Some((mods, cmd)));
+        }
+        let ids: std::collections::HashSet<_> = map.iter().map(|(hk, _)| hk.id()).collect();
+        assert_eq!(ids.len(), map.len(), "two actions share a key");
+    }
 
     #[test]
     fn points_for_pixel_round_trips_at_fractional_scales() {

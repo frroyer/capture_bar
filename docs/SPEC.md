@@ -242,9 +242,9 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 
 - AC: all 9 shortcuts of M3 fire while another app is focused, on all three OSes and on Wayland via the GlobalShortcuts portal.
 
-- [ ] Integrate global-hotkey (macOS / Windows / X11)
-- [ ] Wayland: XDG GlobalShortcuts portal backend, with a fallback message if the portal is missing
-- [ ] Action dispatcher (shortcut → command bus)
+- [x] Integrate global-hotkey (macOS / Windows / X11) — Windows verified with another app focused; macOS and X11 not run yet
+- [ ] Wayland: XDG GlobalShortcuts portal backend, with a fallback message if the portal is missing — not started, needs a Linux machine; the message exists for when no shortcut can be registered
+- [x] Action dispatcher (shortcut → command bus)
 
 **US-3.2** As a user, I want to remap shortcuts and be warned about conflicts. (M3 · FR-28)
 

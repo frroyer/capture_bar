@@ -44,7 +44,7 @@ only if a spike shows a need.
 
 - Builds and runs: floating, borderless, transparent, always-on-top bar; mode switch;
   Capture / Record buttons; buffer counter and tray; collapse pill; drag by the grip.
-- Global shortcuts registered (Ctrl+Shift / ⌥⇧ map from M3).
+- Global shortcuts (Ctrl+Shift / ⌥⇧ map from M3) fire from any app on Windows; macOS and X11 are not run yet, and the Wayland portal backend is not started. If none can be registered, a toast says so.
 - The collapse button shows the M2.3 pill; Ctrl+Shift+Space hides and shows. Hidden means transparent and click-through, not an OS-hidden window, because eframe stops running hidden windows. The bar fades to 40% when the cursor is away. A tray icon (not on Linux yet) toggles the bar and quits.
 - Bar UI follows M2.1 (vector icons in `crates/ui/src/icons.rs`; shortcuts in tooltips only). The window
   follows its content and grows while hovered to give tooltips room. The buffer tray is not restyled yet.
