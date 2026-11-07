@@ -7,12 +7,45 @@ use cb_core::ScreenSource;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(not(target_os = "linux"))]
+mod tray;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 mod windows_spike;
 
 mod stub;
+
+#[cfg(not(target_os = "linux"))]
+pub use tray::Tray;
+
+/// Keeps the tray icon alive. Linux has no icon yet.
+#[cfg(target_os = "linux")]
+pub struct Tray;
+
+/// What the user picked on the tray icon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayAction {
+    ToggleBar,
+    Quit,
+}
+
+/// Add the tray / menu-bar icon. Call on the thread of the event loop, once it runs.
+///
+/// Not on Linux yet: the `tray-icon` crate links GTK, which NFR-1 rules out.
+pub fn create_tray(
+    on_action: impl Fn(TrayAction) + Send + Sync + 'static,
+) -> cb_core::CaptureResult<Tray> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        tray::create(on_action)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = on_action;
+        Err(cb_core::CaptureError::NotImplemented("tray icon"))
+    }
+}
 
 /// Numbers from one US-1.2 spike recording, logged against NFR-6.
 #[derive(Debug)]
@@ -100,6 +133,31 @@ pub fn system_ui_fonts() -> Option<(Vec<u8>, Vec<u8>)> {
     #[cfg(windows)]
     {
         windows::system_ui_fonts()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Whether the primary mouse button is held right now, or `None` if this OS cannot
+/// tell. The app does not see the release that ends an OS window drag.
+pub fn primary_button_down() -> Option<bool> {
+    #[cfg(windows)]
+    {
+        Some(windows::primary_button_down())
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Where the cursor is, in global physical pixels, if this OS can tell.
+pub fn cursor_position() -> Option<(i32, i32)> {
+    #[cfg(windows)]
+    {
+        windows::cursor_position()
     }
     #[cfg(not(windows))]
     {

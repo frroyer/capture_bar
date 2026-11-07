@@ -13,6 +13,10 @@ raw-window-handle = "0.6"
 [dev-dependencies]
 cb-encode.workspace = true
 
+# Not on Linux: this crate links GTK at build time, which NFR-1 rules out.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = "0.26"
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Foundation",
@@ -33,6 +37,7 @@ windows = { version = "0.62", features = [
     "Win32_System_WinRT_Direct3D11",
     "Win32_System_WinRT_Graphics_Capture",
     "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

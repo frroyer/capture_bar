@@ -225,16 +225,16 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 
 - AC: a drop within 24 px of an edge snaps it. Left/right edges switch to the vertical layout. A double-click on the grip docks to the nearest edge.
 
-- [ ] Snap logic + magnetic preview
-- [ ] Vertical layout variant
+- [x] Snap logic + magnetic preview — Windows verified; the preview is the bar's border turning blue; macOS and Linux need display listing and drop detection
+- [x] Vertical layout variant — icons only, built from the M2.5 description without the artboard
 
 **US-2.4** As a user, I want to collapse or hide the bar, so that it never gets in the way. (M2.3 · FR-4, FR-5)
 
 - AC: the collapse button shows the pill of M2.3; ⌥⇧Space hides and shows. The bar fades to 40% when the cursor is away.
 
-- [ ] Pill layout
-- [ ] Show/hide and fade animation (≤ 150 ms)
-- [ ] Tray/menu-bar icon fallback
+- [x] Pill layout — built from the M2.3 description without the artboard; shows the count, and the time while recording
+- [x] Show/hide and fade animation (≤ 150 ms) — Windows verified; hidden keeps the window open, transparent and click-through
+- [x] Tray/menu-bar icon fallback — Windows verified; macOS untested; Linux has none yet, because the tray-icon crate links GTK (NFR-1)
 
 ### E3 · Global shortcuts
 
@@ -242,9 +242,9 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 
 - AC: all 9 shortcuts of M3 fire while another app is focused, on all three OSes and on Wayland via the GlobalShortcuts portal.
 
-- [ ] Integrate global-hotkey (macOS / Windows / X11)
-- [ ] Wayland: XDG GlobalShortcuts portal backend, with a fallback message if the portal is missing
-- [ ] Action dispatcher (shortcut → command bus)
+- [x] Integrate global-hotkey (macOS / Windows / X11) — Windows verified with another app focused; macOS and X11 not run yet
+- [ ] Wayland: XDG GlobalShortcuts portal backend, with a fallback message if the portal is missing — not started, needs a Linux machine; the message exists for when no shortcut can be registered
+- [x] Action dispatcher (shortcut → command bus)
 
 **US-3.2** As a user, I want to remap shortcuts and be warned about conflicts. (M3 · FR-28)
 
@@ -259,30 +259,30 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 
 - AC: the selected segment is highlighted as in M1 and persists across launches.
 
-- [ ] Mode state in config; segmented control
+- [x] Mode state in config; segmented control
 
 **US-4.2** As a user, I want a precise region selector with keyboard hints. (M2.4 · FR-8)
 
 - AC: the overlay shows dimensions and handles; Enter, R, Space, Esc and ⇧ behave as in M2.4, across all monitors.
 
-- [ ] Full-screen overlay per monitor with frozen-frame background
-- [ ] Handles, aspect lock, window snap
-- [ ] Key hints chip row
+- [x] Full-screen overlay with frozen-frame background — one window across all monitors, not one per monitor; Windows verified on one monitor
+- [x] Handles, aspect lock, window snap — R only reports that recording waits for US-5.1
+- [x] Key hints chip row — built from the M2.4 description without the artboard
 
 **US-4.3** As a user, I want to capture a window or a whole screen in one click. (M1 · FR-9, FR-10)
 
 - AC: the hovered window is highlighted; the capture excludes shadows unless enabled.
 
-- [ ] Window enumeration + hit-testing per OS
-- [ ] Monitor-under-cursor and all-monitors stitch
+- [x] Window enumeration + hit-testing per OS — Windows verified; macOS and Linux not started
+- [x] Monitor-under-cursor and all-monitors stitch — Windows, one monitor verified; the overlay uses the stitch, and its setting comes with US-8.2
 
 **US-4.4** As a user, I want each screenshot to land in the buffer and clipboard instantly, with a confirmation I can undo. (M2.6 · FR-12, FR-13, NFR-4)
 
 - AC: shortcut → toast ≤ 100 ms; the image is on the clipboard; Undo removes it from the buffer within 2 s.
 
-- [ ] Frame grab → lock-free queue → PNG worker
-- [ ] Clipboard write (arboard)
-- [ ] Toast component with Annotate / Undo (M2.6)
+- [x] Frame grab → lock-free queue → PNG worker — a plain channel to one worker thread; bounded memory is US-6.1
+- [x] Clipboard write (arboard) — Windows verified
+- [x] Toast component with Undo (M2.6), built without the artboard — Annotate comes with the editor (E7)
 
 ### E5 · Screen recording
 

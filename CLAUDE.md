@@ -44,13 +44,15 @@ only if a spike shows a need.
 
 - Builds and runs: floating, borderless, transparent, always-on-top bar; mode switch;
   Capture / Record buttons; buffer counter and tray; collapse pill; drag by the grip.
-- Global shortcuts registered (Ctrl+Shift / ⌥⇧ map from M3).
+- Global shortcuts (Ctrl+Shift / ⌥⇧ map from M3) fire from any app on Windows; macOS and X11 are not run yet, and the Wayland portal backend is not started. If none can be registered, a toast says so.
+- The collapse button shows the M2.3 pill; Ctrl+Shift+Space hides and shows. Hidden means transparent and click-through, not an OS-hidden window, because eframe stops running hidden windows. The bar fades to 40% when the cursor is away. A tray icon (not on Linux yet) toggles the bar and quits.
 - Bar UI follows M2.1 (vector icons in `crates/ui/src/icons.rs`; shortcuts in tooltips only). The window
   follows its content and grows while hovered to give tooltips room. The buffer tray is not restyled yet.
-- Bar position is saved per monitor layout through eframe storage and pulled back on-screen when monitors
-  change. Near a screen's bottom edge, tooltips overlap the bar and the tray runs off-screen (US-2.3).
-- Windows: the bar is excluded from captures and has no OS frame; display listing and Display/Region stills work (Windows.Graphics.Capture). Window
-  capture and `start_stream` are stubs. The US-1.2 spike records MP4 via `windows_spike`; results
+- Bar position and dock are saved per monitor layout through eframe storage and pulled back on-screen when
+  monitors change. The bar docks to screen edges, vertical on left and right. `App::bar_pos` is the source of
+  truth; the window follows it, because the tray, toast and tooltip band open on whichever side has room.
+- Screenshots work on Windows (Windows.Graphics.Capture): Screen takes the monitor under the cursor; Window and Region open one overlay window across all monitors, over a frozen image. Each capture goes to the buffer, the clipboard and a PNG in `~/Captures` on a worker thread, with an Undo toast. The buffer tray has no thumbnails yet (US-6.3) and the buffer does not survive a restart (US-6.1).
+- Windows: the bar is excluded from captures and has no OS frame. `start_stream` is a stub. The US-1.2 spike records MP4 via `windows_spike`; results
   in `docs/spikes/us-1.2-windows.md`.
 - macOS and Linux backends are still **stubs**: captures appear in the buffer, then show
   "not implemented on this platform yet". Next step is the rest of **US-1.2** (macOS, Linux spikes).
