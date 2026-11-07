@@ -225,8 +225,8 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 
 - AC: a drop within 24 px of an edge snaps it. Left/right edges switch to the vertical layout. A double-click on the grip docks to the nearest edge.
 
-- [ ] Snap logic + magnetic preview
-- [ ] Vertical layout variant
+- [x] Snap logic + magnetic preview — Windows verified; the preview is the bar's border turning blue; macOS and Linux need display listing and drop detection
+- [x] Vertical layout variant — icons only, built from the M2.5 description without the artboard
 
 **US-2.4** As a user, I want to collapse or hide the bar, so that it never gets in the way. (M2.3 · FR-4, FR-5)
 

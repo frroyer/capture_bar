@@ -107,6 +107,19 @@ pub fn system_ui_fonts() -> Option<(Vec<u8>, Vec<u8>)> {
     }
 }
 
+/// Whether the primary mouse button is held right now, or `None` if this OS cannot
+/// tell. The app does not see the release that ends an OS window drag.
+pub fn primary_button_down() -> Option<bool> {
+    #[cfg(windows)]
+    {
+        Some(windows::primary_button_down())
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// The screen source for the current OS.
 pub fn screen_source() -> Box<dyn ScreenSource> {
     #[cfg(target_os = "macos")]

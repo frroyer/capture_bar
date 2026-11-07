@@ -8,6 +8,8 @@ pub const SIZE: f32 = 16.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
     Grip,
+    /// The grip of the vertical bar.
+    GripWide,
     Region,
     Window,
     Screen,
@@ -51,6 +53,13 @@ pub fn paint(p: &Painter, center: Pos2, icon: Icon, color: Color32) {
         Icon::Grip => {
             for x in [-2.5, 2.5] {
                 for y in [-5.0, 0.0, 5.0] {
+                    p.circle_filled(at(x, y), 1.4, color);
+                }
+            }
+        }
+        Icon::GripWide => {
+            for x in [-5.0, 0.0, 5.0] {
+                for y in [-2.5, 2.5] {
                     p.circle_filled(at(x, y), 1.4, color);
                 }
             }

@@ -6,8 +6,9 @@ mod icons;
 use cb_buffer::{Buffer, ItemKind, ItemState};
 use cb_core::{CaptureMode, Command};
 use egui::{
-    vec2, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions, FontFamily, FontId, Frame,
-    Margin, Response, RichText, Role, Sense, Stroke, StrokeKind, Tooltip, Ui, Vec2, WidgetInfo,
+    emath::RectAlign, vec2, Align2, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions,
+    FontFamily, FontId, Frame, Id, Margin, Response, RichText, Role, Sense, Stroke, StrokeKind,
+    Tooltip, Ui, Vec2, WidgetInfo,
 };
 use icons::Icon;
 use std::sync::Arc;
@@ -36,6 +37,21 @@ pub struct BarState {
     pub tray_open: bool,
     pub mic_on: bool,
     pub cam_on: bool,
+    /// Docked to a left or right edge: stacked, icons only (M2.5).
+    pub vertical: bool,
+    /// Being dragged within snapping distance of an edge.
+    pub snap_preview: bool,
+    pub tooltip_side: TooltipSide,
+}
+
+/// Which side of the bar has room for tooltips, reserved by the host.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TooltipSide {
+    #[default]
+    Below,
+    Above,
+    Right,
+    Left,
 }
 
 /// What the user did this frame.
@@ -49,10 +65,17 @@ pub struct BarOutput {
     pub collapse: bool,
     /// The pointer is on the bar, so a tooltip may be about to open.
     pub hovered: bool,
+    pub grip_double_clicked: bool,
+    /// Where the bar was drawn, in window coordinates.
+    pub top_left: Vec2,
+    pub size: Vec2,
 }
 
-/// Extra window height a tooltip needs below the bar: tooltips cannot leave the window.
+/// Extra window height a tooltip needs above or below the bar: tooltips cannot leave
+/// the window.
 pub const TOOLTIP_ROOM: f32 = 44.0;
+/// The same beside the vertical bar, where a tooltip's whole width has to fit.
+pub const TOOLTIP_ROOM_SIDE: f32 = 296.0;
 /// Puts tooltips below the bar's edge rather than on its margin.
 const TOOLTIP_GAP: f32 = 14.0;
 
@@ -137,6 +160,9 @@ impl ChipStyle {
 
 /// A bar button (M2.1). `tooltip` also names it for screen readers.
 fn chip(ui: &mut Ui, pieces: &[Piece], style: &ChipStyle, tooltip: &str) -> Response {
+    // Stacked chips show their leading icon alone; the tooltip names them.
+    let compact = ui.layout().is_vertical();
+    let pieces = if compact { &pieces[..1] } else { pieces };
     let label_font = FontId::new(14.0, FontFamily::Name(SEMIBOLD.into()));
     let small_font = FontId::new(11.5, FontFamily::Proportional);
 
@@ -169,7 +195,12 @@ fn chip(ui: &mut Ui, pieces: &[Piece], style: &ChipStyle, tooltip: &str) -> Resp
         })
         .collect();
     let content = widths.iter().sum::<f32>() + GAP * (pieces.len() - 1) as f32;
-    let size = vec2((content + PAD_X * 2.0).max(style.height), style.height);
+    let width = if compact {
+        style.height
+    } else {
+        (content + PAD_X * 2.0).max(style.height)
+    };
+    let size = vec2(width, style.height);
 
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     response.widget_info(|| WidgetInfo::labeled(Role::Button, true, tooltip));
@@ -217,19 +248,35 @@ fn chip(ui: &mut Ui, pieces: &[Piece], style: &ChipStyle, tooltip: &str) -> Resp
 }
 
 fn show_tooltip(response: &Response, text: &str) {
-    Tooltip::for_enabled(response)
-        .gap(TOOLTIP_GAP)
-        .show(|ui| ui.label(text));
+    let side: TooltipSide = response
+        .ctx
+        .data(|d| d.get_temp(Id::NULL))
+        .unwrap_or_default();
+    // The fallback stays on the reserved side, flush with the other end of the widget.
+    let (align, fallback): (_, &[RectAlign]) = match side {
+        TooltipSide::Below => (RectAlign::BOTTOM_START, &[RectAlign::BOTTOM_END]),
+        TooltipSide::Above => (RectAlign::TOP_START, &[RectAlign::TOP_END]),
+        TooltipSide::Right => (RectAlign::RIGHT_START, &[RectAlign::RIGHT_END]),
+        TooltipSide::Left => (RectAlign::LEFT_START, &[RectAlign::LEFT_END]),
+    };
+    let mut tooltip = Tooltip::for_enabled(response).gap(TOOLTIP_GAP);
+    tooltip.popup = tooltip.popup.align(align).align_alternatives(fallback);
+    tooltip.show(|ui| ui.label(text));
 }
 
 /// A thin divider between groups of controls.
 fn divider(ui: &mut Ui) {
-    let (rect, _) = ui.allocate_exact_size(vec2(9.0, 24.0), Sense::hover());
-    ui.painter().vline(
-        rect.center().x,
-        rect.y_range(),
-        Stroke::new(1.0, palette::BORDER),
-    );
+    let stroke = Stroke::new(1.0, palette::BORDER);
+    if ui.layout().is_vertical() {
+        let (rect, _) = ui.allocate_exact_size(vec2(H, 9.0), Sense::hover());
+        let inset = rect.width() / 6.0;
+        let x = rect.x_range();
+        ui.painter()
+            .hline((x.min + inset)..=(x.max - inset), rect.center().y, stroke);
+    } else {
+        let (rect, _) = ui.allocate_exact_size(vec2(9.0, 24.0), Sense::hover());
+        ui.painter().vline(rect.center().x, rect.y_range(), stroke);
+    }
 }
 
 fn fmt_time(secs: u64) -> String {
@@ -240,26 +287,41 @@ fn fmt_time(secs: u64) -> String {
 pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
     use palette::*;
     let mut out = BarOutput::default();
+    let vertical = state.vertical;
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(Id::NULL, state.tooltip_side));
+    let border = if state.snap_preview {
+        ACCENT
+    } else if state.recording {
+        RECORD
+    } else {
+        BORDER
+    };
 
     let frame = Frame::new()
         .fill(BAR)
-        .stroke(Stroke::new(
-            1.0,
-            if state.recording { RECORD } else { BORDER },
-        ))
+        .stroke(Stroke::new(1.0, border))
         .corner_radius(CornerRadius::same(20))
         .inner_margin(Margin::same(8))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
+            let content = |ui: &mut Ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
 
-                // Grip (drag to move).
-                let (rect, grip) = ui.allocate_exact_size(vec2(22.0, H), Sense::click_and_drag());
-                icons::paint(ui.painter(), rect.center(), Icon::Grip, MUTED);
+                // Grip (drag to move, double-click to dock).
+                let (grip_size, grip_icon) = if vertical {
+                    (vec2(H, 22.0), Icon::GripWide)
+                } else {
+                    (vec2(22.0, H), Icon::Grip)
+                };
+                let (rect, grip) = ui.allocate_exact_size(grip_size, Sense::click_and_drag());
+                icons::paint(ui.painter(), rect.center(), grip_icon, MUTED);
                 let grip = grip.on_hover_cursor(CursorIcon::Grab);
-                show_tooltip(&grip, "Drag to move");
+                show_tooltip(&grip, "Drag to move. Double-click to dock");
                 if grip.drag_started() {
                     out.start_drag = true;
+                }
+                if grip.double_clicked() {
+                    out.grip_double_clicked = true;
                 }
 
                 if !state.recording {
@@ -282,6 +344,17 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                 let record_key = shortcut("R");
                 if state.recording {
                     let time = fmt_time(state.elapsed_secs);
+                    if vertical {
+                        // Stacked chips drop their text, but the elapsed time must stay.
+                        let (rect, _) = ui.allocate_exact_size(vec2(H, 14.0), Sense::hover());
+                        ui.painter().text(
+                            rect.center(),
+                            Align2::CENTER_CENTER,
+                            &time,
+                            FontId::new(11.5, FontFamily::Proportional),
+                            RECORD,
+                        );
+                    }
                     if chip(
                         ui,
                         &[
@@ -329,7 +402,7 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                 } else {
                     Icon::ChevronDown
                 };
-                if chip(
+                let buffer_chip = chip(
                     ui,
                     &[
                         Piece::Icon(Icon::Layers),
@@ -339,9 +412,21 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                     ],
                     &ChipStyle::new(CHIP, TEXT),
                     &format!("Show or hide the buffer ({})", shortcut("B")),
-                )
-                .clicked()
-                {
+                );
+                if vertical && !buffer.is_empty() {
+                    // The count stays visible as a corner badge on the icon-only chip.
+                    let center = buffer_chip.rect.right_top() + vec2(-8.0, 8.0);
+                    let painter = ui.painter();
+                    painter.circle_filled(center, 8.0, ACCENT);
+                    painter.text(
+                        center,
+                        Align2::CENTER_CENTER,
+                        &count,
+                        FontId::new(10.0, FontFamily::Proportional),
+                        Color32::WHITE,
+                    );
+                }
+                if buffer_chip.clicked() {
                     out.commands.push(Command::ToggleBuffer);
                 }
 
@@ -389,10 +474,17 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                         out.collapse = true;
                     }
                 }
-            });
+            };
+            if vertical {
+                ui.vertical(content);
+            } else {
+                ui.horizontal(content);
+            }
         });
 
     out.hovered = ui.rect_contains_pointer(frame.response.rect);
+    out.top_left = frame.response.rect.min.to_vec2();
+    out.size = frame.response.rect.size();
     out
 }
 
@@ -404,7 +496,7 @@ fn mode_switch(ui: &mut Ui, current: CaptureMode, out: &mut BarOutput) {
         .corner_radius(CornerRadius::same(12))
         .inner_margin(Margin::same(2))
         .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.spacing_mut().item_spacing = vec2(2.0, 2.0);
             for (mode, icon, key) in [
                 (CaptureMode::Region, Icon::Region, "1"),
                 (CaptureMode::Window, Icon::Window, "2"),
@@ -435,8 +527,8 @@ fn mode_switch(ui: &mut Ui, current: CaptureMode, out: &mut BarOutput) {
         });
 }
 
-/// The buffer tray (M1, FR-22). Returns commands for item actions later.
-pub fn tray(ui: &mut Ui, buffer: &Buffer) {
+/// The buffer tray (M1, FR-22), `width` points wide. Returns commands for item actions later.
+pub fn tray(ui: &mut Ui, buffer: &Buffer, width: f32) {
     use palette::*;
     Frame::new()
         .fill(BAR)
@@ -444,6 +536,8 @@ pub fn tray(ui: &mut Ui, buffer: &Buffer) {
         .corner_radius(CornerRadius::same(16))
         .inner_margin(Margin::same(12))
         .show(ui, |ui| {
+            // Less the margin and the border on both sides.
+            ui.set_width((width - 26.0).max(1.0));
             ui.label(
                 RichText::new(format!("Buffer · {} captures", buffer.len()))
                     .color(TEXT)
@@ -504,8 +598,6 @@ pub fn tray(ui: &mut Ui, buffer: &Buffer) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const TOOLTIP_SLACK: f32 = 4.0;
 
     #[test]
     fn overlay_contrasts_with_fill() {
@@ -577,38 +669,59 @@ mod tests {
         assert!(!hovered_at(egui::pos2(100.0, 150.0)));
     }
 
-    /// Hover along the whole bar, in a window sized like the app's: a tooltip must
-    /// appear for every button and never cover the bar.
-    #[test]
-    fn tooltips_stay_clear_of_the_bar() {
+    /// Hover along the whole bar, in a window with the room the app reserves on `side`:
+    /// a tooltip must appear for every button and never cover the bar.
+    fn assert_tooltips_clear(side: TooltipSide, vertical: bool) {
         // The app uses this font on Windows. Its taller lines are what tooltips must fit.
         let system = std::fs::read("C:/Windows/Fonts/segoeui.ttf")
             .ok()
             .zip(std::fs::read("C:/Windows/Fonts/seguisb.ttf").ok());
         let state = BarState {
             mic_on: true,
+            vertical,
+            tooltip_side: side,
             ..Default::default()
         };
         let buffer = Buffer::new();
 
         let ctx = egui::Context::default();
         install_fonts(&ctx, system.clone());
-        let mut bar_size = Vec2::ZERO;
+        let mut size = Vec2::ZERO;
         for _ in 0..2 {
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                bar(ui, &state, &buffer);
-                bar_size = ui.min_rect().size();
+                size = bar(ui, &state, &buffer).size;
             });
             output.textures_delta.clear();
         }
-        let window = egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            vec2(bar_size.x, bar_size.y + TOOLTIP_ROOM),
-        );
 
-        let mut x = 40.0;
+        // Slack: at fractional display scales the window ends up slightly short,
+        // and a tooltip that no longer fits gets moved over the bar.
+        let slack = 4.0;
+        let (room, offset) = match side {
+            TooltipSide::Below => (vec2(0.0, TOOLTIP_ROOM), Vec2::ZERO),
+            TooltipSide::Above => (vec2(0.0, TOOLTIP_ROOM), vec2(0.0, TOOLTIP_ROOM)),
+            TooltipSide::Right => (vec2(TOOLTIP_ROOM_SIDE, 0.0), Vec2::ZERO),
+            TooltipSide::Left => (vec2(TOOLTIP_ROOM_SIDE, 0.0), vec2(TOOLTIP_ROOM_SIDE, 0.0)),
+        };
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, size + room);
+        let bar_rect = egui::Rect::from_min_size(offset.to_pos2(), size);
+        let mut roomy = window;
+        match side {
+            TooltipSide::Below => roomy.max.y -= slack,
+            TooltipSide::Above => roomy.min.y += slack,
+            TooltipSide::Right => roomy.max.x -= slack,
+            TooltipSide::Left => roomy.min.x += slack,
+        }
+
         let mut shown = 0;
-        while x < bar_size.x - 8.0 {
+        let mut along = 12.0;
+        let length = if vertical { size.y } else { size.x };
+        while along < length - 8.0 {
+            let pointer = if vertical {
+                bar_rect.min + vec2(size.x / 2.0, along)
+            } else {
+                bar_rect.min + vec2(along, size.y / 2.0)
+            };
             let ctx = egui::Context::default();
             install_fonts(&ctx, system.clone());
             for frame in 0..30 {
@@ -617,14 +730,16 @@ mod tests {
                     time: Some(f64::from(frame) * 0.1),
                     // Tooltips wait for the pointer to rest, so it moves only once.
                     events: if frame == 0 {
-                        vec![egui::Event::PointerMoved(egui::pos2(x, bar_size.y / 2.0))]
+                        vec![egui::Event::PointerMoved(pointer)]
                     } else {
                         Vec::new()
                     },
                     ..Default::default()
                 };
                 let mut output = ctx.run_ui(input, |ui| {
-                    bar(ui, &state, &buffer);
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(bar_rect), |ui| {
+                        bar(ui, &state, &buffer);
+                    });
                 });
                 output.textures_delta.clear();
             }
@@ -636,19 +751,55 @@ mod tests {
             });
             for tip in &tooltips {
                 shown += 1;
-                // Slack: at fractional display scales the window ends up slightly short,
-                // and a tooltip that no longer fits gets moved over the bar.
                 assert!(
-                    tip.min.y >= bar_size.y - 1.0
-                        && window.shrink(TOOLTIP_SLACK).max.y >= tip.max.y
-                        && tip.max.x <= window.max.x
-                        && tip.min.x >= window.min.x,
-                    "hovering x={x}: tooltip {tip:?}, bar {bar_size:?}, window {window:?}"
+                    !tip.intersects(bar_rect) && roomy.contains_rect(*tip),
+                    "{side:?}, hovering {pointer:?}: tooltip {tip:?}, bar {bar_rect:?}, \
+                     usable window {roomy:?}"
                 );
             }
-            x += 30.0;
+            along += if vertical { 20.0 } else { 30.0 };
         }
-        assert!(shown > 10, "only {shown} hover positions showed a tooltip");
+        assert!(
+            shown > 8,
+            "{side:?}: only {shown} hover positions showed a tooltip"
+        );
+    }
+
+    #[test]
+    fn tooltips_stay_clear_of_the_bar_below() {
+        assert_tooltips_clear(TooltipSide::Below, false);
+    }
+
+    #[test]
+    fn tooltips_stay_clear_of_the_bar_above() {
+        assert_tooltips_clear(TooltipSide::Above, false);
+    }
+
+    #[test]
+    fn tooltips_stay_clear_of_the_vertical_bar_on_its_right() {
+        assert_tooltips_clear(TooltipSide::Right, true);
+    }
+
+    #[test]
+    fn tooltips_stay_clear_of_the_vertical_bar_on_its_left() {
+        assert_tooltips_clear(TooltipSide::Left, true);
+    }
+
+    #[test]
+    fn vertical_bar_is_one_narrow_column() {
+        for recording in [false, true] {
+            let state = BarState {
+                recording,
+                vertical: true,
+                ..Default::default()
+            };
+            let size = bar_size(&state, 300.0);
+            assert!(size.x < 60.0, "vertical bar should be narrow: {size:?}");
+            assert!(
+                size.y > size.x * 2.0,
+                "vertical bar should be tall: {size:?}"
+            );
+        }
     }
 
     /// The window is sized to the bar, so the bar must not size itself to the window.

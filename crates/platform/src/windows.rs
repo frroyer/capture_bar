@@ -38,10 +38,11 @@ use windows::Win32::System::WinRT::Direct3D11::{
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    SetWindowDisplayAffinity, SetWindowPos, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, WDA_EXCLUDEFROMCAPTURE, WM_NCCALCSIZE,
+    GetSystemMetrics, SetWindowDisplayAffinity, SetWindowPos, SM_SWAPBUTTON, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WDA_EXCLUDEFROMCAPTURE, WM_NCCALCSIZE,
 };
 
 /// How long to wait for the first frame of a capture session.
@@ -127,6 +128,18 @@ pub(crate) fn remove_window_frame(
         .map_err(platform_err)?;
     }
     Ok(())
+}
+
+pub(crate) fn primary_button_down() -> bool {
+    // SAFETY: neither call has preconditions.
+    unsafe {
+        let key = if GetSystemMetrics(SM_SWAPBUTTON) != 0 {
+            VK_RBUTTON
+        } else {
+            VK_LBUTTON
+        };
+        GetAsyncKeyState(i32::from(key.0)) < 0
+    }
 }
 
 pub(crate) fn system_ui_fonts() -> Option<(Vec<u8>, Vec<u8>)> {
@@ -386,7 +399,7 @@ fn enum_monitors() -> Vec<HMONITOR> {
     monitors
 }
 
-fn monitor_bounds(monitor: HMONITOR) -> Option<(RECT, String)> {
+fn monitor_bounds(monitor: HMONITOR) -> Option<(RECT, RECT, String)> {
     let mut info = MONITORINFOEXW::default();
     info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
     // SAFETY: cbSize announces the extended struct, which `info` is.
@@ -395,6 +408,7 @@ fn monitor_bounds(monitor: HMONITOR) -> Option<(RECT, String)> {
         let name = String::from_utf16_lossy(&info.szDevice);
         (
             info.monitorInfo.rcMonitor,
+            info.monitorInfo.rcWork,
             name.trim_end_matches('\0').to_string(),
         )
     })
@@ -429,7 +443,7 @@ impl ScreenSource for WinScreenSource {
         Ok(enum_monitors()
             .into_iter()
             .filter_map(|m| {
-                let (r, name) = monitor_bounds(m)?;
+                let (r, work, name) = monitor_bounds(m)?;
                 let (mut dpi_x, mut dpi_y) = (96, 96);
                 // SAFETY: out-pointers are valid; on failure the 96 DPI default stays.
                 let _ = unsafe { GetDpiForMonitor(m, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
@@ -441,6 +455,12 @@ impl ScreenSource for WinScreenSource {
                         y: r.top,
                         width: (r.right - r.left) as u32,
                         height: (r.bottom - r.top) as u32,
+                    },
+                    work_area: Rect {
+                        x: work.left,
+                        y: work.top,
+                        width: (work.right - work.left) as u32,
+                        height: (work.bottom - work.top) as u32,
                     },
                     scale_factor: dpi_x as f32 / 96.0,
                 })
@@ -478,7 +498,7 @@ impl ScreenSource for WinScreenSource {
         let (x, y, w, h) = match region {
             None => (0, 0, capture.width, capture.height),
             Some(rect) => {
-                let (origin, _) = monitor_bounds(monitor).ok_or(CaptureError::TargetGone)?;
+                let (origin, ..) = monitor_bounds(monitor).ok_or(CaptureError::TargetGone)?;
                 let left = (rect.x - origin.left).max(0) as u32;
                 let top = (rect.y - origin.top).max(0) as u32;
                 let right =

@@ -10,15 +10,22 @@ use std::time::{Duration, Instant};
 
 use cb_buffer::{Buffer, ItemId, ItemKind, ItemState};
 use cb_capture::{CaptureEvent, CaptureService};
-use cb_core::{CaptureMode, CaptureTarget, Command, DisplayId, Rect};
-use cb_ui::{palette, BarState};
+use cb_core::{CaptureMode, CaptureTarget, Command, DisplayId, Edge, Rect};
+use cb_ui::{palette, BarState, TooltipSide};
 use eframe::egui;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
 /// Only for the first frame: after that the window follows its content.
 const INITIAL_SIZE: [f32; 2] = [900.0, 54.0];
-const POSITIONS_STORAGE_KEY: &str = "bar_positions";
+const PLACEMENTS_STORAGE_KEY: &str = "bar_placements";
+/// FR-3: a drop this close to an edge docks the bar.
+const SNAP_DISTANCE: f32 = 24.0;
+/// How far a docked bar sits from the edge, in points.
+const DOCK_GAP: f32 = 8.0;
+const TRAY_WIDTH_BESIDE_BAR: f32 = 640.0;
+const TOAST_TIME: Duration = Duration::from_secs(2);
+const HOVER_GRACE: Duration = Duration::from_millis(300);
 /// Catches monitor changes that do not move the bar.
 const DISPLAY_POLL: Duration = Duration::from_secs(2);
 /// How long to wait for a requested move before trusting the position again.
@@ -61,6 +68,13 @@ fn main() -> eframe::Result<()> {
 /// so this measures inside a nested scope.
 fn content_size(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) -> egui::Vec2 {
     ui.scope(add).response.rect.size()
+}
+
+/// The point value that egui converts back to exactly `pixel`. Its conversion may
+/// truncate, so a plain division can land one pixel short.
+fn points_for_pixel(pixel: i32, ppp: f32) -> f32 {
+    let nudge = if pixel < 0 { -0.25 } else { 0.25 };
+    (pixel as f32 + nudge) / ppp
 }
 
 /// Default shortcut map (mockup M3). ⌥⇧ on macOS, Ctrl+Shift elsewhere.
@@ -111,12 +125,24 @@ struct App {
     shortcut_map: HashMap<u32, Command>,
     window_size: egui::Vec2,
     bar_hovered: bool,
+    hover_seen: Option<Instant>,
+    /// The transparent window space reserved for tooltips is open.
+    band: bool,
+    tray_size: egui::Vec2,
+    /// Where the bar was drawn inside the window, and its size, in points.
+    bar_offset: egui::Vec2,
+    bar_size: egui::Vec2,
+    /// The bar's top-left corner in physical pixels. The window follows from it.
+    bar_pos: Option<(i32, i32)>,
+    dock: Option<Edge>,
+    dragging: bool,
+    pull_after_drop: bool,
     screen: Arc<dyn cb_core::ScreenSource>,
     displays: Vec<cb_core::DisplayInfo>,
     displays_checked: Option<Instant>,
     layout: Option<String>,
-    /// Top-left window corner in physical pixels, per monitor layout (FR-2).
-    positions: HashMap<String, (i32, i32)>,
+    /// The bar's position and dock, per monitor layout (FR-2, FR-3).
+    placements: HashMap<String, (i32, i32, Option<Edge>)>,
     position: Option<(i32, i32)>,
     /// A move this app requested and has not seen land yet: not the user's position.
     moving_to: Option<((i32, i32), Instant)>,
@@ -190,13 +216,22 @@ impl App {
             shortcut_map,
             window_size: INITIAL_SIZE.into(),
             bar_hovered: false,
+            hover_seen: None,
+            band: false,
+            tray_size: egui::vec2(TRAY_WIDTH_BESIDE_BAR, 150.0),
+            bar_offset: egui::Vec2::ZERO,
+            bar_size: INITIAL_SIZE.into(),
+            bar_pos: None,
+            dock: None,
+            dragging: false,
+            pull_after_drop: false,
             screen: source,
             displays: Vec::new(),
             displays_checked: None,
             layout: None,
-            positions: cc
+            placements: cc
                 .storage
-                .and_then(|s| eframe::get_value(s, POSITIONS_STORAGE_KEY))
+                .and_then(|s| eframe::get_value(s, PLACEMENTS_STORAGE_KEY))
                 .unwrap_or_default(),
             position: None,
             moving_to: None,
@@ -318,16 +353,80 @@ impl App {
                 .corner_radius(egui::CornerRadius::same(24))
                 .min_size(egui::vec2(240.0, 48.0)),
             );
+            self.bar_offset = r.rect.min.to_vec2();
+            self.bar_size = r.rect.size();
             if r.clicked() {
                 self.handle(Command::ToggleBar);
             }
             return;
         }
 
+        // Frozen during a drag: changing the band would move the bar under the pointer.
+        if !self.dragging {
+            self.band = self.bar_hovered && !self.bar.tray_open;
+        }
+        let toast_on = match &self.toast {
+            Some((_, at)) if at.elapsed() >= TOAST_TIME => {
+                self.toast = None;
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
+        let has_extras = self.band || self.bar.tray_open || toast_on;
+
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+        match self.bar.tooltip_side {
+            TooltipSide::Below => {
+                self.draw_bar(ui, ctx);
+                self.draw_extras(ui);
+            }
+            TooltipSide::Above => {
+                self.draw_extras(ui);
+                self.draw_bar(ui, ctx);
+            }
+            TooltipSide::Right => {
+                ui.horizontal_top(|ui| {
+                    self.draw_bar(ui, ctx);
+                    if has_extras {
+                        ui.vertical(|ui| self.draw_extras(ui));
+                    }
+                });
+            }
+            TooltipSide::Left => {
+                ui.horizontal_top(|ui| {
+                    if has_extras {
+                        ui.vertical(|ui| self.draw_extras(ui));
+                    }
+                    self.draw_bar(ui, ctx);
+                });
+            }
+        }
+    }
+
+    fn draw_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let out = cb_ui::bar(ui, &self.bar, &self.buffer);
-        self.bar_hovered = out.hovered;
+        self.bar_offset = out.top_left;
+        self.bar_size = out.size;
+        if out.hovered {
+            self.hover_seen = Some(Instant::now());
+        }
+        // Grace time: when the band opens above the bar, the window moves and the
+        // pointer reads as outside until the next mouse event. Without this the band
+        // would close again, and keep flipping.
+        self.bar_hovered = self.hover_seen.is_some_and(|at| at.elapsed() < HOVER_GRACE);
         if out.start_drag {
             ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            self.dragging = true;
+        }
+        if out.grip_double_clicked {
+            if let Some(position) = self.bar_pos {
+                let ppp = ctx.pixels_per_point();
+                let rect = self.bar_rect(position, ppp);
+                if let Some(edge) = cb_core::nearest_edge(rect, &self.displays) {
+                    self.dock = Some(edge);
+                }
+            }
         }
         if out.toggle_mic {
             self.bar.mic_on = !self.bar.mic_on;
@@ -341,22 +440,62 @@ impl App {
         for cmd in out.commands {
             self.handle(cmd);
         }
+    }
 
+    /// What opens on the bar's roomy side: the tray, the toast, the tooltip band.
+    fn draw_extras(&mut self, ui: &mut egui::Ui) {
+        let vertical = self.bar.vertical;
         if self.bar.tray_open {
-            ui.add_space(6.0);
-            cb_ui::tray(ui, &self.buffer);
-        }
-
-        if let Some((msg, at)) = &self.toast {
-            if at.elapsed() < Duration::from_secs(2) {
-                ui.label(egui::RichText::new(msg).color(palette::MUTED).size(12.0));
+            let width = if vertical {
+                TRAY_WIDTH_BESIDE_BAR
             } else {
-                self.toast = None;
+                self.bar_size.x
+            };
+            let buffer = &self.buffer;
+            self.tray_size = content_size(ui, |ui| cb_ui::tray(ui, buffer, width));
+        }
+        if let Some((msg, _)) = &self.toast {
+            ui.label(egui::RichText::new(msg).color(palette::MUTED).size(12.0));
+        }
+        if self.band {
+            let room = if vertical {
+                egui::vec2(cb_ui::TOOLTIP_ROOM_SIDE, 1.0)
+            } else {
+                egui::vec2(1.0, cb_ui::TOOLTIP_ROOM)
+            };
+            ui.allocate_exact_size(room, egui::Sense::hover());
+        }
+    }
+
+    /// Which side of the bar gets the tray, the toast and tooltips. Below when a
+    /// floating bar has the room there, so nothing has to move.
+    fn roomy_side(&self, ppp: f32) -> TooltipSide {
+        match self.dock {
+            Some(Edge::Top) => TooltipSide::Below,
+            Some(Edge::Bottom) => TooltipSide::Above,
+            Some(Edge::Left) => TooltipSide::Right,
+            Some(Edge::Right) => TooltipSide::Left,
+            None => {
+                let extra = if self.bar.tray_open {
+                    self.tray_size.y + 6.0
+                } else {
+                    cb_ui::TOOLTIP_ROOM
+                };
+                let fits_below = self.bar_pos.is_none_or(|position| {
+                    let mut rect = self.bar_rect(position, ppp);
+                    rect.height += (extra * ppp).ceil() as u32;
+                    cb_core::is_fully_visible(rect, &self.displays)
+                });
+                if fits_below {
+                    TooltipSide::Below
+                } else {
+                    TooltipSide::Above
+                }
             }
         }
     }
 
-    /// Remember where the user puts the bar, and restore it when the monitors change.
+    /// Follow the window, the monitors and the end of a drag.
     fn track_position(&mut self, ctx: &egui::Context) {
         let Some(outer) = ctx.input(|i| i.viewport().outer_rect) else {
             return;
@@ -368,6 +507,10 @@ impl App {
         );
         let moved = self.position != Some(position);
         self.position = Some(position);
+        let bar_on_screen = (
+            position.0 + (self.bar_offset.x * ppp).round() as i32,
+            position.1 + (self.bar_offset.y * ppp).round() as i32,
+        );
 
         // The OS moves windows off a removed monitor, so the layout is checked before
         // any move is taken as the user's: that move must not overwrite the old layout.
@@ -391,66 +534,102 @@ impl App {
         }
 
         if self.layout.as_ref() != Some(&layout) {
-            let wanted = self.positions.get(&layout).copied().unwrap_or(position);
-            let target = cb_core::pull_on_screen(self.bar_rect(wanted, ppp), &self.displays);
-            if target != position {
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
-                    target.0 as f32 / ppp,
-                    target.1 as f32 / ppp,
-                )));
-                self.moving_to = Some((target, Instant::now()));
-            }
+            let (x, y, dock) = self.placements.get(&layout).copied().unwrap_or((
+                bar_on_screen.0,
+                bar_on_screen.1,
+                self.dock,
+            ));
+            self.dock = dock;
+            self.bar_pos = Some(cb_core::pull_on_screen(
+                self.bar_rect((x, y), ppp),
+                &self.displays,
+            ));
             self.layout = Some(layout);
         } else if moved && self.moving_to.is_none() {
-            self.positions.insert(layout, position);
+            self.bar_pos = Some(bar_on_screen);
+        }
+
+        self.bar.snap_preview = false;
+        if self.dragging {
+            let snap = self.bar_pos.and_then(|position| {
+                let distance = (SNAP_DISTANCE * ppp).round() as i32;
+                cb_core::snap_edge(self.bar_rect(position, ppp), &self.displays, distance)
+            });
+            match cb_platform::primary_button_down() {
+                Some(true) => self.bar.snap_preview = snap.is_some(),
+                Some(false) => {
+                    self.dragging = false;
+                    self.dock = snap;
+                    self.pull_after_drop = snap.is_none();
+                }
+                // This OS cannot report the drop, so the bar simply stays where it is put.
+                None => self.dragging = false,
+            }
+        }
+        self.bar.vertical = !self.collapsed && self.dock.is_some_and(Edge::is_side);
+        if !self.dragging {
+            self.bar.tooltip_side = self.roomy_side(ppp);
         }
     }
 
+    /// Rect of the bar itself at `position`, without what opens beside it.
     fn bar_rect(&self, position: (i32, i32), ppp: f32) -> Rect {
         Rect {
             x: position.0,
             y: position.1,
-            width: (self.window_size.x * ppp).ceil() as u32,
-            height: (self.window_size.y * ppp).ceil() as u32,
+            width: (self.bar_size.x * ppp).ceil() as u32,
+            height: (self.bar_size.y * ppp).ceil() as u32,
         }
     }
 
-    /// Whether a tooltip band below `used` stays on a display.
-    fn tooltip_band_fits(&self, used: egui::Vec2, ppp: f32) -> bool {
-        self.position.is_none_or(|(x, y)| {
-            let rect = Rect {
-                x,
-                y,
-                width: (used.x * ppp).ceil() as u32,
-                height: ((used.y + cb_ui::TOOLTIP_ROOM) * ppp).ceil() as u32,
-            };
-            cb_core::is_fully_visible(rect, &self.displays)
-        })
-    }
-
-    /// Keep the window exactly as large as what is drawn, so nothing but the bar shows.
-    fn fit_window(&mut self, ctx: &egui::Context, used: egui::Vec2) {
-        // The open tray gives tooltips enough room already. Off the bottom of a display
-        // a tooltip would be invisible, so there it stays in the window, over the bar.
-        let tooltip_room = if self.bar_hovered
-            && !self.bar.tray_open
-            && self.tooltip_band_fits(used, ctx.pixels_per_point())
-        {
-            cb_ui::TOOLTIP_ROOM
-        } else {
-            0.0
-        };
-        let size = (used + egui::vec2(0.0, tooltip_room)).ceil();
+    /// Fit the window to what was drawn, and place it so the bar lands on `bar_pos`
+    /// wherever it sits inside the window.
+    fn place_window(&mut self, ctx: &egui::Context, used: egui::Vec2) {
+        let size = used.ceil();
         if size != self.window_size {
             self.window_size = size;
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        }
+
+        let Some(mut bar_pos) = self.bar_pos else {
+            return;
+        };
+        if self.dragging {
+            return;
+        }
+        let ppp = ctx.pixels_per_point();
+        let rect = self.bar_rect(bar_pos, ppp);
+        if let Some(edge) = self.dock {
+            let gap = (DOCK_GAP * ppp).round() as i32;
+            bar_pos = cb_core::docked_position(rect, edge, &self.displays, gap);
+        } else if self.pull_after_drop {
+            self.pull_after_drop = false;
+            bar_pos = cb_core::pull_on_screen(rect, &self.displays);
+        }
+        self.bar_pos = Some(bar_pos);
+        if let Some(layout) = &self.layout {
+            self.placements
+                .insert(layout.clone(), (bar_pos.0, bar_pos.1, self.dock));
+        }
+
+        let target = (
+            bar_pos.0 - (self.bar_offset.x * ppp).round() as i32,
+            bar_pos.1 - (self.bar_offset.y * ppp).round() as i32,
+        );
+        let waiting = self.moving_to.is_some_and(|(to, _)| to == target);
+        if self.position != Some(target) && !waiting {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                points_for_pixel(target.0, ppp),
+                points_for_pixel(target.1, ppp),
+            )));
+            self.moving_to = Some((target, Instant::now()));
         }
     }
 }
 
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, POSITIONS_STORAGE_KEY, &self.positions);
+        eframe::set_value(storage, PLACEMENTS_STORAGE_KEY, &self.placements);
     }
 
     /// The bar has no quit button yet, so a killed process should lose little.
@@ -490,16 +669,29 @@ impl eframe::App for App {
             .show(ui, |ui| {
                 used = content_size(ui, |ui| self.draw(ui, ctx));
             });
-        self.fit_window(ctx, used);
+        self.place_window(ctx, used);
 
-        // Keep the timer and toast fresh without spinning the CPU (NFR-7).
-        ctx.request_repaint_after(Duration::from_millis(250));
+        // Keep the timer and toast fresh without spinning the CPU (NFR-7). A drag polls
+        // faster, to show the snap preview and catch the drop.
+        let wake = if self.dragging { 16 } else { 250 };
+        ctx.request_repaint_after(Duration::from_millis(wake));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn points_for_pixel_round_trips_at_fractional_scales() {
+        for ppp in [1.0, 1.25, 1.5, 1.75, 2.0, 2.25] {
+            for pixel in [-3840, -1, 0, 1, 100, 1439, 1920, 3840, 5119] {
+                let back = points_for_pixel(pixel, ppp) * ppp;
+                assert_eq!(back as i32, pixel, "truncating at {ppp}");
+                assert_eq!(back.round() as i32, pixel, "rounding at {ppp}");
+            }
+        }
+    }
 
     /// The window follows this measurement, so it must not report the panel's size.
     #[test]
