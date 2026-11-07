@@ -1,6 +1,15 @@
 # cargo-deny: licence and advisory gate (NFR-15). Run: cargo deny check
 [graph]
 all-features = false
+# The targets we ship (NFR-8). Without this list, every platform counts at once: a crate
+# excluded on Linux still brings in its Linux-only dependencies, which no build uses.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+]
 
 [licenses]
 allow = [
