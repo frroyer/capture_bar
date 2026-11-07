@@ -26,6 +26,15 @@ pub enum Job {
         path: PathBuf,
     },
     Copy(Arc<Frame>),
+    /// Copy the image in a PNG file to the clipboard (FR-23).
+    CopyFile(PathBuf),
+    /// Save a copy of a capture where the user chose. Overwrites: the dialog asked.
+    SaveAs {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    /// Move a deleted capture's file to the Recycle Bin or Trash.
+    Trash(PathBuf),
 }
 
 pub enum Done {
@@ -40,6 +49,8 @@ pub enum Done {
         result: Result<PathBuf, String>,
     },
     ClipboardFailed(String),
+    /// How a one-off job went, for a toast.
+    Message(String),
 }
 
 /// The prefix new captures get until the user picks one (FR-30).
@@ -114,6 +125,42 @@ fn copy(clipboard: &mut Option<arboard::Clipboard>, frame: &Frame) -> Result<(),
         .map_err(|e| e.to_string())
 }
 
+/// Runs a job that touches one existing file and says how it went.
+fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
+    let file_name = |path: &Path| {
+        path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
+    };
+    match job {
+        Job::CopyFile(path) => {
+            let copied = File::open(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|file| {
+                    cb_encode::read_png(std::io::BufReader::new(file)).map_err(|e| e.to_string())
+                })
+                .and_then(|frame| copy(clipboard, &frame));
+            match copied {
+                Ok(()) => "Copied".into(),
+                Err(e) => format!("Could not copy: {e}"),
+            }
+        }
+        Job::SaveAs { from, to } => match std::fs::copy(&from, &to) {
+            Ok(_) => format!("Saved a copy as {}", file_name(&to)),
+            Err(e) => format!("Could not save a copy: {e}"),
+        },
+        Job::Trash(path) => match cb_platform::move_to_trash(&path) {
+            Ok(()) => format!("Deleted · {} is in the Recycle Bin", file_name(&path)),
+            Err(e) => {
+                tracing::warn!(error = %e, ?path, "deleted capture stays on disk");
+                format!("Removed from the buffer · the file stays: {e}")
+            }
+        },
+        Job::Store { .. } | Job::Copy(_) => unreachable!("not a one-off job"),
+    }
+}
+
 /// `wake` runs after each finished job, to get the UI to read the result.
 pub fn spawn(wake: impl Fn() + Send + 'static) -> (mpsc::Sender<Job>, mpsc::Receiver<Done>) {
     let (job_tx, jobs) = mpsc::channel::<Job>();
@@ -126,6 +173,11 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> (mpsc::Sender<Job>, mpsc::Rece
             for job in jobs {
                 let frame = match &job {
                     Job::Store { frame, .. } | Job::Copy(frame) => frame,
+                    Job::CopyFile(_) | Job::SaveAs { .. } | Job::Trash(_) => {
+                        let _ = done_tx.send(Done::Message(one_off(&mut clipboard, job)));
+                        wake();
+                        continue;
+                    }
                 };
                 if let Job::Store { item, frame, .. } = &job {
                     match cb_encode::thumbnail(frame, THUMBNAIL_PIXELS.0, THUMBNAIL_PIXELS.1) {
@@ -204,7 +256,7 @@ mod tests {
                     thumbnail_seen = Some((item, thumbnail.width));
                     None
                 }
-                Done::ClipboardFailed(_) => None,
+                Done::ClipboardFailed(_) | Done::Message(_) => None,
             })
             .unwrap();
         assert_eq!(stored.0, ItemId(item));
@@ -227,6 +279,40 @@ mod tests {
             std::fs::read_to_string(dir.join("nested").join("a-2.png")).unwrap(),
             "keep me"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Runs one job and returns the toast it ends with.
+    fn message_of(job: Job) -> String {
+        let (jobs, done) = spawn(|| {});
+        jobs.send(job).unwrap();
+        match done.recv().unwrap() {
+            Done::Message(message) => message,
+            _ => panic!("a one-off job answers with a message"),
+        }
+    }
+
+    #[test]
+    fn save_as_copies_the_file_and_says_so() {
+        let dir = std::env::temp_dir().join(format!("cb-save-as-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (from, to) = (dir.join("a.png"), dir.join("b.png"));
+        std::fs::write(&from, "pixels").unwrap();
+        let message = message_of(Job::SaveAs {
+            from: from.clone(),
+            to: to.clone(),
+        });
+        assert_eq!(message, "Saved a copy as b.png");
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "pixels");
+        assert!(from.exists());
+
+        let missing = message_of(Job::SaveAs {
+            from: dir.join("gone.png"),
+            to,
+        });
+        assert!(missing.starts_with("Could not save a copy"), "{missing}");
+        let unreadable = message_of(Job::CopyFile(from));
+        assert!(unreadable.starts_with("Could not copy"), "{unreadable}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

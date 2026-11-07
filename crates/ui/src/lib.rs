@@ -763,8 +763,24 @@ pub fn destination_panel(
     out
 }
 
-/// One capture in the tray: its picture, then its name and details.
-fn tray_card(ui: &mut Ui, item: &BufferItem, thumbnail: Option<&TextureHandle>) {
+/// What the user asked of one capture in the tray (FR-23).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemAction {
+    Copy,
+    /// Save a copy elsewhere, through a file dialog.
+    Save,
+    Annotate,
+    Delete,
+    /// The picture is being dragged: hand the file to the OS drag and drop.
+    DragOut,
+}
+
+/// One capture in the tray: its picture, then its name, details and actions.
+fn tray_card(
+    ui: &mut Ui,
+    item: &BufferItem,
+    thumbnail: Option<&TextureHandle>,
+) -> Option<ItemAction> {
     use palette::*;
     let kind = match item.kind {
         ItemKind::Image => "PNG".to_string(),
@@ -789,6 +805,9 @@ fn tray_card(ui: &mut Ui, item: &BufferItem, thumbnail: Option<&TextureHandle>) 
             .map_or(name.clone(), |path| path.display().to_string()),
     };
 
+    // Copy, save and drag need the file; the rest work at any time.
+    let has_file = item.state == ItemState::Ready && item.path.is_some();
+    let mut action = None;
     Frame::new()
         .fill(CHIP)
         .corner_radius(CornerRadius::same(8))
@@ -797,7 +816,20 @@ fn tray_card(ui: &mut Ui, item: &BufferItem, thumbnail: Option<&TextureHandle>) 
             ui.set_width(THUMBNAIL_SIZE.x);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
-                let (slot, response) = ui.allocate_exact_size(THUMBNAIL_SIZE, Sense::hover());
+                let sense = if has_file {
+                    Sense::click_and_drag()
+                } else {
+                    Sense::hover()
+                };
+                let (slot, response) = ui.allocate_exact_size(THUMBNAIL_SIZE, sense);
+                if response.drag_started() {
+                    action = Some(ItemAction::DragOut);
+                }
+                let response = if has_file {
+                    response.on_hover_cursor(egui::CursorIcon::Grab)
+                } else {
+                    response
+                };
                 ui.painter()
                     .rect_filled(slot, CornerRadius::same(4), SLOT_BG);
                 if let Some(texture) = thumbnail {
@@ -817,16 +849,61 @@ fn tray_card(ui: &mut Ui, item: &BufferItem, thumbnail: Option<&TextureHandle>) 
                         status_color,
                     );
                 }
+                let hover = if has_file {
+                    format!(
+                        "{hover}
+Drag into another app to share the file"
+                    )
+                } else {
+                    hover
+                };
                 response.on_hover_text(hover);
                 ui.add(Label::new(RichText::new(name).color(TEXT).size(12.0)).truncate());
                 ui.add(Label::new(RichText::new(details).color(MUTED).size(11.0)).truncate());
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
+                    let style = ChipStyle {
+                        fill: BAR,
+                        color: TEXT,
+                        height: 26.0,
+                    };
+                    let buttons = [
+                        (Icon::Copy, "Copy the image", ItemAction::Copy, has_file),
+                        (Icon::Save, "Save a copy as…", ItemAction::Save, has_file),
+                        (Icon::Pen, "Annotate", ItemAction::Annotate, has_file),
+                        (
+                            Icon::Trash,
+                            "Delete the capture and its file",
+                            ItemAction::Delete,
+                            true,
+                        ),
+                    ];
+                    for (icon, tooltip, what, enabled) in buttons {
+                        let clicked = ui
+                            .add_enabled_ui(enabled, |ui| {
+                                chip(ui, &[Piece::Icon(icon)], &style, tooltip).clicked()
+                            })
+                            .inner;
+                        if clicked {
+                            action = Some(what);
+                        }
+                    }
+                });
             });
         });
+    action
 }
 
-/// The buffer tray (M1, FR-22), `width` points wide. Returns commands for item actions later.
-pub fn tray(ui: &mut Ui, buffer: &Buffer, thumbnails: &HashMap<ItemId, TextureHandle>, width: f32) {
+/// The buffer tray (M1, FR-22), `width` points wide. Returns what was asked of which capture.
+pub fn tray(
+    ui: &mut Ui,
+    buffer: &Buffer,
+    thumbnails: &HashMap<ItemId, TextureHandle>,
+    width: f32,
+) -> Option<(ItemId, ItemAction)> {
     use palette::*;
+    let mut action = None;
     Frame::new()
         .fill(BAR)
         .stroke(Stroke::new(1.0, BORDER))
@@ -854,11 +931,14 @@ pub fn tray(ui: &mut Ui, buffer: &Buffer, thumbnails: &HashMap<ItemId, TextureHa
             egui::ScrollArea::horizontal().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for item in buffer.newest_first() {
-                        tray_card(ui, item, thumbnails.get(&item.id));
+                        if let Some(what) = tray_card(ui, item, thumbnails.get(&item.id)) {
+                            action = Some((item.id, what));
+                        }
                     }
                 });
             });
         });
+    action
 }
 
 #[cfg(test)]
@@ -1002,7 +1082,9 @@ mod tests {
                 )),
                 ..Default::default()
             };
-            let mut output = ctx.run_ui(input, |ui| tray(ui, buffer, thumbnails, 800.0));
+            let mut output = ctx.run_ui(input, |ui| {
+                tray(ui, buffer, thumbnails, 800.0);
+            });
             output.textures_delta.clear();
             seen = output
                 .shapes
@@ -1091,6 +1173,97 @@ mod tests {
         );
         assert!(type_in_destination("a", "b", Key::Escape).1);
         assert!(!type_in_destination("a", "b", Key::Tab).1);
+    }
+
+    /// Presses on the one card of `buffer` at `at(details)`, where `details` is the rect of
+    /// its details line, then releases there or `drag_by` further. Returns what the tray asked.
+    fn press_on_card(
+        buffer: &Buffer,
+        at: impl Fn(egui::Rect) -> egui::Pos2,
+        drag_by: egui::Vec2,
+    ) -> Vec<(ItemId, ItemAction)> {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx, None);
+        let thumbnails = HashMap::new();
+        let mut details = egui::Rect::NOTHING;
+        let mut asked = Vec::new();
+        for frame in 0..8 {
+            let pos = at(details);
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let events = match frame {
+                3 => vec![egui::Event::PointerMoved(pos)],
+                4 => vec![button(pos, true)],
+                5 => vec![egui::Event::PointerMoved(pos + drag_by)],
+                6 => vec![button(pos + drag_by, false)],
+                _ => Vec::new(),
+            };
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                asked.extend(tray(ui, buffer, &thumbnails, 800.0));
+            });
+            output.textures_delta.clear();
+            for clipped in &output.shapes {
+                if let egui::Shape::Text(text) = &clipped.shape {
+                    if text.galley.text().starts_with("PNG") {
+                        details = text.visual_bounding_rect();
+                    }
+                }
+            }
+        }
+        asked
+    }
+
+    /// The centre of the `n`th button of the action row, below the details line.
+    fn action_button(n: usize) -> impl Fn(egui::Rect) -> egui::Pos2 {
+        move |details| {
+            egui::pos2(
+                details.left() + 18.0 + 40.0 * n as f32,
+                details.bottom() + 17.0,
+            )
+        }
+    }
+
+    #[test]
+    fn each_action_asks_for_its_own_capture() {
+        let mut buffer = Buffer::new();
+        let item = buffer.push(ItemKind::Image, CaptureMode::Region);
+        buffer.get_mut(item).unwrap().path = Some("C:/Captures/a.png".into());
+        let actions = [
+            ItemAction::Copy,
+            ItemAction::Save,
+            ItemAction::Annotate,
+            ItemAction::Delete,
+        ];
+        for (n, action) in actions.into_iter().enumerate() {
+            let asked = press_on_card(&buffer, action_button(n), vec2(0.0, 0.0));
+            assert_eq!(asked, vec![(item, action)], "button {n}");
+        }
+        let picture = |details: egui::Rect| details.left_top() - vec2(-40.0, 60.0);
+        let dragged = press_on_card(&buffer, picture, vec2(30.0, 0.0));
+        assert_eq!(dragged, vec![(item, ItemAction::DragOut)]);
+        assert!(press_on_card(&buffer, picture, vec2(0.0, 0.0)).is_empty());
+    }
+
+    #[test]
+    fn a_capture_not_on_disk_yet_can_only_be_deleted() {
+        let mut buffer = Buffer::new();
+        let item = buffer.push(ItemKind::Image, CaptureMode::Region);
+        buffer.get_mut(item).unwrap().state = ItemState::Encoding { progress_pct: 0 };
+        for n in 0..3 {
+            assert!(press_on_card(&buffer, action_button(n), vec2(0.0, 0.0)).is_empty());
+        }
+        let delete = press_on_card(&buffer, action_button(3), vec2(0.0, 0.0));
+        assert_eq!(delete, vec![(item, ItemAction::Delete)]);
+        let picture = |details: egui::Rect| details.left_top() - vec2(-40.0, 60.0);
+        assert!(press_on_card(&buffer, picture, vec2(30.0, 0.0)).is_empty());
     }
 
     #[test]

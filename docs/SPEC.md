@@ -352,8 +352,8 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: each action works per item; dragging into Slack, a mail client or Finder/Explorer delivers the file.
 
-- [ ] Per-item action row
-- [ ] OS drag-and-drop source (NSDraggingSource / OLE IDropSource / XDND + Wayland DnD)
+- [x] Per-item action row — Copy, Save a copy as…, Annotate (opens with US-7.1), Delete (file to the Recycle Bin)
+- [ ] OS drag-and-drop source (NSDraggingSource / OLE IDropSource / XDND + Wayland DnD) — Windows done (shell data object + SHDoDragDrop); macOS and Linux with their backends
 
 **US-6.5** As a user, I want batch actions on several captures. (M1 · FR-24)
 

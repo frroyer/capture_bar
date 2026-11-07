@@ -14,7 +14,7 @@ use cb_buffer::{Buffer, ItemId, ItemKind, ItemState};
 use cb_capture::{CaptureEvent, CaptureService};
 use cb_core::{CaptureMode, CaptureTarget, Command, DisplayId, Edge, Frame, Rect};
 use cb_platform::TrayAction;
-use cb_ui::{BarState, Overlay, OverlayResult, TooltipSide};
+use cb_ui::{BarState, ItemAction, Overlay, OverlayResult, TooltipSide};
 use eframe::egui;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -224,6 +224,11 @@ struct App {
     folder_choice: Option<mpsc::Receiver<Option<PathBuf>>>,
     /// "Choose…" was clicked: the dialog opens once the frame's window handle is at hand.
     folder_requested: bool,
+    /// What the tray asked of a capture this frame (FR-23), done once the frame's window
+    /// handle is at hand.
+    item_action: Option<(ItemId, ItemAction)>,
+    /// An OS drag loop took the button release: egui is given one on the next frame.
+    release_pointer: bool,
     output: mpsc::Sender<output::Job>,
     output_done: mpsc::Receiver<output::Done>,
     /// What Copy puts on the clipboard (M3).
@@ -378,6 +383,8 @@ impl App {
             destination_size: egui::Vec2::ZERO,
             folder_choice: None,
             folder_requested: false,
+            item_action: None,
+            release_pointer: false,
             output,
             output_done,
             newest_frame: None,
@@ -541,15 +548,9 @@ impl App {
         }
     }
 
-    /// Take a capture back: out of the buffer, and off the disk if it got there.
-    fn undo(&mut self, item: ItemId) {
-        self.toast = None;
+    /// Drop a capture from the buffer and memory. Returns its file, if it got to disk.
+    fn forget(&mut self, item: ItemId) -> Option<PathBuf> {
         self.thumbnails.remove(&item);
-        if let Some(path) = self.buffer.remove(item).and_then(|removed| removed.path) {
-            if let Err(e) = std::fs::remove_file(&path) {
-                tracing::warn!(error = %e, ?path, "undone capture stays on disk");
-            }
-        }
         if self
             .newest_frame
             .as_ref()
@@ -557,6 +558,75 @@ impl App {
         {
             self.newest_frame = None;
         }
+        self.buffer.remove(item).and_then(|removed| removed.path)
+    }
+
+    /// Take a capture back: out of the buffer, and off the disk if it got there.
+    fn undo(&mut self, item: ItemId) {
+        self.toast = None;
+        if let Some(path) = self.forget(item) {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!(error = %e, ?path, "undone capture stays on disk");
+            }
+        }
+    }
+
+    /// Delete from the tray: unlike Undo, the file goes to the Recycle Bin, as it may be
+    /// an older capture the user still wants back.
+    fn delete(&mut self, item: ItemId) {
+        match self.forget(item) {
+            Some(path) => {
+                let _ = self.output.send(output::Job::Trash(path));
+            }
+            // Not written yet: `poll_output` removes the file when it lands.
+            None => self.flash("Deleted"),
+        }
+    }
+
+    /// Run what the tray asked of `item` (FR-23).
+    fn item_action(&mut self, frame: &eframe::Frame, item: ItemId, action: ItemAction) {
+        let Some(found) = self.buffer.get(item) else {
+            return;
+        };
+        let path = found.path.clone();
+        match (action, path) {
+            (ItemAction::Delete, _) => self.delete(item),
+            (ItemAction::Annotate, _) => self.flash("Annotate: not implemented yet (US-7.1)"),
+            (ItemAction::Copy, Some(path)) => {
+                let _ = self.output.send(output::Job::CopyFile(path));
+            }
+            (ItemAction::Save, Some(path)) => self.save_copy(frame, path),
+            (ItemAction::DragOut, Some(path)) => {
+                // Blocks this thread until the drop, as every OS drag loop does.
+                if let Err(e) = cb_platform::drag_file_out(&path) {
+                    tracing::warn!(error = %e, ?path, "drag out");
+                    self.flash(format!("Drag out: {e}"));
+                }
+                self.release_pointer = true;
+            }
+            // The tray only offers these once the file is on disk.
+            (ItemAction::Copy | ItemAction::Save | ItemAction::DragOut, None) => {}
+        }
+    }
+
+    /// Ask where to save a copy of `from`, on the dialog's own thread; the output worker copies.
+    fn save_copy(&mut self, frame: &eframe::Frame, from: PathBuf) {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Save a copy of the capture")
+            .add_filter("PNG image", &["png"])
+            .set_parent(frame);
+        if let Some(name) = from.file_name() {
+            dialog = dialog.set_file_name(name.to_string_lossy());
+        }
+        let output = self.output.clone();
+        std::thread::Builder::new()
+            .name("save dialog".into())
+            .spawn(move || {
+                if let Some(to) = dialog.save_file() {
+                    let _ = output.send(output::Job::SaveAs { from, to });
+                }
+            })
+            .expect("spawn save dialog thread");
     }
 
     /// A grabbed frame goes to the worker, unless the capture was undone meanwhile.
@@ -586,6 +656,7 @@ impl App {
                         self.thumbnails.insert(item, texture);
                     }
                 }
+                output::Done::Message(message) => self.flash(message),
                 output::Done::ClipboardFailed(error) => {
                     tracing::warn!(%error, "clipboard");
                     self.flash("Saved, but not copied to the clipboard");
@@ -833,7 +904,11 @@ impl App {
                 self.bar_size.x
             };
             let (buffer, thumbnails) = (&self.buffer, &self.thumbnails);
-            self.tray_size = content_size(ui, |ui| cb_ui::tray(ui, buffer, thumbnails, width));
+            let mut asked = None;
+            self.tray_size = content_size(ui, |ui| {
+                asked = cb_ui::tray(ui, buffer, thumbnails, width);
+            });
+            self.item_action = self.item_action.or(asked);
         }
         if let Some(toast) = &self.toast {
             let undo = toast.undo;
@@ -1042,6 +1117,21 @@ impl eframe::App for App {
         [0.0, 0.0, 0.0, 0.0] // transparent window: only the bar is visible
     }
 
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if std::mem::take(&mut self.release_pointer) {
+            let pos = ctx.input(|i| i.pointer.latest_pos()).unwrap_or_default();
+            raw_input.events.insert(
+                0,
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            );
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
         while let Ok(cmd) = self.commands.try_recv() {
@@ -1086,6 +1176,9 @@ impl eframe::App for App {
         self.show_overlay(ctx);
         if std::mem::take(&mut self.folder_requested) {
             self.choose_folder(ctx, frame);
+        }
+        if let Some((item, action)) = self.item_action.take() {
+            self.item_action(frame, item, action);
         }
 
         // Keep the timer and toast fresh without spinning the CPU (NFR-7). A drag polls

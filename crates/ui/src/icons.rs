@@ -25,6 +25,11 @@ pub enum Icon {
     Sliders,
     Minus,
     Folder,
+    Copy,
+    /// Save as: an arrow into a tray.
+    Save,
+    Pen,
+    Trash,
 }
 
 /// Draw `icon` centred on `center`. Coordinates below run from -8 to 8.
@@ -156,6 +161,44 @@ pub fn paint(p: &Painter, center: Pos2, icon: Icon, color: Color32) {
             let mut points: Vec<_> = outline.iter().map(|&(x, y)| at(x, y)).collect();
             points.push(at(-7.0, 5.5));
             p.add(egui::Shape::closed_line(points, s));
+        }
+        Icon::Copy => {
+            frame(-3.0, -3.0, 7.0, 7.0, 2);
+            p.line(vec![at(-7.0, 3.0), at(-7.0, -7.0), at(3.0, -7.0)], s);
+        }
+        Icon::Save => {
+            seg(0.0, -7.0, 0.0, 3.0);
+            p.line(vec![at(-3.5, -0.5), at(0.0, 3.0), at(3.5, -0.5)], s);
+            p.line(
+                vec![at(-7.0, 2.0), at(-7.0, 7.0), at(7.0, 7.0), at(7.0, 2.0)],
+                s,
+            );
+        }
+        Icon::Pen => {
+            p.add(egui::Shape::closed_line(
+                vec![
+                    at(-6.5, 6.5),
+                    at(-6.0, 3.0),
+                    at(3.5, -6.5),
+                    at(6.5, -3.5),
+                    at(-3.0, 6.0),
+                ],
+                s,
+            ));
+            seg(1.0, -4.0, 4.0, -1.0);
+        }
+        Icon::Trash => {
+            seg(-7.0, -4.5, 7.0, -4.5);
+            p.line(
+                vec![at(-2.5, -4.5), at(-2.0, -7.0), at(2.0, -7.0), at(2.5, -4.5)],
+                s,
+            );
+            p.line(
+                vec![at(-5.5, -4.5), at(-4.5, 7.0), at(4.5, 7.0), at(5.5, -4.5)],
+                s,
+            );
+            seg(-1.5, -1.5, -1.5, 4.0);
+            seg(1.5, -1.5, 1.5, 4.0);
         }
     }
 }
