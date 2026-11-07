@@ -20,6 +20,7 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 /// Only for the first frame: after that the window follows its content.
 const INITIAL_SIZE: [f32; 2] = [900.0, 54.0];
 const PLACEMENTS_STORAGE_KEY: &str = "bar_placements";
+const MODE_STORAGE_KEY: &str = "capture_mode";
 /// FR-3: a drop this close to an edge docks the bar.
 const SNAP_DISTANCE: f32 = 24.0;
 /// How far a docked bar sits from the edge, in points.
@@ -89,6 +90,13 @@ fn animated_opacity(ctx: &egui::Context, hidden: bool, cursor_near: bool) -> (f3
     let target = if cursor_near { 1.0 } else { FADED_OPACITY };
     let fade = ctx.animate_value_with_time(egui::Id::unique("bar fade"), target, FADE_TIME);
     (shown, fade)
+}
+
+/// FR-7: the mode chosen in an earlier session.
+fn saved_mode(storage: Option<&dyn eframe::Storage>) -> CaptureMode {
+    storage
+        .and_then(|s| eframe::get_value(s, MODE_STORAGE_KEY))
+        .unwrap_or_default()
 }
 
 /// Default shortcut map (mockup M3). ⌥⇧ on macOS, Ctrl+Shift elsewhere.
@@ -259,6 +267,7 @@ impl App {
         Self {
             bar: BarState {
                 mic_on: true,
+                mode: saved_mode(cc.storage),
                 ..Default::default()
             },
             collapsed: false,
@@ -687,6 +696,7 @@ impl App {
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, PLACEMENTS_STORAGE_KEY, &self.placements);
+        eframe::set_value(storage, MODE_STORAGE_KEY, &self.bar.mode);
     }
 
     /// The bar has no quit button yet, so a killed process should lose little.
@@ -745,6 +755,31 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct MemoryStorage(HashMap<String, String>);
+
+    impl eframe::Storage for MemoryStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.to_owned(), value);
+        }
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
+        }
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn mode_survives_a_restart() {
+        let mut storage = MemoryStorage::default();
+        assert_eq!(saved_mode(Some(&storage)), CaptureMode::Region);
+        assert_eq!(saved_mode(None), CaptureMode::Region);
+        eframe::set_value(&mut storage, MODE_STORAGE_KEY, &CaptureMode::Screen);
+        assert_eq!(saved_mode(Some(&storage)), CaptureMode::Screen);
+    }
 
     fn hotkey_event(id: u32, state: HotKeyState) -> GlobalHotKeyEvent {
         GlobalHotKeyEvent { id, state }

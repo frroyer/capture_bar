@@ -259,7 +259,7 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 
 - AC: the selected segment is highlighted as in M1 and persists across launches.
 
-- [ ] Mode state in config; segmented control
+- [x] Mode state in config; segmented control
 
 **US-4.2** As a user, I want a precise region selector with keyboard hints. (M2.4 · FR-8)
 
