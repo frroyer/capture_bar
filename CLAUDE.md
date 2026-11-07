@@ -47,11 +47,11 @@ only if a spike shows a need.
 - Global shortcuts (Ctrl+Shift / ⌥⇧ map from M3) fire from any app on Windows; macOS and X11 are not run yet, and the Wayland portal backend is not started. If none can be registered, a toast says so.
 - The collapse button shows the M2.3 pill; Ctrl+Shift+Space hides and shows. Hidden means transparent and click-through, not an OS-hidden window, because eframe stops running hidden windows. The bar fades to 40% when the cursor is away. A tray icon (not on Linux yet) toggles the bar and quits.
 - Bar UI follows M2.1 (vector icons in `crates/ui/src/icons.rs`; shortcuts in tooltips only). The window
-  follows its content and grows while hovered to give tooltips room. The buffer tray is not restyled yet.
+  follows its content and grows while hovered to give tooltips room. The buffer tray shows a thumbnail card per capture (US-6.3).
 - Bar position and dock are saved per monitor layout through eframe storage and pulled back on-screen when
   monitors change. The bar docks to screen edges, vertical on left and right. `App::bar_pos` is the source of
   truth; the window follows it, because the tray, toast and tooltip band open on whichever side has room.
-- Screenshots work on Windows (Windows.Graphics.Capture): Screen takes the monitor under the cursor; Window and Region open one overlay window across all monitors, over a frozen image. Each capture goes to the buffer, the clipboard and a PNG in `~/Captures` on a worker thread, with an Undo toast. The buffer tray has no thumbnails yet (US-6.3) and the buffer does not survive a restart (US-6.1).
+- Screenshots work on Windows (Windows.Graphics.Capture): Screen takes the monitor under the cursor; Window and Region open one overlay window across all monitors, over a frozen image. Each capture goes to the buffer, the clipboard and a PNG on a worker thread, with an Undo toast. Files are `<prefix>_<local timestamp>.png`, never overwriting; the prefix and folder (default `~/Captures`) are set from a bar chip or Ctrl+Shift+L (US-6.8). The buffer does not survive a restart (US-6.1).
 - Windows: the bar is excluded from captures and has no OS frame. `start_stream` is a stub. The US-1.2 spike records MP4 via `windows_spike`; results
   in `docs/spikes/us-1.2-windows.md`.
 - macOS and Linux backends are still **stubs**: captures appear in the buffer, then show

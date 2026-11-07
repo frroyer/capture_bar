@@ -14,12 +14,64 @@ pub enum EncodeError {
     Io(#[from] std::io::Error),
 }
 
-/// Write a frame as lossless PNG.
-pub fn write_png<W: Write>(frame: &Frame, out: W) -> Result<(), EncodeError> {
+fn check_size(frame: &Frame) -> Result<(), EncodeError> {
     let expected = frame.width as usize * frame.height as usize * 4;
     if frame.rgba.len() != expected {
         return Err(EncodeError::BadFrame(frame.width, frame.height));
     }
+    Ok(())
+}
+
+/// The source pixels that destination pixel `i` covers, along one axis.
+fn covered(i: usize, dst: usize, src: usize) -> std::ops::Range<usize> {
+    let start = i * src / dst;
+    start..((i + 1) * src / dst).max(start + 1)
+}
+
+/// A copy of `frame` that fits in `max_width` x `max_height`, keeping its shape. Each pixel
+/// averages the ones it covers, so small text stays recognisable. Never enlarges.
+pub fn thumbnail(frame: &Frame, max_width: u32, max_height: u32) -> Result<Frame, EncodeError> {
+    check_size(frame)?;
+    if frame.rgba.is_empty() {
+        return Err(EncodeError::BadFrame(frame.width, frame.height));
+    }
+    let scale = f64::min(
+        f64::from(max_width) / f64::from(frame.width),
+        f64::from(max_height) / f64::from(frame.height),
+    )
+    .min(1.0);
+    let fit = |side: u32| ((f64::from(side) * scale).round() as u32).max(1);
+    let (width, height) = (fit(frame.width), fit(frame.height));
+
+    let (src_w, src_h) = (frame.width as usize, frame.height as usize);
+    let (dst_w, dst_h) = (width as usize, height as usize);
+    let mut rgba = Vec::with_capacity(dst_w * dst_h * 4);
+    for y in 0..dst_h {
+        let rows = covered(y, dst_h, src_h);
+        for x in 0..dst_w {
+            let columns = covered(x, dst_w, src_w);
+            let mut sum = [0u64; 4];
+            for row in rows.clone() {
+                let line = &frame.rgba[(row * src_w + columns.start) * 4..][..columns.len() * 4];
+                for (channel, value) in line.iter().enumerate() {
+                    sum[channel % 4] += u64::from(*value);
+                }
+            }
+            let count = (rows.len() * columns.len()) as u64;
+            rgba.extend(sum.map(|total| (total / count) as u8));
+        }
+    }
+    Ok(Frame {
+        width,
+        height,
+        rgba,
+        captured_at: frame.captured_at,
+    })
+}
+
+/// Write a frame as lossless PNG.
+pub fn write_png<W: Write>(frame: &Frame, out: W) -> Result<(), EncodeError> {
+    check_size(frame)?;
     let mut enc = png::Encoder::new(out, frame.width, frame.height);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
@@ -46,6 +98,47 @@ mod tests {
         let mut out = Vec::new();
         write_png(&frame, &mut out).unwrap();
         assert_eq!(&out[1..4], b"PNG");
+    }
+
+    fn frame(width: u32, height: u32, rgba: Vec<u8>) -> Frame {
+        Frame {
+            width,
+            height,
+            rgba,
+            captured_at: SystemTime::now(),
+        }
+    }
+
+    #[test]
+    fn thumbnail_averages_the_pixels_it_covers() {
+        let rgba = [[0, 0, 0, 255], [200, 100, 50, 255], [9, 9, 9, 255], [9; 4]].concat();
+        let thumb = thumbnail(&frame(4, 1, rgba), 2, 2).unwrap();
+        assert_eq!((thumb.width, thumb.height), (2, 1));
+        assert_eq!(thumb.rgba, [100, 50, 25, 255, 9, 9, 9, 132]);
+    }
+
+    #[test]
+    fn thumbnail_keeps_the_shape_and_never_enlarges() {
+        let size = |w: u32, h: u32, max: (u32, u32)| {
+            let thumb = thumbnail(&frame(w, h, vec![7; (w * h * 4) as usize]), max.0, max.1);
+            let thumb = thumb.unwrap();
+            assert_eq!(thumb.rgba.len(), (thumb.width * thumb.height * 4) as usize);
+            (thumb.width, thumb.height)
+        };
+        assert_eq!(size(3840, 2160, (320, 200)), (320, 180));
+        assert_eq!(size(1000, 2000, (320, 200)), (100, 200));
+        assert_eq!(size(10, 5, (320, 200)), (10, 5));
+        assert_eq!(
+            size(4000, 1, (320, 200)),
+            (320, 1),
+            "a sliver stays visible"
+        );
+    }
+
+    #[test]
+    fn thumbnail_rejects_frames_it_cannot_read() {
+        assert!(thumbnail(&frame(4, 4, vec![0; 3]), 2, 2).is_err());
+        assert!(thumbnail(&frame(0, 0, Vec::new()), 2, 2).is_err());
     }
 
     #[test]

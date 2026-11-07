@@ -6,14 +6,17 @@ mod overlay;
 
 pub use overlay::{Overlay, OverlayResult};
 
-use cb_buffer::{Buffer, ItemKind, ItemState};
+use cb_buffer::{Buffer, BufferItem, ItemId, ItemKind, ItemState};
 use cb_core::{CaptureMode, Command};
+use chrono::{DateTime, Local};
 use egui::{
     emath::RectAlign, vec2, Align2, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions,
-    FontFamily, FontId, Frame, Id, Margin, Response, RichText, Role, Sense, Stroke, StrokeKind,
-    Tooltip, Ui, Vec2, WidgetInfo,
+    FontFamily, FontId, Frame, Id, Key, Label, Margin, Response, RichText, Role, Sense, Stroke,
+    StrokeKind, TextureHandle, Tooltip, Ui, Vec2, WidgetInfo,
 };
 use icons::Icon;
+use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 pub mod palette {
@@ -29,7 +32,12 @@ pub mod palette {
     pub const RECORD: Color32 = Color32::from_rgb(0xFF, 0x5A, 0x36);
     pub const RECORD_BG: Color32 = Color32::from_rgb(0x3A, 0x1A, 0x14);
     pub const ACCENT: Color32 = Color32::from_rgb(0x3B, 0x82, 0xF6);
+    /// Behind a thumbnail that does not fill its slot.
+    pub const SLOT_BG: Color32 = Color32::from_rgb(0x0E, 0x0F, 0x11);
 }
+
+/// The picture area of a card in the tray, in points.
+pub const THUMBNAIL_SIZE: Vec2 = vec2(160.0, 100.0);
 
 /// Everything the bar needs to draw itself.
 #[derive(Debug, Clone, Default)]
@@ -47,6 +55,10 @@ pub struct BarState {
     pub tooltip_side: TooltipSide,
     /// How strongly the bar flashes to get noticed, from 0 (not at all) to 1.
     pub attention: f32,
+    /// What new capture file names start with (FR-30).
+    pub prefix: String,
+    /// The prefix and folder panel is open.
+    pub destination_open: bool,
 }
 
 /// Which side of the bar has room for tooltips, reserved by the host.
@@ -508,6 +520,24 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                 }
 
                 if !state.recording {
+                    let fill = if state.destination_open {
+                        SELECTED
+                    } else {
+                        CHIP
+                    };
+                    if chip(
+                        ui,
+                        &[
+                            Piece::Icon(Icon::Folder),
+                            Piece::Text(&prefix_label(&state.prefix)),
+                        ],
+                        &ChipStyle::new(fill, TEXT),
+                        &format!("Name and folder of new captures ({})", shortcut("L")),
+                    )
+                    .clicked()
+                    {
+                        out.commands.push(Command::ToggleDestination);
+                    }
                     divider(ui);
                     let toggle = |on: bool| {
                         if on {
@@ -633,8 +663,169 @@ pub fn toast(ui: &mut Ui, message: &str, can_undo: bool) -> bool {
     undo
 }
 
+/// The prefix as the bar shows it: short enough not to stretch the bar.
+fn prefix_label(prefix: &str) -> String {
+    const MAX: usize = 16;
+    match prefix.trim() {
+        "" => "No prefix".into(),
+        p if p.chars().count() > MAX => p.chars().take(MAX - 1).chain(['…']).collect(),
+        p => p.into(),
+    }
+}
+
+/// The width of the prefix and folder panel, in points.
+pub const DESTINATION_WIDTH: f32 = 460.0;
+
+/// What the user did in the prefix and folder panel this frame.
+#[derive(Debug, Default)]
+pub struct DestinationOutput {
+    pub choose_folder: bool,
+    pub close: bool,
+}
+
+/// Where new captures go and what they are called (FR-30). The prefix is edited in place;
+/// `focus` puts the keyboard in its field.
+pub fn destination_panel(
+    ui: &mut Ui,
+    prefix: &mut String,
+    folder: &str,
+    next_file: &str,
+    focus: bool,
+) -> DestinationOutput {
+    use palette::*;
+    let mut out = DestinationOutput::default();
+    let small_chip = ChipStyle {
+        fill: CHIP,
+        color: TEXT,
+        height: 28.0,
+    };
+    let caption = |ui: &mut Ui, text: &str| {
+        ui.add_sized(
+            vec2(48.0, 28.0),
+            Label::new(RichText::new(text).color(MUTED)),
+        );
+    };
+    Frame::new()
+        .fill(BAR)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(CornerRadius::same(16))
+        .inner_margin(Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_width(DESTINATION_WIDTH - 26.0);
+            ui.horizontal(|ui| {
+                caption(ui, "Prefix");
+                let edit = ui.add(
+                    egui::TextEdit::singleline(prefix)
+                        .char_limit(40)
+                        .desired_width(260.0)
+                        .hint_text("none: the timestamp alone")
+                        .text_color(TEXT)
+                        .background_color(CHIP)
+                        .margin(Margin::symmetric(8, 6)),
+                );
+                if focus {
+                    edit.request_focus();
+                }
+                let keys = ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape));
+                if edit.lost_focus() && keys {
+                    out.close = true;
+                }
+                if chip(ui, &[Piece::Text("Done")], &small_chip, "Close (Enter)").clicked() {
+                    out.close = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                caption(ui, "Folder");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if chip(
+                        ui,
+                        &[Piece::Icon(Icon::Folder), Piece::Text("Choose…")],
+                        &small_chip,
+                        "Pick the folder for new captures",
+                    )
+                    .clicked()
+                    {
+                        out.choose_folder = true;
+                    }
+                    ui.add(Label::new(RichText::new(folder).color(TEXT)).truncate())
+                        .on_hover_text(folder);
+                });
+            });
+            ui.add(
+                Label::new(
+                    RichText::new(format!("Next: {next_file}"))
+                        .color(MUTED)
+                        .size(12.0),
+                )
+                .truncate(),
+            );
+        });
+    out
+}
+
+/// One capture in the tray: its picture, then its name and details.
+fn tray_card(ui: &mut Ui, item: &BufferItem, thumbnail: Option<&TextureHandle>) {
+    use palette::*;
+    let kind = match item.kind {
+        ItemKind::Image => "PNG".to_string(),
+        ItemKind::Video { duration_ms } => format!("MP4 {}s", duration_ms / 1000),
+    };
+    let time = DateTime::<Local>::from(item.created_at).format("%H:%M:%S");
+    let details = format!("{kind} · {} · {time}", item.mode.label());
+    let name = item.path.as_deref().and_then(Path::file_name).map_or_else(
+        || format!("#{}", item.id.0),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let (status, status_color) = match &item.state {
+        ItemState::Ready => ("", MUTED),
+        ItemState::Encoding { .. } => ("Saving…", MUTED),
+        ItemState::Failed(_) => ("Failed", RECORD),
+    };
+    let hover = match &item.state {
+        ItemState::Failed(error) => error.clone(),
+        _ => item
+            .path
+            .as_deref()
+            .map_or(name.clone(), |path| path.display().to_string()),
+    };
+
+    Frame::new()
+        .fill(CHIP)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::same(6))
+        .show(ui, |ui| {
+            ui.set_width(THUMBNAIL_SIZE.x);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
+                let (slot, response) = ui.allocate_exact_size(THUMBNAIL_SIZE, Sense::hover());
+                ui.painter()
+                    .rect_filled(slot, CornerRadius::same(4), SLOT_BG);
+                if let Some(texture) = thumbnail {
+                    let size = texture.size_vec2();
+                    let fit = (slot.width() / size.x).min(slot.height() / size.y).min(1.0);
+                    let picture = egui::Rect::from_center_size(slot.center(), size * fit);
+                    egui::Image::new(texture)
+                        .corner_radius(CornerRadius::same(4))
+                        .paint_at(ui, picture);
+                }
+                if !status.is_empty() {
+                    ui.painter().text(
+                        slot.center(),
+                        Align2::CENTER_CENTER,
+                        status,
+                        FontId::new(12.0, FontFamily::Proportional),
+                        status_color,
+                    );
+                }
+                response.on_hover_text(hover);
+                ui.add(Label::new(RichText::new(name).color(TEXT).size(12.0)).truncate());
+                ui.add(Label::new(RichText::new(details).color(MUTED).size(11.0)).truncate());
+            });
+        });
+}
+
 /// The buffer tray (M1, FR-22), `width` points wide. Returns commands for item actions later.
-pub fn tray(ui: &mut Ui, buffer: &Buffer, width: f32) {
+pub fn tray(ui: &mut Ui, buffer: &Buffer, thumbnails: &HashMap<ItemId, TextureHandle>, width: f32) {
     use palette::*;
     Frame::new()
         .fill(BAR)
@@ -663,38 +854,7 @@ pub fn tray(ui: &mut Ui, buffer: &Buffer, width: f32) {
             egui::ScrollArea::horizontal().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for item in buffer.newest_first() {
-                        let kind = match item.kind {
-                            ItemKind::Image => "PNG".to_string(),
-                            ItemKind::Video { duration_ms } => {
-                                format!("MP4 {}s", duration_ms / 1000)
-                            }
-                        };
-                        let status = match &item.state {
-                            ItemState::Ready => String::new(),
-                            ItemState::Encoding { progress_pct } => {
-                                format!(" · encoding {progress_pct}%")
-                            }
-                            ItemState::Failed(e) => format!(" · failed: {e}"),
-                        };
-                        Frame::new()
-                            .fill(CHIP)
-                            .corner_radius(CornerRadius::same(8))
-                            .inner_margin(Margin::same(8))
-                            .show(ui, |ui| {
-                                ui.set_min_size(Vec2::new(140.0, 72.0));
-                                ui.vertical(|ui| {
-                                    ui.label(RichText::new(kind).color(ACCENT).strong());
-                                    ui.label(
-                                        RichText::new(format!("{}{}", item.mode.label(), status))
-                                            .color(TEXT),
-                                    );
-                                    ui.label(
-                                        RichText::new(format!("#{}", item.id.0))
-                                            .color(MUTED)
-                                            .size(11.0),
-                                    );
-                                });
-                            });
+                        tray_card(ui, item, thumbnails.get(&item.id));
                     }
                 });
             });
@@ -827,6 +987,116 @@ mod tests {
         };
         assert!(click_near_right(true));
         assert!(!click_near_right(false));
+    }
+
+    /// The tray's meshes and texts, run until its layout has settled.
+    fn tray_shapes(buffer: &Buffer, thumbnails: &HashMap<ItemId, TextureHandle>) -> Vec<String> {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx, None);
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    vec2(900.0, 400.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| tray(ui, buffer, thumbnails, 800.0));
+            output.textures_delta.clear();
+            seen = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    shape if shape.texture_id() != egui::TextureId::default() => {
+                        Some(format!("{:?}", shape.texture_id()))
+                    }
+                    _ => None,
+                })
+                .collect();
+        }
+        seen
+    }
+
+    #[test]
+    fn tray_shows_thumbnails_newest_first_with_the_count() {
+        let ctx = egui::Context::default();
+        let texture = |name: &str| {
+            let image = egui::ColorImage::new([2, 2], vec![Color32::RED; 4]);
+            ctx.load_texture(name, image, egui::TextureOptions::LINEAR)
+        };
+        let mut buffer = Buffer::new();
+        let older = buffer.push(ItemKind::Image, CaptureMode::Region);
+        let newer = buffer.push(ItemKind::Image, CaptureMode::Screen);
+        let without = buffer.push(ItemKind::Image, CaptureMode::Window);
+        buffer.get_mut(without).unwrap().state = ItemState::Encoding { progress_pct: 0 };
+        let (old_pic, new_pic) = (texture("older"), texture("newer"));
+        let thumbnails = HashMap::from([(older, old_pic.clone()), (newer, new_pic.clone())]);
+
+        let shapes = tray_shapes(&buffer, &thumbnails);
+        let at = |wanted: String| shapes.iter().position(|s| *s == wanted).unwrap();
+        assert!(shapes[0].contains("3 captures"), "{shapes:?}");
+        assert!(at("Saving…".into()) < at(format!("{:?}", new_pic.id())));
+        assert!(at(format!("{:?}", new_pic.id())) < at(format!("{:?}", old_pic.id())));
+    }
+
+    #[test]
+    fn prefix_label_stays_short() {
+        assert_eq!(prefix_label(""), "No prefix");
+        assert_eq!(prefix_label("acme"), "acme");
+        let long = prefix_label("a very long client name indeed");
+        assert_eq!(long.chars().count(), 16);
+        assert!(long.ends_with('…'));
+    }
+
+    /// Opens the panel with the keyboard in the prefix, types `typed`, then presses `key`.
+    fn type_in_destination(prefix: &str, typed: &str, key: Key) -> (String, bool) {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx, None);
+        let mut prefix = prefix.to_owned();
+        let mut closed = false;
+        let press = |pressed| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let frames = [
+            vec![],
+            vec![egui::Event::Text(typed.into())],
+            vec![press(true), press(false)],
+            vec![],
+        ];
+        for (n, events) in frames.into_iter().enumerate() {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let out = destination_panel(ui, &mut prefix, "C:/Captures", "x.png", n == 0);
+                closed |= out.close;
+            });
+            output.textures_delta.clear();
+        }
+        (prefix, closed)
+    }
+
+    #[test]
+    fn the_prefix_is_typed_in_place_and_enter_or_escape_close() {
+        assert_eq!(
+            type_in_destination("", "acme", Key::Enter),
+            ("acme".into(), true)
+        );
+        assert!(type_in_destination("a", "b", Key::Escape).1);
+        assert!(!type_in_destination("a", "b", Key::Tab).1);
+    }
+
+    #[test]
+    fn empty_tray_explains_itself() {
+        let shapes = tray_shapes(&Buffer::new(), &HashMap::new());
+        assert!(shapes.iter().any(|s| s.starts_with("Empty")), "{shapes:?}");
     }
 
     #[test]

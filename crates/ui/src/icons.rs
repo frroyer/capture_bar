@@ -24,6 +24,7 @@ pub enum Icon {
     Video,
     Sliders,
     Minus,
+    Folder,
 }
 
 /// Draw `icon` centred on `center`. Coordinates below run from -8 to 8.
@@ -144,6 +145,18 @@ pub fn paint(p: &Painter, center: Pos2, icon: Icon, color: Color32) {
             seg(0.0, 3.5, 7.0, 3.5);
         }
         Icon::Minus => seg(-5.0, 0.0, 5.0, 0.0),
+        Icon::Folder => {
+            let outline = [
+                (-7.0, -5.5),
+                (-2.0, -5.5),
+                (0.0, -3.5),
+                (7.0, -3.5),
+                (7.0, 5.5),
+            ];
+            let mut points: Vec<_> = outline.iter().map(|&(x, y)| at(x, y)).collect();
+            points.push(at(-7.0, 5.5));
+            p.add(egui::Shape::closed_line(points, s));
+        }
     }
 }
 
