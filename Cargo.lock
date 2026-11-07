@@ -283,6 +283,7 @@ name = "capture-bar"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arboard",
  "cb-buffer",
  "cb-capture",
  "cb-core",

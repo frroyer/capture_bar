@@ -280,9 +280,9 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 
 - AC: shortcut → toast ≤ 100 ms; the image is on the clipboard; Undo removes it from the buffer within 2 s.
 
-- [ ] Frame grab → lock-free queue → PNG worker
-- [ ] Clipboard write (arboard)
-- [ ] Toast component with Annotate / Undo (M2.6)
+- [x] Frame grab → lock-free queue → PNG worker — a plain channel to one worker thread; bounded memory is US-6.1
+- [x] Clipboard write (arboard) — Windows verified
+- [x] Toast component with Undo (M2.6), built without the artboard — Annotate comes with the editor (E7)
 
 ### E5 · Screen recording
 

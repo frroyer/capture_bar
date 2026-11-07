@@ -3,6 +3,8 @@
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod output;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
@@ -10,9 +12,9 @@ use std::time::{Duration, Instant};
 
 use cb_buffer::{Buffer, ItemId, ItemKind, ItemState};
 use cb_capture::{CaptureEvent, CaptureService};
-use cb_core::{CaptureMode, CaptureTarget, Command, DisplayId, Edge, Rect};
+use cb_core::{CaptureMode, CaptureTarget, Command, DisplayId, Edge, Frame, Rect};
 use cb_platform::TrayAction;
-use cb_ui::{palette, BarState, TooltipSide};
+use cb_ui::{BarState, TooltipSide};
 use eframe::egui;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -140,6 +142,24 @@ fn default_shortcuts() -> Vec<(HotKey, Command)> {
     ]
 }
 
+/// A short message beside the bar, for `TOAST_TIME` (FR-12).
+struct Toast {
+    message: String,
+    shown_at: Instant,
+    /// The capture this toast confirms, which Undo removes.
+    undo: Option<ItemId>,
+}
+
+impl Toast {
+    fn new(message: impl Into<String>, undo: Option<ItemId>) -> Self {
+        Self {
+            message: message.into(),
+            shown_at: Instant::now(),
+            undo,
+        }
+    }
+}
+
 struct App {
     bar: BarState,
     collapsed: bool,
@@ -153,8 +173,12 @@ struct App {
     capture: CaptureService,
     pending: HashMap<u64, ItemId>,
     record_started: Option<Instant>,
-    toast: Option<(String, Instant)>,
+    toast: Option<Toast>,
     captures_dir: PathBuf,
+    output: mpsc::Sender<output::Job>,
+    output_done: mpsc::Receiver<output::Done>,
+    /// What Copy puts on the clipboard (M3).
+    newest_frame: Option<(ItemId, Arc<Frame>)>,
     // Kept alive for the lifetime of the app; dropping it unregisters the keys.
     _hotkeys: Option<GlobalHotKeyManager>,
     _tray: Option<cb_platform::Tray>,
@@ -224,9 +248,9 @@ impl App {
         };
 
         let toast = shortcut_map.is_empty().then(|| {
-            (
-                "Global shortcuts unavailable: use the bar or the tray icon".to_owned(),
-                Instant::now(),
+            Toast::new(
+                "Global shortcuts unavailable: use the bar or the tray icon",
+                None,
             )
         });
 
@@ -263,6 +287,8 @@ impl App {
             .join("Captures");
 
         let source: Arc<dyn cb_core::ScreenSource> = Arc::from(cb_platform::screen_source());
+        let ctx = cc.egui_ctx.clone();
+        let (output, output_done) = output::spawn(move || ctx.request_repaint());
 
         Self {
             bar: BarState {
@@ -280,6 +306,9 @@ impl App {
             record_started: None,
             toast,
             captures_dir,
+            output,
+            output_done,
+            newest_frame: None,
             _hotkeys: hotkeys,
             _tray: tray,
             commands,
@@ -308,7 +337,7 @@ impl App {
     }
 
     fn flash(&mut self, msg: impl Into<String>) {
-        self.toast = Some((msg.into(), Instant::now()));
+        self.toast = Some(Toast::new(msg, None));
     }
 
     fn target_for(&self, mode: CaptureMode) -> CaptureTarget {
@@ -338,7 +367,7 @@ impl App {
             Command::ToggleBuffer => self.bar.tray_open = !self.bar.tray_open,
             Command::ToggleBar => self.hidden = !self.hidden,
             Command::RepeatLastRegion => self.capture_still(CaptureMode::Region),
-            Command::CopyNewest => self.flash("Copy: not implemented yet (US-4.4)"),
+            Command::CopyNewest => self.copy_newest(),
             Command::OpenSettings => self.flash("Settings: not implemented yet (US-8.2)"),
             Command::Cancel => {}
         }
@@ -352,7 +381,76 @@ impl App {
         }
         let req = self.capture.request_still(self.target_for(mode));
         self.pending.insert(req, item);
-        self.flash(format!("Added to buffer · {}", self.buffer.len()));
+        let message = format!("Added to buffer · {}", self.buffer.len());
+        self.toast = Some(Toast::new(message, Some(item)));
+    }
+
+    fn copy_newest(&mut self) {
+        match &self.newest_frame {
+            Some((_, frame)) => {
+                let _ = self.output.send(output::Job::Copy(frame.clone()));
+                self.flash("Copied");
+            }
+            None => self.flash("Nothing to copy yet"),
+        }
+    }
+
+    /// Take a capture back: out of the buffer, and off the disk if it got there.
+    fn undo(&mut self, item: ItemId) {
+        self.toast = None;
+        if let Some(path) = self.buffer.remove(item).and_then(|removed| removed.path) {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!(error = %e, ?path, "undone capture stays on disk");
+            }
+        }
+        if self
+            .newest_frame
+            .as_ref()
+            .is_some_and(|(id, _)| *id == item)
+        {
+            self.newest_frame = None;
+        }
+    }
+
+    /// A grabbed frame goes to the worker, unless the capture was undone meanwhile.
+    fn store(&mut self, item: ItemId, frame: Frame) {
+        if self.buffer.get(item).is_none() {
+            return;
+        }
+        let path = self.captures_dir.join(output::file_name(&frame, item));
+        let frame = Arc::new(frame);
+        self.newest_frame = Some((item, frame.clone()));
+        let _ = self.output.send(output::Job::Store { item, frame, path });
+    }
+
+    fn poll_output(&mut self) {
+        while let Ok(done) = self.output_done.try_recv() {
+            match done {
+                output::Done::ClipboardFailed(error) => {
+                    tracing::warn!(%error, "clipboard");
+                    self.flash("Saved, but not copied to the clipboard");
+                }
+                output::Done::Stored { item, path, result } => {
+                    let Some(i) = self.buffer.get_mut(item) else {
+                        // Undone while it was being written.
+                        if result.is_ok() {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                        continue;
+                    };
+                    match result {
+                        Ok(()) => {
+                            i.state = ItemState::Ready;
+                            i.path = Some(path);
+                        }
+                        Err(error) => {
+                            i.state = ItemState::Failed(error.clone());
+                            self.flash(format!("Could not save the capture: {error}"));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn toggle_recording(&mut self) {
@@ -380,28 +478,15 @@ impl App {
         for ev in events {
             match ev {
                 CaptureEvent::Still { request_id, frame } => {
-                    let Some(item) = self.pending.remove(&request_id) else {
-                        continue;
-                    };
-                    let _ = std::fs::create_dir_all(&self.captures_dir);
-                    let path = self.captures_dir.join(format!("capture-{}.png", item.0));
-                    let result = std::fs::File::create(&path)
-                        .map_err(cb_encode::EncodeError::from)
-                        .and_then(|f| cb_encode::write_png(&frame, std::io::BufWriter::new(f)));
-                    if let Some(i) = self.buffer.get_mut(item) {
-                        match result {
-                            Ok(()) => {
-                                i.state = ItemState::Ready;
-                                i.path = Some(path);
-                            }
-                            Err(e) => i.state = ItemState::Failed(e.to_string()),
-                        }
+                    if let Some(item) = self.pending.remove(&request_id) {
+                        self.store(item, frame);
                     }
                 }
                 CaptureEvent::Failed { request_id, error } => {
                     if let Some(item) = self.pending.remove(&request_id) {
                         if let Some(i) = self.buffer.get_mut(item) {
                             i.state = ItemState::Failed(error.to_string());
+                            self.flash(format!("Capture failed: {error}"));
                         }
                     }
                 }
@@ -414,14 +499,14 @@ impl App {
         if !self.dragging {
             self.band = self.bar_hovered && !self.bar.tray_open;
         }
-        let toast_on = match &self.toast {
-            Some((_, at)) if at.elapsed() >= TOAST_TIME => {
-                self.toast = None;
-                false
-            }
-            Some(_) => true,
-            None => false,
-        };
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|t| t.shown_at.elapsed() >= TOAST_TIME)
+        {
+            self.toast = None;
+        }
+        let toast_on = self.toast.is_some();
         let has_extras = self.band || self.bar.tray_open || toast_on;
 
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
@@ -520,8 +605,13 @@ impl App {
             let buffer = &self.buffer;
             self.tray_size = content_size(ui, |ui| cb_ui::tray(ui, buffer, width));
         }
-        if let Some((msg, _)) = &self.toast {
-            ui.label(egui::RichText::new(msg).color(palette::MUTED).size(12.0));
+        if let Some(toast) = &self.toast {
+            let undo = toast.undo;
+            if cb_ui::toast(ui, &toast.message, undo.is_some()) {
+                if let Some(item) = undo {
+                    self.undo(item);
+                }
+            }
         }
         if self.band {
             let room = if beside {
@@ -719,6 +809,7 @@ impl eframe::App for App {
             self.handle(cmd);
         }
         self.poll_captures();
+        self.poll_output();
         self.track_position(ctx);
 
         if let Some(start) = self.record_started {

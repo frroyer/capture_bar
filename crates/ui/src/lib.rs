@@ -571,6 +571,36 @@ fn mode_switch(ui: &mut Ui, current: CaptureMode, out: &mut BarOutput) {
         });
 }
 
+/// A confirmation beside the bar (M2.6). Returns true when Undo was clicked.
+pub fn toast(ui: &mut Ui, message: &str, can_undo: bool) -> bool {
+    use palette::*;
+    let mut undo = false;
+    Frame::new()
+        .fill(BAR)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(Margin::symmetric(10, 4))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(message).color(TEXT).size(13.0));
+                if can_undo {
+                    undo = chip(
+                        ui,
+                        &[Piece::Text("Undo")],
+                        &ChipStyle {
+                            fill: CHIP,
+                            color: TEXT,
+                            height: H_IN_GROUP,
+                        },
+                        "Remove this capture",
+                    )
+                    .clicked();
+                }
+            });
+        });
+    undo
+}
+
 /// The buffer tray (M1, FR-22), `width` points wide. Returns commands for item actions later.
 pub fn tray(ui: &mut Ui, buffer: &Buffer, width: f32) {
     use palette::*;
@@ -725,6 +755,46 @@ mod tests {
         }
         out.expand = expanded;
         out
+    }
+
+    #[test]
+    fn toast_reports_a_click_on_undo_only_when_it_has_one() {
+        let click_near_right = |can_undo: bool| {
+            let ctx = egui::Context::default();
+            install_fonts(&ctx, None);
+            let mut clicked = false;
+            let mut width = 0.0;
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(600.0, 100.0));
+            for frame in 0..4 {
+                let pos = egui::pos2(width - 24.0, 18.0);
+                let button = |pressed| egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                let events = match frame {
+                    1 => vec![egui::Event::PointerMoved(pos)],
+                    2 => vec![button(true)],
+                    3 => vec![button(false)],
+                    _ => Vec::new(),
+                };
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                };
+                let mut output = ctx.run_ui(input, |ui| {
+                    let top = ui.next_widget_position();
+                    clicked |= toast(ui, "Added to buffer · 1", can_undo);
+                    width = ui.min_rect().right() - top.x;
+                });
+                output.textures_delta.clear();
+            }
+            clicked
+        };
+        assert!(click_near_right(true));
+        assert!(!click_near_right(false));
     }
 
     #[test]
