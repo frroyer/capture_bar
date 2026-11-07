@@ -199,8 +199,8 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 
 - [ ] Spike ScreenCaptureKit + VideoToolbox (macOS)
 - [x] Spike Windows.Graphics.Capture + Media Foundation — results: `docs/spikes/us-1.2-windows.md`
-- [ ] Spike PipeWire portal (Wayland) and XShm (X11) + VA-API / software fallback
-- [ ] Spike Wayland bar placement (layer-shell vs. portal limits) and write the decision record
+- [ ] Spike PipeWire portal (Wayland) and XShm (X11) + VA-API / software fallback — spike encodes through an ffmpeg pipe (never shipped); in-process encoder decided in US-5.1
+- [ ] Spike Wayland bar placement (layer-shell vs. portal limits) and write the decision record — proposed, untested: `docs/spikes/us-1.2-wayland-bar.md`; needs its test matrix run on Linux
 
 ### E2 · Floating bar
 
@@ -208,18 +208,18 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 
 - AC: the bar stays on top when switching apps and over full-screen windows where the OS allows. It never appears in a capture.
 
-- [ ] Borderless transparent always-on-top window (winit) per OS
-- [ ] Exclude the bar from capture (SCK exclusion / SetWindowDisplayAffinity / compositor hint)
-- [ ] Render the bar layout of M2.1 in egui: grip, mode switch, Capture, Record, Buffer, mic, cam, settings, collapse
-- [ ] Hover, pressed and focus states; tooltips with shortcuts
+- [ ] Borderless transparent always-on-top window (winit) per OS — Windows done; macOS and Linux not run
+- [ ] Exclude the bar from capture (SCK exclusion / SetWindowDisplayAffinity / compositor hint) — Windows done (10 1903–1909 untested); macOS waits for its backend; Linux has no exclusion, see `docs/spikes/us-1.2-wayland-bar.md`
+- [x] Render the bar layout of M2.1 in egui: grip, mode switch, Capture, Record, Buffer, mic, cam, settings, collapse
+- [x] Hover, pressed and focus states; tooltips with shortcuts — shortcuts appear in tooltips only, not on button labels, to keep the bar narrow
 
 **US-2.2** As a user, I want to drag the bar anywhere, on any monitor, and find it there next time. (M1, M2.5 · FR-2)
 
 - AC: dragging across monitors with different DPI keeps the bar crisp. Position is restored per display layout after relaunch.
 
-- [ ] Drag via grip with OS move loop
-- [ ] Persist position keyed by monitor-set fingerprint
-- [ ] Handle monitor hot-plug: pull the bar back on-screen
+- [x] Drag via grip with OS move loop
+- [x] Persist position keyed by monitor-set fingerprint — Windows verified; macOS and Linux lack display listing, so they keep one position
+- [x] Handle monitor hot-plug: pull the bar back on-screen — Windows verified; needs display listing on macOS and Linux
 
 **US-2.3** As a user, I want the bar to dock vertically on a screen edge. (M2.5 · FR-3)
 
