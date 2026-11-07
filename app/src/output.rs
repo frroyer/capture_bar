@@ -35,6 +35,13 @@ pub enum Job {
     },
     /// Move a deleted capture's file to the Recycle Bin or Trash.
     Trash(PathBuf),
+    /// Put several files on the clipboard, to paste into a folder, a mail or a chat (FR-24).
+    CopyFiles(Vec<PathBuf>),
+    /// Copy files into `dir`, never overwriting what is there (FR-24).
+    SaveAllTo {
+        files: Vec<PathBuf>,
+        dir: PathBuf,
+    },
 }
 
 pub enum Done {
@@ -125,7 +132,22 @@ fn copy(clipboard: &mut Option<arboard::Clipboard>, frame: &Frame) -> Result<(),
         .map_err(|e| e.to_string())
 }
 
-/// Runs a job that touches one existing file and says how it went.
+/// Copy `from` into `dir` under its own name, or `-2`, `-3`… when that is taken.
+fn save_into(from: &Path, dir: &Path) -> std::io::Result<PathBuf> {
+    let name = from.file_name().ok_or(ErrorKind::InvalidInput)?;
+    let mut source = File::open(from)?;
+    let (mut file, path) = create_unique(&dir.join(name))?;
+    match std::io::copy(&mut source, &mut file) {
+        Ok(_) => Ok(path),
+        Err(e) => {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            Err(e)
+        }
+    }
+}
+
+/// Runs a job that works on existing files and says how it went.
 fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
     let file_name = |path: &Path| {
         path.file_name().map_or_else(
@@ -157,6 +179,33 @@ fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
                 format!("Removed from the buffer · the file stays: {e}")
             }
         },
+        Job::CopyFiles(files) => {
+            let copied = match clipboard {
+                Some(clipboard) => clipboard.set().file_list(&files),
+                None => arboard::Clipboard::new().and_then(|mut new| {
+                    let result = new.set().file_list(&files);
+                    *clipboard = Some(new);
+                    result
+                }),
+            };
+            match copied {
+                Ok(()) => format!("Copied {} files", files.len()),
+                Err(e) => format!("Could not copy: {e}"),
+            }
+        }
+        Job::SaveAllTo { files, dir } => {
+            let saved = files
+                .iter()
+                .filter(|from| save_into(from, &dir).is_ok())
+                .count();
+            match files.len() - saved {
+                0 => format!("Saved {saved} copies in {}", file_name(&dir)),
+                failed => format!(
+                    "Saved {saved} copies in {}; {failed} failed",
+                    file_name(&dir)
+                ),
+            }
+        }
         Job::Store { .. } | Job::Copy(_) => unreachable!("not a one-off job"),
     }
 }
@@ -173,7 +222,11 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> (mpsc::Sender<Job>, mpsc::Rece
             for job in jobs {
                 let frame = match &job {
                     Job::Store { frame, .. } | Job::Copy(frame) => frame,
-                    Job::CopyFile(_) | Job::SaveAs { .. } | Job::Trash(_) => {
+                    Job::CopyFile(_)
+                    | Job::SaveAs { .. }
+                    | Job::Trash(_)
+                    | Job::CopyFiles(_)
+                    | Job::SaveAllTo { .. } => {
                         let _ = done_tx.send(Done::Message(one_off(&mut clipboard, job)));
                         wake();
                         continue;
@@ -313,6 +366,29 @@ mod tests {
         assert!(missing.starts_with("Could not save a copy"), "{missing}");
         let unreadable = message_of(Job::CopyFile(from));
         assert!(unreadable.starts_with("Could not copy"), "{unreadable}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn save_all_copies_into_the_folder_without_overwriting() {
+        let dir = std::env::temp_dir().join(format!("cb-save-all-test-{}", std::process::id()));
+        let into = dir.join("picked");
+        std::fs::create_dir_all(&into).unwrap();
+        let (a, b) = (dir.join("a.png"), dir.join("b.png"));
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        std::fs::write(into.join("a.png"), "older").unwrap();
+
+        let message = message_of(Job::SaveAllTo {
+            files: vec![a, b, dir.join("gone.png")],
+            dir: into.clone(),
+        });
+        assert_eq!(message, "Saved 2 copies in picked; 1 failed");
+        let read = |name: &str| std::fs::read_to_string(into.join(name)).unwrap();
+        assert_eq!(
+            (read("a.png"), read("a-2.png"), read("b.png")),
+            ("older".into(), "a".into(), "b".into())
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

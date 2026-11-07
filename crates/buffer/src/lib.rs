@@ -4,6 +4,7 @@
 
 use cb_core::CaptureMode;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -102,6 +103,81 @@ impl Buffer {
     pub fn clear_unpinned(&mut self) {
         self.items.retain(|i| i.pinned);
     }
+
+    /// What a batch action covers, newest first: the selected items, or all of them when
+    /// none is selected (FR-24).
+    pub fn targets(&self, selection: &Selection) -> Vec<ItemId> {
+        self.newest_first()
+            .map(|i| i.id)
+            .filter(|id| selection.is_empty() || selection.contains(*id))
+            .collect()
+    }
+}
+
+/// The captures picked in the tray for a batch action (FR-24).
+#[derive(Debug, Default, Clone)]
+pub struct Selection {
+    ids: BTreeSet<ItemId>,
+    /// Where a shift-click range starts: the last item clicked.
+    anchor: Option<ItemId>,
+}
+
+impl Selection {
+    pub fn contains(&self, id: ItemId) -> bool {
+        self.ids.contains(&id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.ids.clear();
+        self.anchor = None;
+    }
+
+    pub fn remove(&mut self, id: ItemId) {
+        self.ids.remove(&id);
+        if self.anchor == Some(id) {
+            self.anchor = None;
+        }
+    }
+
+    /// A plain click: this item alone, or nothing when it already was alone.
+    pub fn click(&mut self, id: ItemId) {
+        let alone = self.ids.len() == 1 && self.contains(id);
+        self.clear();
+        if !alone {
+            self.ids.insert(id);
+            self.anchor = Some(id);
+        }
+    }
+
+    /// Ctrl-click (Cmd on macOS): add or remove this item.
+    pub fn toggle(&mut self, id: ItemId) {
+        if !self.ids.remove(&id) {
+            self.ids.insert(id);
+        }
+        self.anchor = Some(id);
+    }
+
+    /// Shift-click: add every item from the last one clicked to `id`, in `order`, the
+    /// order the tray shows them in.
+    pub fn extend_to(&mut self, id: ItemId, order: &[ItemId]) {
+        let anchor = self.anchor.unwrap_or(id);
+        let at = |wanted| order.iter().position(|&i| i == wanted);
+        match (at(anchor), at(id)) {
+            (Some(a), Some(b)) => self.ids.extend(&order[a.min(b)..=a.max(b)]),
+            _ => {
+                self.ids.insert(id);
+            }
+        }
+        self.anchor = Some(id);
+    }
 }
 
 #[cfg(test)]
@@ -131,6 +207,45 @@ mod tests {
         b.clear_unpinned();
         assert_eq!(b.len(), 1);
         assert_eq!(b.newest().unwrap().id, a);
+    }
+
+    #[test]
+    fn batch_targets_are_the_selection_or_everything() {
+        let mut b = Buffer::new();
+        let ids: Vec<_> = (0..4)
+            .map(|_| b.push(ItemKind::Image, CaptureMode::Region))
+            .collect();
+        let order: Vec<_> = b.newest_first().map(|i| i.id).collect();
+        let mut s = Selection::default();
+        assert_eq!(b.targets(&s), order, "nothing selected: all, newest first");
+
+        s.click(ids[0]);
+        assert_eq!(b.targets(&s), vec![ids[0]]);
+        s.click(ids[0]);
+        assert!(
+            s.is_empty(),
+            "a click on the only selected item deselects it"
+        );
+
+        s.click(ids[3]);
+        s.toggle(ids[0]);
+        assert_eq!(b.targets(&s), vec![ids[3], ids[0]]);
+        s.toggle(ids[0]);
+        assert_eq!(b.targets(&s), vec![ids[3]]);
+
+        // Shift from the last item clicked (the oldest) to the third shown: a range in tray order.
+        s.extend_to(ids[1], &order);
+        assert_eq!(b.targets(&s), vec![ids[3], ids[1], ids[0]]);
+
+        s.click(ids[1]);
+        assert_eq!(s.len(), 1, "a plain click starts over");
+        b.remove(ids[1]);
+        s.remove(ids[1]);
+        assert_eq!(
+            b.targets(&s).len(),
+            3,
+            "an emptied selection covers everything left"
+        );
     }
 
     #[test]

@@ -10,11 +10,11 @@ use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-use cb_buffer::{Buffer, ItemId, ItemKind, ItemState};
+use cb_buffer::{Buffer, ItemId, ItemKind, ItemState, Selection};
 use cb_capture::{CaptureEvent, CaptureService};
 use cb_core::{CaptureMode, CaptureTarget, Command, DisplayId, Edge, Frame, Rect};
 use cb_platform::TrayAction;
-use cb_ui::{BarState, ItemAction, Overlay, OverlayResult, TooltipSide};
+use cb_ui::{BarState, BatchAction, ItemAction, Overlay, OverlayResult, SelectHow, TooltipSide};
 use eframe::egui;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -205,6 +205,8 @@ struct App {
     /// When the first frame was drawn.
     launched_at: Option<Instant>,
     buffer: Buffer,
+    /// What Copy all, Save all and Clear act on; none means all (FR-24).
+    selection: Selection,
     /// What the tray shows for each capture (FR-22).
     thumbnails: HashMap<ItemId, egui::TextureHandle>,
     capture: CaptureService,
@@ -227,6 +229,8 @@ struct App {
     /// What the tray asked of a capture this frame (FR-23), done once the frame's window
     /// handle is at hand.
     item_action: Option<(ItemId, ItemAction)>,
+    /// What the tray asked of the selection this frame, done like `item_action`.
+    batch_action: Option<BatchAction>,
     /// An OS drag loop took the button release: egui is given one on the next frame.
     release_pointer: bool,
     output: mpsc::Sender<output::Job>,
@@ -368,6 +372,7 @@ impl App {
             bar_fade: 1.0,
             launched_at: None,
             buffer: Buffer::new(),
+            selection: Selection::default(),
             thumbnails: HashMap::new(),
             capture,
             pending: HashMap::new(),
@@ -384,6 +389,7 @@ impl App {
             folder_choice: None,
             folder_requested: false,
             item_action: None,
+            batch_action: None,
             release_pointer: false,
             output,
             output_done,
@@ -551,6 +557,7 @@ impl App {
     /// Drop a capture from the buffer and memory. Returns its file, if it got to disk.
     fn forget(&mut self, item: ItemId) -> Option<PathBuf> {
         self.thumbnails.remove(&item);
+        self.selection.remove(item);
         if self
             .newest_frame
             .as_ref()
@@ -590,6 +597,14 @@ impl App {
         };
         let path = found.path.clone();
         match (action, path) {
+            (ItemAction::Select(how), _) => match how {
+                SelectHow::Only => self.selection.click(item),
+                SelectHow::Toggle => self.selection.toggle(item),
+                SelectHow::Range => {
+                    let order: Vec<_> = self.buffer.newest_first().map(|i| i.id).collect();
+                    self.selection.extend_to(item, &order);
+                }
+            },
             (ItemAction::Delete, _) => self.delete(item),
             (ItemAction::Annotate, _) => self.flash("Annotate: not implemented yet (US-7.1)"),
             (ItemAction::Copy, Some(path)) => {
@@ -607,6 +622,64 @@ impl App {
             // The tray only offers these once the file is on disk.
             (ItemAction::Copy | ItemAction::Save | ItemAction::DragOut, None) => {}
         }
+    }
+
+    /// Run a batch action on the selection, or on everything when nothing is selected (FR-24).
+    fn batch_action(&mut self, frame: &eframe::Frame, action: BatchAction) {
+        let targets = self.buffer.targets(&self.selection);
+        // Copy and save need the file; a capture still being written is left out.
+        let files: Vec<PathBuf> = targets
+            .iter()
+            .filter_map(|&id| self.buffer.get(id))
+            .filter(|i| i.state == ItemState::Ready)
+            .filter_map(|i| i.path.clone())
+            .collect();
+        match action {
+            BatchAction::Deselect => self.selection.clear(),
+            BatchAction::Clear => {
+                let everything = self.selection.is_empty();
+                let mut cleared = 0;
+                for id in targets {
+                    // Clearing everything keeps pinned captures (FR-25); a selection is explicit.
+                    if everything && self.buffer.get(id).is_some_and(|i| i.pinned) {
+                        continue;
+                    }
+                    self.forget(id);
+                    cleared += 1;
+                }
+                self.selection.clear();
+                self.flash(format!(
+                    "Cleared {cleared} from the buffer · the files stay"
+                ));
+            }
+            _ if files.is_empty() => self.flash("Nothing saved to copy yet"),
+            BatchAction::CopyAll => {
+                // One image pastes as an image anywhere; several go as files.
+                let job = match <[PathBuf; 1]>::try_from(files) {
+                    Ok([file]) => output::Job::CopyFile(file),
+                    Err(files) => output::Job::CopyFiles(files),
+                };
+                let _ = self.output.send(job);
+            }
+            BatchAction::SaveAll => self.save_all(frame, files),
+        }
+    }
+
+    /// Ask for a folder on the dialog's own thread; the output worker copies `files` there.
+    fn save_all(&mut self, frame: &eframe::Frame, files: Vec<PathBuf>) {
+        let dialog = rfd::FileDialog::new()
+            .set_title(format!("Save {} captures into…", files.len()))
+            .set_directory(&self.captures_dir)
+            .set_parent(frame);
+        let output = self.output.clone();
+        std::thread::Builder::new()
+            .name("save all dialog".into())
+            .spawn(move || {
+                if let Some(dir) = dialog.pick_folder() {
+                    let _ = output.send(output::Job::SaveAllTo { files, dir });
+                }
+            })
+            .expect("spawn save all dialog thread");
     }
 
     /// Ask where to save a copy of `from`, on the dialog's own thread; the output worker copies.
@@ -903,12 +976,13 @@ impl App {
             } else {
                 self.bar_size.x
             };
-            let (buffer, thumbnails) = (&self.buffer, &self.thumbnails);
-            let mut asked = None;
+            let (buffer, selection, thumbnails) = (&self.buffer, &self.selection, &self.thumbnails);
+            let mut asked = cb_ui::TrayOutput::default();
             self.tray_size = content_size(ui, |ui| {
-                asked = cb_ui::tray(ui, buffer, thumbnails, width);
+                asked = cb_ui::tray(ui, buffer, selection, thumbnails, width);
             });
-            self.item_action = self.item_action.or(asked);
+            self.item_action = self.item_action.or(asked.item);
+            self.batch_action = self.batch_action.or(asked.batch);
         }
         if let Some(toast) = &self.toast {
             let undo = toast.undo;
@@ -1179,6 +1253,9 @@ impl eframe::App for App {
         }
         if let Some((item, action)) = self.item_action.take() {
             self.item_action(frame, item, action);
+        }
+        if let Some(action) = self.batch_action.take() {
+            self.batch_action(frame, action);
         }
 
         // Keep the timer and toast fresh without spinning the CPU (NFR-7). A drag polls

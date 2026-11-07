@@ -6,7 +6,7 @@ mod overlay;
 
 pub use overlay::{Overlay, OverlayResult};
 
-use cb_buffer::{Buffer, BufferItem, ItemId, ItemKind, ItemState};
+use cb_buffer::{Buffer, BufferItem, ItemId, ItemKind, ItemState, Selection};
 use cb_core::{CaptureMode, Command};
 use chrono::{DateTime, Local};
 use egui::{
@@ -773,6 +773,37 @@ pub enum ItemAction {
     Delete,
     /// The picture is being dragged: hand the file to the OS drag and drop.
     DragOut,
+    /// The picture was clicked, to pick it for a batch action (FR-24).
+    Select(SelectHow),
+}
+
+/// How a click on a picture changes the selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectHow {
+    /// A plain click: this one alone.
+    Only,
+    /// Ctrl-click, or Cmd-click on macOS.
+    Toggle,
+    /// Shift-click: a range.
+    Range,
+}
+
+/// An action on the selected captures, or on all of them when none is (FR-24).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchAction {
+    CopyAll,
+    /// Save copies into a folder the user picks.
+    SaveAll,
+    /// Take the captures out of the buffer. Their files stay.
+    Clear,
+    Deselect,
+}
+
+/// What the user did in the tray this frame.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct TrayOutput {
+    pub item: Option<(ItemId, ItemAction)>,
+    pub batch: Option<BatchAction>,
 }
 
 /// One capture in the tray: its picture, then its name, details and actions.
@@ -780,6 +811,7 @@ fn tray_card(
     ui: &mut Ui,
     item: &BufferItem,
     thumbnail: Option<&TextureHandle>,
+    selected: bool,
 ) -> Option<ItemAction> {
     use palette::*;
     let kind = match item.kind {
@@ -808,10 +840,13 @@ fn tray_card(
     // Copy, save and drag need the file; the rest work at any time.
     let has_file = item.state == ItemState::Ready && item.path.is_some();
     let mut action = None;
+    // The same border either way, so selecting does not move anything.
+    let border = if selected { ACCENT } else { CHIP };
     Frame::new()
         .fill(CHIP)
+        .stroke(Stroke::new(2.0, border))
         .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::same(6))
+        .inner_margin(Margin::same(4))
         .show(ui, |ui| {
             ui.set_width(THUMBNAIL_SIZE.x);
             ui.vertical(|ui| {
@@ -819,11 +854,22 @@ fn tray_card(
                 let sense = if has_file {
                     Sense::click_and_drag()
                 } else {
-                    Sense::hover()
+                    Sense::click()
                 };
                 let (slot, response) = ui.allocate_exact_size(THUMBNAIL_SIZE, sense);
                 if response.drag_started() {
                     action = Some(ItemAction::DragOut);
+                }
+                if response.clicked() {
+                    let modifiers = ui.input(|i| i.modifiers);
+                    let how = if modifiers.shift {
+                        SelectHow::Range
+                    } else if modifiers.command {
+                        SelectHow::Toggle
+                    } else {
+                        SelectHow::Only
+                    };
+                    action = Some(ItemAction::Select(how));
                 }
                 let response = if has_file {
                     response.on_hover_cursor(egui::CursorIcon::Grab)
@@ -850,13 +896,14 @@ fn tray_card(
                     );
                 }
                 let hover = if has_file {
-                    format!(
-                        "{hover}
-Drag into another app to share the file"
-                    )
+                    format!("{hover}\nDrag into another app to share the file")
                 } else {
                     hover
                 };
+                let hover = format!(
+                    "{hover}\nClick to select, Shift or {} to add",
+                    command_key()
+                );
                 response.on_hover_text(hover);
                 ui.add(Label::new(RichText::new(name).color(TEXT).size(12.0)).truncate());
                 ui.add(Label::new(RichText::new(details).color(MUTED).size(11.0)).truncate());
@@ -895,15 +942,78 @@ Drag into another app to share the file"
     action
 }
 
-/// The buffer tray (M1, FR-22), `width` points wide. Returns what was asked of which capture.
+/// The name of the key that adds one item to a selection.
+fn command_key() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Cmd"
+    } else {
+        "Ctrl"
+    }
+}
+
+/// Copy all, Save all and Clear, named for what they act on (FR-24).
+fn batch_row(ui: &mut Ui, selected: usize) -> Option<BatchAction> {
+    use palette::*;
+    let style = ChipStyle {
+        fill: CHIP,
+        color: TEXT,
+        height: 28.0,
+    };
+    let (what, whose) = match selected {
+        0 => ("all".to_string(), "every capture".to_string()),
+        n => (n.to_string(), format!("the {n} selected")),
+    };
+    // Right to left: the first is drawn rightmost.
+    let buttons = [
+        (
+            format!("Clear {what}"),
+            format!("Take {whose} out of the buffer; the files stay"),
+            BatchAction::Clear,
+        ),
+        (
+            format!("Save {what}…"),
+            format!("Save copies of {whose} into a folder"),
+            BatchAction::SaveAll,
+        ),
+        (
+            format!("Copy {what}"),
+            format!("Copy {whose}"),
+            BatchAction::CopyAll,
+        ),
+    ];
+    let mut action = None;
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+        for (label, tooltip, what) in &buttons {
+            if chip(ui, &[Piece::Text(label)], &style, tooltip).clicked() {
+                action = Some(*what);
+            }
+        }
+        if selected > 0
+            && chip(
+                ui,
+                &[Piece::Text("Deselect")],
+                &style,
+                "Act on every capture again",
+            )
+            .clicked()
+        {
+            action = Some(BatchAction::Deselect);
+        }
+    });
+    action
+}
+
+/// The buffer tray (M1, FR-22), `width` points wide. Cards in `selection` are highlighted.
 pub fn tray(
     ui: &mut Ui,
     buffer: &Buffer,
+    selection: &Selection,
     thumbnails: &HashMap<ItemId, TextureHandle>,
     width: f32,
-) -> Option<(ItemId, ItemAction)> {
+) -> TrayOutput {
     use palette::*;
-    let mut action = None;
+    let mut out = TrayOutput::default();
     Frame::new()
         .fill(BAR)
         .stroke(Stroke::new(1.0, BORDER))
@@ -912,11 +1022,16 @@ pub fn tray(
         .show(ui, |ui| {
             // Less the margin and the border on both sides.
             ui.set_width((width - 26.0).max(1.0));
-            ui.label(
-                RichText::new(format!("Buffer · {} captures", buffer.len()))
-                    .color(TEXT)
-                    .strong(),
-            );
+            ui.horizontal(|ui| {
+                let title = match selection.len() {
+                    0 => format!("Buffer · {} captures", buffer.len()),
+                    n => format!("Buffer · {} captures · {n} selected", buffer.len()),
+                };
+                ui.label(RichText::new(title).color(TEXT).strong());
+                if !buffer.is_empty() {
+                    out.batch = batch_row(ui, selection.len());
+                }
+            });
             if buffer.is_empty() {
                 ui.label(
                     RichText::new(format!(
@@ -931,14 +1046,16 @@ pub fn tray(
             egui::ScrollArea::horizontal().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for item in buffer.newest_first() {
-                        if let Some(what) = tray_card(ui, item, thumbnails.get(&item.id)) {
-                            action = Some((item.id, what));
+                        let selected = selection.contains(item.id);
+                        let thumbnail = thumbnails.get(&item.id);
+                        if let Some(what) = tray_card(ui, item, thumbnail, selected) {
+                            out.item = Some((item.id, what));
                         }
                     }
                 });
             });
         });
-    action
+    out
 }
 
 #[cfg(test)]
@@ -1083,7 +1200,7 @@ mod tests {
                 ..Default::default()
             };
             let mut output = ctx.run_ui(input, |ui| {
-                tray(ui, buffer, thumbnails, 800.0);
+                tray(ui, buffer, &Selection::default(), thumbnails, 800.0);
             });
             output.textures_delta.clear();
             seen = output
@@ -1207,7 +1324,7 @@ mod tests {
                 ..Default::default()
             };
             let mut output = ctx.run_ui(input, |ui| {
-                asked.extend(tray(ui, buffer, &thumbnails, 800.0));
+                asked.extend(tray(ui, buffer, &Selection::default(), &thumbnails, 800.0).item);
             });
             output.textures_delta.clear();
             for clipped in &output.shapes {
@@ -1249,7 +1366,8 @@ mod tests {
         let picture = |details: egui::Rect| details.left_top() - vec2(-40.0, 60.0);
         let dragged = press_on_card(&buffer, picture, vec2(30.0, 0.0));
         assert_eq!(dragged, vec![(item, ItemAction::DragOut)]);
-        assert!(press_on_card(&buffer, picture, vec2(0.0, 0.0)).is_empty());
+        let clicked = press_on_card(&buffer, picture, vec2(0.0, 0.0));
+        assert_eq!(clicked, vec![(item, ItemAction::Select(SelectHow::Only))]);
     }
 
     #[test]
@@ -1263,7 +1381,96 @@ mod tests {
         let delete = press_on_card(&buffer, action_button(3), vec2(0.0, 0.0));
         assert_eq!(delete, vec![(item, ItemAction::Delete)]);
         let picture = |details: egui::Rect| details.left_top() - vec2(-40.0, 60.0);
-        assert!(press_on_card(&buffer, picture, vec2(30.0, 0.0)).is_empty());
+        let dragged = press_on_card(&buffer, picture, vec2(30.0, 0.0));
+        assert!(
+            !dragged.contains(&(item, ItemAction::DragOut)),
+            "{dragged:?}"
+        );
+    }
+
+    /// Clicks `offset` away from the centre of the text starting with `text`, holding
+    /// `modifiers`. Returns the tray's output with what was clicked, and every text drawn.
+    fn click_in_tray(
+        buffer: &Buffer,
+        selection: &Selection,
+        text: &str,
+        offset: egui::Vec2,
+        modifiers: egui::Modifiers,
+    ) -> (TrayOutput, Vec<String>) {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx, None);
+        let thumbnails = HashMap::new();
+        let mut target = egui::Rect::NOTHING;
+        let mut out = TrayOutput::default();
+        let mut texts = Vec::new();
+        for frame in 0..6 {
+            let pos = target.center() + offset;
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers,
+            };
+            let events = match frame {
+                3 => vec![
+                    egui::Event::ModifiersChanged(modifiers),
+                    egui::Event::PointerMoved(pos),
+                ],
+                4 => vec![button(true), button(false)],
+                _ => Vec::new(),
+            };
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let now = tray(ui, buffer, selection, &thumbnails, 800.0);
+                out.item = out.item.or(now.item);
+                out.batch = out.batch.or(now.batch);
+            });
+            output.textures_delta.clear();
+            texts.clear();
+            for clipped in &output.shapes {
+                if let egui::Shape::Text(shape) = &clipped.shape {
+                    let drawn = shape.galley.text().to_owned();
+                    if drawn.starts_with(text) {
+                        target = shape.visual_bounding_rect();
+                    }
+                    texts.push(drawn);
+                }
+            }
+        }
+        (out, texts)
+    }
+
+    #[test]
+    fn batch_buttons_name_what_they_act_on() {
+        let mut buffer = Buffer::new();
+        let a = buffer.push(ItemKind::Image, CaptureMode::Region);
+        let b = buffer.push(ItemKind::Image, CaptureMode::Screen);
+        let none = Selection::default();
+        let none_key = egui::Modifiers::NONE;
+
+        let (out, texts) = click_in_tray(&buffer, &none, "Copy all", vec2(0.0, 0.0), none_key);
+        assert_eq!(out.batch, Some(BatchAction::CopyAll));
+        assert!(texts.iter().any(|t| t == "Clear all"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t == "Deselect"), "{texts:?}");
+
+        let mut one = Selection::default();
+        one.click(a);
+        let (out, texts) = click_in_tray(&buffer, &one, "Save 1", vec2(0.0, 0.0), none_key);
+        assert_eq!(out.batch, Some(BatchAction::SaveAll));
+        assert!(texts.iter().any(|t| t.ends_with("2 captures · 1 selected")));
+        assert!(texts.iter().any(|t| t == "Clear 1"), "{texts:?}");
+        let (out, _) = click_in_tray(&buffer, &one, "Deselect", vec2(0.0, 0.0), none_key);
+        assert_eq!(out.batch, Some(BatchAction::Deselect));
+
+        // The picture sits above the name; Region is the older card, drawn second.
+        let up = vec2(0.0, -60.0);
+        let (out, _) = click_in_tray(&buffer, &none, "PNG · Region", up, egui::Modifiers::SHIFT);
+        assert_eq!(out.item, Some((a, ItemAction::Select(SelectHow::Range))));
+        let (out, _) = click_in_tray(&buffer, &none, "PNG · Screen", up, egui::Modifiers::COMMAND);
+        assert_eq!(out.item, Some((b, ItemAction::Select(SelectHow::Toggle))));
     }
 
     #[test]

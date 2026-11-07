@@ -359,7 +359,7 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: shift/cmd-click multi-select; Copy all, Save all to folder and Clear act on the selection (or on everything when nothing is selected).
 
-- [ ] Selection model + batch commands
+- [x] Selection model + batch commands — click, Ctrl/Cmd toggle, Shift range; Copy all (one image, or several as files), Save all into a folder without overwriting, Clear (files stay; pinned kept when clearing all). Batch delete and PDF export come with US-6.7
 
 **US-6.6** As a user, I want the buffer to survive restarts and clean itself up. (M3 · FR-25, NFR-12)
 

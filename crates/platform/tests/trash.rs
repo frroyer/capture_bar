@@ -8,5 +8,8 @@ fn a_trashed_file_leaves_its_folder() {
     std::fs::write(&path, "pixels").unwrap();
     cb_platform::move_to_trash(&path).unwrap();
     assert!(!path.exists());
-    assert!(cb_platform::move_to_trash(&path).is_err(), "a missing file is an error");
+    assert!(
+        cb_platform::move_to_trash(&path).is_err(),
+        "a missing file is an error"
+    );
 }

@@ -47,7 +47,7 @@ only if a spike shows a need.
 - Global shortcuts (Ctrl+Shift / ⌥⇧ map from M3) fire from any app on Windows; macOS and X11 are not run yet, and the Wayland portal backend is not started. If none can be registered, a toast says so.
 - The collapse button shows the M2.3 pill; Ctrl+Shift+Space hides and shows. Hidden means transparent and click-through, not an OS-hidden window, because eframe stops running hidden windows. The bar fades to 40% when the cursor is away. A tray icon (not on Linux yet) toggles the bar and quits.
 - Bar UI follows M2.1 (vector icons in `crates/ui/src/icons.rs`; shortcuts in tooltips only). The window
-  follows its content and grows while hovered to give tooltips room. The buffer tray shows a thumbnail card per capture (US-6.3), each with Copy, Save a copy, Annotate (stub until US-7.1) and Delete (to the Recycle Bin); on Windows the picture drags out as a file (US-6.4).
+  follows its content and grows while hovered to give tooltips room. The buffer tray shows a thumbnail card per capture (US-6.3), each with Copy, Save a copy, Annotate (stub until US-7.1) and Delete (to the Recycle Bin); on Windows the picture drags out as a file (US-6.4). Click, Ctrl/Cmd and Shift select cards; Copy all, Save all and Clear act on the selection or on everything (US-6.5).
 - Bar position and dock are saved per monitor layout through eframe storage and pulled back on-screen when
   monitors change. The bar docks to screen edges, vertical on left and right. `App::bar_pos` is the source of
   truth; the window follows it, because the tray, toast and tooltip band open on whichever side has room.
