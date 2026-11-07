@@ -50,6 +50,14 @@ pub struct Rect {
 }
 
 impl Rect {
+    fn contains(&self, (x, y): (i32, i32)) -> bool {
+        let (x, y) = (i64::from(x), i64::from(y));
+        x >= i64::from(self.x)
+            && y >= i64::from(self.y)
+            && x < i64::from(self.x) + i64::from(self.width)
+            && y < i64::from(self.y) + i64::from(self.height)
+    }
+
     fn overlap_area(&self, other: &Self) -> i64 {
         let right = |r: &Self| i64::from(r.x) + i64::from(r.width);
         let bottom = |r: &Self| i64::from(r.y) + i64::from(r.height);
@@ -128,6 +136,53 @@ pub fn pull_on_screen(rect: Rect, displays: &[DisplayInfo]) -> (i32, i32) {
     }
 }
 
+/// The display under a global point (FR-10).
+pub fn display_at(point: (i32, i32), displays: &[DisplayInfo]) -> Option<&DisplayInfo> {
+    displays.iter().find(|d| d.bounds.contains(point))
+}
+
+/// The topmost window under a global point. `windows` is listed front to back (FR-9).
+pub fn window_at(point: (i32, i32), windows: &[WindowInfo]) -> Option<&WindowInfo> {
+    windows.iter().find(|w| w.bounds.contains(point))
+}
+
+/// The smallest rectangle around all displays.
+pub fn desktop_bounds(displays: &[DisplayInfo]) -> Option<Rect> {
+    let bounds = || displays.iter().map(|d| d.bounds);
+    let right = |r: Rect| i64::from(r.x) + i64::from(r.width);
+    let bottom = |r: Rect| i64::from(r.y) + i64::from(r.height);
+    let x = bounds().map(|b| b.x).min()?;
+    let y = bounds().map(|b| b.y).min()?;
+    Some(Rect {
+        x,
+        y,
+        width: (bounds().map(right).max()? - i64::from(x)) as u32,
+        height: (bounds().map(bottom).max()? - i64::from(y)) as u32,
+    })
+}
+
+/// One image of the whole desktop from one frame per display. Where no display
+/// reaches, the image is black.
+pub fn stitch(parts: &[(Rect, Frame)], desktop: Rect) -> Frame {
+    let (width, height) = (desktop.width as usize, desktop.height as usize);
+    let mut rgba = [0, 0, 0, 255].repeat(width * height);
+    for (bounds, frame) in parts {
+        let left = (i64::from(bounds.x) - i64::from(desktop.x)) as usize;
+        let top = (i64::from(bounds.y) - i64::from(desktop.y)) as usize;
+        let row_bytes = frame.width as usize * 4;
+        for (row, line) in frame.rgba.chunks_exact(row_bytes).enumerate() {
+            let start = ((top + row) * width + left) * 4;
+            rgba[start..start + row_bytes].copy_from_slice(line);
+        }
+    }
+    Frame {
+        width: desktop.width,
+        height: desktop.height,
+        rgba,
+        captured_at: SystemTime::now(),
+    }
+}
+
 /// A screen edge the bar can dock to (FR-3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Edge {
@@ -199,6 +254,8 @@ pub enum CaptureTarget {
     Region(Rect),
     Window(WindowId),
     Display(DisplayId),
+    /// All displays as one image.
+    Desktop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -427,6 +484,61 @@ mod tests {
     fn only_side_edges_turn_the_bar_vertical() {
         assert!(Edge::Left.is_side() && Edge::Right.is_side());
         assert!(!Edge::Top.is_side() && !Edge::Bottom.is_side());
+    }
+
+    fn window(id: u64, x: i32, y: i32) -> WindowInfo {
+        WindowInfo {
+            id: WindowId(id),
+            title: String::new(),
+            app_name: String::new(),
+            bounds: Rect {
+                x,
+                y,
+                width: 100,
+                height: 100,
+            },
+        }
+    }
+
+    #[test]
+    fn the_front_window_wins_and_edges_are_exact() {
+        let windows = [window(1, 50, 50), window(2, 0, 0)];
+        let at = |p| window_at(p, &windows).map(|w| w.id.0);
+        assert_eq!(at((60, 60)), Some(1), "both hit: front first");
+        assert_eq!(at((10, 10)), Some(2));
+        assert_eq!(at((149, 149)), Some(1));
+        assert_eq!(at((150, 150)), None, "right and bottom edges are outside");
+    }
+
+    #[test]
+    fn finds_the_display_under_a_point_left_of_the_primary() {
+        let d = [display(0, 0, 1920, 1080), display(-1280, 0, 1280, 720)];
+        assert_eq!(display_at((-1, 10), &d).map(|d| d.bounds.x), Some(-1280));
+        assert_eq!(display_at((1919, 1079), &d).map(|d| d.bounds.x), Some(0));
+        assert!(display_at((-1, 800), &d).is_none(), "below the small one");
+    }
+
+    #[test]
+    fn stitching_places_each_display_and_fills_gaps_with_black() {
+        let d = [display(0, 0, 2, 2), display(-1, 1, 1, 1)];
+        let desktop = desktop_bounds(&d).unwrap();
+        assert_eq!((desktop.x, desktop.y), (-1, 0));
+        assert_eq!((desktop.width, desktop.height), (3, 2));
+        let frame = |w: u32, h: u32, v: u8| Frame {
+            width: w,
+            height: h,
+            rgba: [v, v, v, 255].repeat((w * h) as usize),
+            captured_at: SystemTime::now(),
+        };
+        let parts = [
+            (d[0].bounds, frame(2, 2, 200)),
+            (d[1].bounds, frame(1, 1, 100)),
+        ];
+        let out = stitch(&parts, desktop);
+        let red: Vec<u8> = out.rgba.as_chunks::<4>().0.iter().map(|p| p[0]).collect();
+        assert_eq!(red, [0, 200, 200, 100, 200, 200]);
+        assert!(out.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
+        assert!(desktop_bounds(&[]).is_none());
     }
 
     #[test]

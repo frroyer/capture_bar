@@ -14,7 +14,7 @@ use cb_buffer::{Buffer, ItemId, ItemKind, ItemState};
 use cb_capture::{CaptureEvent, CaptureService};
 use cb_core::{CaptureMode, CaptureTarget, Command, DisplayId, Edge, Frame, Rect};
 use cb_platform::TrayAction;
-use cb_ui::{BarState, TooltipSide};
+use cb_ui::{BarState, Overlay, OverlayResult, TooltipSide};
 use eframe::egui;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -172,6 +172,9 @@ struct App {
     buffer: Buffer,
     capture: CaptureService,
     pending: HashMap<u64, ItemId>,
+    /// The desktop grab an overlay is waiting for, and that overlay's mode.
+    overlay_request: Option<(u64, CaptureMode)>,
+    overlay: Option<Overlay>,
     record_started: Option<Instant>,
     toast: Option<Toast>,
     captures_dir: PathBuf,
@@ -289,6 +292,8 @@ impl App {
         let source: Arc<dyn cb_core::ScreenSource> = Arc::from(cb_platform::screen_source());
         let ctx = cc.egui_ctx.clone();
         let (output, output_done) = output::spawn(move || ctx.request_repaint());
+        let ctx = cc.egui_ctx.clone();
+        let capture = CaptureService::new(source.clone(), move || ctx.request_repaint());
 
         Self {
             bar: BarState {
@@ -301,8 +306,10 @@ impl App {
             click_through: false,
             bar_fade: 1.0,
             buffer: Buffer::new(),
-            capture: CaptureService::new(source.clone()),
+            capture,
             pending: HashMap::new(),
+            overlay_request: None,
+            overlay: None,
             record_started: None,
             toast,
             captures_dir,
@@ -340,33 +347,80 @@ impl App {
         self.toast = Some(Toast::new(msg, None));
     }
 
-    fn target_for(&self, mode: CaptureMode) -> CaptureTarget {
-        // TODO(US-4.2 / US-4.3): open the region overlay or window picker first.
+    /// FR-10: the monitor under the cursor, or the primary one if that is unknown.
+    fn screen_target(&self) -> CaptureTarget {
+        let display = cb_platform::cursor_position()
+            .and_then(|cursor| cb_core::display_at(cursor, &self.displays));
+        CaptureTarget::Display(display.map_or(DisplayId(0), |d| d.id))
+    }
+
+    /// Capture now, or open the overlay to choose what. Asking again while it is open
+    /// closes it: the way out if the overlay did not get the keyboard for Esc.
+    fn begin_capture(&mut self, mode: CaptureMode) {
+        if self.overlay.take().is_some() || self.overlay_request.is_some() {
+            return;
+        }
         match mode {
-            CaptureMode::Region => CaptureTarget::Region(Rect {
-                x: 0,
-                y: 0,
-                width: 800,
-                height: 600,
-            }),
-            CaptureMode::Window => CaptureTarget::Display(DisplayId(0)),
-            CaptureMode::Screen => CaptureTarget::Display(DisplayId(0)),
+            CaptureMode::Screen => self.capture_still(mode, self.screen_target()),
+            CaptureMode::Window => {
+                let request = self.capture.request_still(CaptureTarget::Desktop);
+                self.overlay_request = Some((request, mode));
+            }
+            // TODO(US-4.2): open the region overlay first.
+            CaptureMode::Region => self.capture_still(
+                mode,
+                CaptureTarget::Region(Rect {
+                    x: 0,
+                    y: 0,
+                    width: 800,
+                    height: 600,
+                }),
+            ),
+        }
+    }
+
+    fn open_overlay(&mut self, mode: CaptureMode, desktop: Frame) {
+        let origin = self
+            .screen
+            .displays()
+            .ok()
+            .and_then(|displays| cb_core::desktop_bounds(&displays))
+            .map_or((0, 0), |bounds| (bounds.x, bounds.y));
+        let windows = self.screen.windows().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "window list unavailable");
+            Vec::new()
+        });
+        self.overlay = Some(Overlay::new(mode, desktop, origin, windows));
+    }
+
+    fn show_overlay(&mut self, ctx: &egui::Context) {
+        let Some(overlay) = &mut self.overlay else {
+            return;
+        };
+        let mode = overlay.mode();
+        match overlay.show(ctx) {
+            None => {}
+            Some(OverlayResult::Cancelled) => self.overlay = None,
+            Some(OverlayResult::Window(id)) => {
+                self.overlay = None;
+                self.capture_still(mode, CaptureTarget::Window(id));
+            }
         }
     }
 
     fn handle(&mut self, cmd: Command) {
         match cmd {
             Command::SetMode(mode) => self.bar.mode = mode,
-            Command::Capture => self.capture_still(self.bar.mode),
+            Command::Capture => self.begin_capture(self.bar.mode),
             Command::CaptureWith(mode) => {
                 self.bar.mode = mode;
-                self.capture_still(mode);
+                self.begin_capture(mode);
             }
             Command::ToggleRecording => self.toggle_recording(),
             Command::TogglePause => self.flash("Pause: not implemented yet (US-5.2)"),
             Command::ToggleBuffer => self.bar.tray_open = !self.bar.tray_open,
             Command::ToggleBar => self.hidden = !self.hidden,
-            Command::RepeatLastRegion => self.capture_still(CaptureMode::Region),
+            Command::RepeatLastRegion => self.begin_capture(CaptureMode::Region),
             Command::CopyNewest => self.copy_newest(),
             Command::OpenSettings => self.flash("Settings: not implemented yet (US-8.2)"),
             Command::Cancel => {}
@@ -374,12 +428,12 @@ impl App {
     }
 
     /// FR-20: the item appears in the buffer immediately; the frame arrives later.
-    fn capture_still(&mut self, mode: CaptureMode) {
+    fn capture_still(&mut self, mode: CaptureMode, target: CaptureTarget) {
         let item = self.buffer.push(ItemKind::Image, mode);
         if let Some(i) = self.buffer.get_mut(item) {
             i.state = ItemState::Encoding { progress_pct: 0 };
         }
-        let req = self.capture.request_still(self.target_for(mode));
+        let req = self.capture.request_still(target);
         self.pending.insert(req, item);
         let message = format!("Added to buffer · {}", self.buffer.len());
         self.toast = Some(Toast::new(message, Some(item)));
@@ -478,12 +532,23 @@ impl App {
         for ev in events {
             match ev {
                 CaptureEvent::Still { request_id, frame } => {
-                    if let Some(item) = self.pending.remove(&request_id) {
+                    if let Some((_, mode)) = self
+                        .overlay_request
+                        .take_if(|(request, _)| *request == request_id)
+                    {
+                        self.open_overlay(mode, frame);
+                    } else if let Some(item) = self.pending.remove(&request_id) {
                         self.store(item, frame);
                     }
                 }
                 CaptureEvent::Failed { request_id, error } => {
-                    if let Some(item) = self.pending.remove(&request_id) {
+                    if self
+                        .overlay_request
+                        .take_if(|(request, _)| *request == request_id)
+                        .is_some()
+                    {
+                        self.flash(format!("Capture failed: {error}"));
+                    } else if let Some(item) = self.pending.remove(&request_id) {
                         if let Some(i) = self.buffer.get_mut(item) {
                             i.state = ItemState::Failed(error.to_string());
                             self.flash(format!("Capture failed: {error}"));
@@ -835,6 +900,7 @@ impl eframe::App for App {
                 });
         }
         self.place_window(ctx, used);
+        self.show_overlay(ctx);
 
         // Keep the timer and toast fresh without spinning the CPU (NFR-7). A drag polls
         // faster, to show the snap preview and catch the drop.

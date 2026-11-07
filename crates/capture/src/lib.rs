@@ -30,7 +30,8 @@ pub struct CaptureService {
 }
 
 impl CaptureService {
-    pub fn new(source: Arc<dyn ScreenSource>) -> Self {
+    /// `wake` runs after each finished request, to get the UI to read the result.
+    pub fn new(source: Arc<dyn ScreenSource>, wake: impl Fn() + Send + 'static) -> Self {
         let (tx, rx) = unbounded::<Request>();
         let (ev_tx, events) = unbounded::<CaptureEvent>();
         thread::Builder::new()
@@ -50,6 +51,7 @@ impl CaptureService {
                     if ev_tx.send(ev).is_err() {
                         break;
                     }
+                    wake();
                 }
             })
             .expect("spawn capture thread");

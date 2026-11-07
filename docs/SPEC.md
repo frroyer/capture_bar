@@ -273,8 +273,8 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 
 - AC: the hovered window is highlighted; the capture excludes shadows unless enabled.
 
-- [ ] Window enumeration + hit-testing per OS
-- [ ] Monitor-under-cursor and all-monitors stitch
+- [x] Window enumeration + hit-testing per OS — Windows verified; macOS and Linux not started
+- [x] Monitor-under-cursor and all-monitors stitch — Windows, one monitor verified; the overlay uses the stitch, and its setting comes with US-8.2
 
 **US-4.4** As a user, I want each screenshot to land in the buffer and clipboard instantly, with a confirmation I can undo. (M2.6 · FR-12, FR-13, NFR-4)
 

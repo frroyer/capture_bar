@@ -153,6 +153,18 @@ pub fn primary_button_down() -> Option<bool> {
     }
 }
 
+/// Where the cursor is, in global physical pixels, if this OS can tell.
+pub fn cursor_position() -> Option<(i32, i32)> {
+    #[cfg(windows)]
+    {
+        windows::cursor_position()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// The screen source for the current OS.
 pub fn screen_source() -> Box<dyn ScreenSource> {
     #[cfg(target_os = "macos")]

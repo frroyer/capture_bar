@@ -2,6 +2,9 @@
 //! The UI only *returns commands*; it never calls OS or capture code directly.
 
 mod icons;
+mod overlay;
+
+pub use overlay::{Overlay, OverlayResult};
 
 use cb_buffer::{Buffer, ItemKind, ItemState};
 use cb_core::{CaptureMode, Command};

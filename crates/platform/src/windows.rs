@@ -23,8 +23,9 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    DwmGetWindowAttribute, DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_CLOAKED,
+    DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_DONOTROUND,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
@@ -33,6 +34,7 @@ use windows::Win32::Graphics::Gdi::{
     MONITORINFO, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::Com::CoIncrementMTAUsage;
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
@@ -41,8 +43,10 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SetWindowDisplayAffinity, SetWindowPos, SM_SWAPBUTTON, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WDA_EXCLUDEFROMCAPTURE, WM_NCCALCSIZE,
+    EnumWindows, GetCursorPos, GetShellWindow, GetSystemMetrics, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SetWindowDisplayAffinity,
+    SetWindowPos, SM_SWAPBUTTON, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, WDA_EXCLUDEFROMCAPTURE, WM_NCCALCSIZE,
 };
 
 /// How long to wait for the first frame of a capture session.
@@ -240,7 +244,7 @@ fn forget_capture_item(monitor: HMONITOR) {
     items.remove(&(monitor.0 as u64));
 }
 
-/// A running capture session on one monitor, with a CPU-readable copy of the newest frame.
+/// A running capture session on one monitor or window, with a CPU-readable copy of the newest frame.
 pub(crate) struct MonitorCapture {
     pub device: ID3D11Device,
     context: ID3D11DeviceContext,
@@ -252,8 +256,13 @@ pub(crate) struct MonitorCapture {
 }
 
 impl MonitorCapture {
+    /// With the cursor in the frames, as a recording wants.
     pub fn start(monitor: HMONITOR) -> WinResult<Self> {
-        let started = Self::start_with(&capture_item(monitor)?);
+        Self::on_monitor(monitor, true)
+    }
+
+    fn on_monitor(monitor: HMONITOR, cursor: bool) -> WinResult<Self> {
+        let started = Self::start_with(&capture_item(monitor)?, cursor);
         if started.is_err() {
             // The cached item may be stale (monitor unplugged): rebuild it on the next grab.
             forget_capture_item(monitor);
@@ -261,7 +270,7 @@ impl MonitorCapture {
         started
     }
 
-    fn start_with(item: &GraphicsCaptureItem) -> WinResult<Self> {
+    fn start_with(item: &GraphicsCaptureItem, cursor: bool) -> WinResult<Self> {
         let gpu = shared_gpu()?;
         let (device, context) = (gpu.device.clone(), gpu.context.clone());
         let size = item.Size()?;
@@ -275,6 +284,7 @@ impl MonitorCapture {
         let session = pool.CreateCaptureSession(item)?;
         // Not available on every Windows build; the yellow border is only cosmetic here.
         let _ = session.SetIsBorderRequired(false);
+        let _ = session.SetIsCursorCaptureEnabled(cursor);
 
         let desc = D3D11_TEXTURE2D_DESC {
             Width: size.Width as u32,
@@ -426,6 +436,93 @@ pub(crate) fn resolve_display(id: DisplayId) -> CaptureResult<HMONITOR> {
         .ok_or(CaptureError::TargetGone)
 }
 
+pub(crate) fn cursor_position() -> Option<(i32, i32)> {
+    let mut point = POINT::default();
+    // SAFETY: the out-pointer is valid for the duration of the call.
+    unsafe { GetCursorPos(&mut point) }.ok()?;
+    Some((point.x, point.y))
+}
+
+/// A window the user can pick: on screen, titled, and not this app's.
+fn window_info(hwnd: HWND, own_process: u32, shell: HWND) -> Option<WindowInfo> {
+    let mut process = 0;
+    // SAFETY: `hwnd` comes from EnumWindows; a stale handle only makes these calls fail.
+    // The out-pointers are valid for each call and their sizes match.
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut process));
+        if process == own_process
+            || hwnd == shell
+            || !IsWindowVisible(hwnd).as_bool()
+            || IsIconic(hwnd).as_bool()
+        {
+            return None;
+        }
+        // Windows on other virtual desktops and suspended store apps are cloaked.
+        let mut cloaked = 0u32;
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut _ as *mut _,
+            std::mem::size_of::<u32>() as u32,
+        )
+        .ok()?;
+        if cloaked != 0 {
+            return None;
+        }
+        let mut title = [0u16; 256];
+        let len = GetWindowTextW(hwnd, &mut title) as usize;
+        if len == 0 {
+            return None;
+        }
+        // Without the invisible resize border and the shadow, unlike GetWindowRect.
+        let mut r = RECT::default();
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut r as *mut _ as *mut _,
+            std::mem::size_of::<RECT>() as u32,
+        )
+        .ok()?;
+        (r.right > r.left && r.bottom > r.top).then(|| WindowInfo {
+            id: WindowId(hwnd.0 as u64),
+            title: String::from_utf16_lossy(&title[..len]),
+            app_name: String::new(),
+            bounds: Rect {
+                x: r.left,
+                y: r.top,
+                width: (r.right - r.left) as u32,
+                height: (r.bottom - r.top) as u32,
+            },
+        })
+    }
+}
+
+fn grab_window(id: WindowId) -> CaptureResult<Frame> {
+    ensure_mta();
+    let hwnd = HWND(id.0 as *mut _);
+    // SAFETY: IsWindow accepts any value.
+    if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        return Err(CaptureError::TargetGone);
+    }
+    let interop =
+        factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(platform_err)?;
+    // SAFETY: `hwnd` was just checked to be a window.
+    let item: GraphicsCaptureItem =
+        unsafe { interop.CreateForWindow(hwnd) }.map_err(platform_err)?;
+    let capture = MonitorCapture::start_with(&item, false).map_err(platform_err)?;
+    capture.wait_first_frame()?;
+    let (w, h) = (capture.width, capture.height);
+    let rgba = capture
+        .with_pixels(|bgra, pitch| bgra_to_rgba(bgra, pitch, 0, 0, w as usize, h as usize))
+        .map_err(platform_err)?;
+    Ok(Frame {
+        width: w,
+        height: h,
+        rgba,
+        captured_at: SystemTime::now(),
+    })
+}
+
 pub struct WinScreenSource {
     inner: StubScreenSource,
 }
@@ -469,8 +566,21 @@ impl ScreenSource for WinScreenSource {
     }
 
     fn windows(&self) -> CaptureResult<Vec<WindowInfo>> {
-        // US-4.3
-        self.inner.windows()
+        unsafe extern "system" fn collect(hwnd: HWND, data: LPARAM) -> windows::core::BOOL {
+            // SAFETY: `data` is the &mut Vec passed below, alive for the whole enumeration.
+            unsafe { (*(data.0 as *mut Vec<HWND>)).push(hwnd) };
+            TRUE
+        }
+        let mut handles: Vec<HWND> = Vec::new();
+        // SAFETY: the callback only runs during this call. The order is front to back.
+        unsafe { EnumWindows(Some(collect), LPARAM(&mut handles as *mut _ as isize)) }
+            .map_err(platform_err)?;
+        // SAFETY: no preconditions.
+        let (own_process, shell) = unsafe { (GetCurrentProcessId(), GetShellWindow()) };
+        Ok(handles
+            .into_iter()
+            .filter_map(|hwnd| window_info(hwnd, own_process, shell))
+            .collect())
     }
 
     fn grab(&self, target: &CaptureTarget) -> CaptureResult<Frame> {
@@ -487,10 +597,20 @@ impl ScreenSource for WinScreenSource {
                 let m = unsafe { MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST) };
                 (m, Some(*rect))
             }
-            CaptureTarget::Window(_) => return self.inner.grab(target), // US-4.3
+            CaptureTarget::Window(id) => return grab_window(*id),
+            CaptureTarget::Desktop => {
+                let displays = self.displays()?;
+                let desktop = desktop_bounds(&displays)
+                    .ok_or_else(|| CaptureError::Platform("no display".into()))?;
+                let parts = displays
+                    .iter()
+                    .map(|d| Ok((d.bounds, self.grab(&CaptureTarget::Display(d.id))?)))
+                    .collect::<CaptureResult<Vec<_>>>()?;
+                return Ok(stitch(&parts, desktop));
+            }
         };
 
-        let capture = MonitorCapture::start(monitor).map_err(platform_err)?;
+        let capture = MonitorCapture::on_monitor(monitor, false).map_err(platform_err)?;
         capture.wait_first_frame()?;
         let captured_at = SystemTime::now();
 
