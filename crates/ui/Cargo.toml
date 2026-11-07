@@ -9,3 +9,4 @@ license.workspace = true
 cb-core.workspace = true
 cb-buffer.workspace = true
 egui.workspace = true
+chrono.workspace = true

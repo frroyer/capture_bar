@@ -188,6 +188,8 @@ struct App {
     /// When the first frame was drawn.
     launched_at: Option<Instant>,
     buffer: Buffer,
+    /// What the tray shows for each capture (FR-22).
+    thumbnails: HashMap<ItemId, egui::TextureHandle>,
     capture: CaptureService,
     pending: HashMap<u64, ItemId>,
     /// The desktop grab an overlay is waiting for, and that overlay's mode.
@@ -326,6 +328,7 @@ impl App {
             bar_fade: 1.0,
             launched_at: None,
             buffer: Buffer::new(),
+            thumbnails: HashMap::new(),
             capture,
             pending: HashMap::new(),
             overlay_request: None,
@@ -494,6 +497,7 @@ impl App {
     /// Take a capture back: out of the buffer, and off the disk if it got there.
     fn undo(&mut self, item: ItemId) {
         self.toast = None;
+        self.thumbnails.remove(&item);
         if let Some(path) = self.buffer.remove(item).and_then(|removed| removed.path) {
             if let Err(e) = std::fs::remove_file(&path) {
                 tracing::warn!(error = %e, ?path, "undone capture stays on disk");
@@ -519,9 +523,21 @@ impl App {
         let _ = self.output.send(output::Job::Store { item, frame, path });
     }
 
-    fn poll_output(&mut self) {
+    fn poll_output(&mut self, ctx: &egui::Context) {
         while let Ok(done) = self.output_done.try_recv() {
             match done {
+                output::Done::Thumbnail { item, thumbnail } => {
+                    // Undone while it was being made: nothing would ever remove it.
+                    if self.buffer.get(item).is_some() {
+                        let image = egui::ColorImage::from_rgba_unmultiplied(
+                            [thumbnail.width as usize, thumbnail.height as usize],
+                            &thumbnail.rgba,
+                        );
+                        let name = format!("thumbnail {}", item.0);
+                        let texture = ctx.load_texture(name, image, egui::TextureOptions::LINEAR);
+                        self.thumbnails.insert(item, texture);
+                    }
+                }
                 output::Done::ClipboardFailed(error) => {
                     tracing::warn!(%error, "clipboard");
                     self.flash("Saved, but not copied to the clipboard");
@@ -710,8 +726,8 @@ impl App {
             } else {
                 self.bar_size.x
             };
-            let buffer = &self.buffer;
-            self.tray_size = content_size(ui, |ui| cb_ui::tray(ui, buffer, width));
+            let (buffer, thumbnails) = (&self.buffer, &self.thumbnails);
+            self.tray_size = content_size(ui, |ui| cb_ui::tray(ui, buffer, thumbnails, width));
         }
         if let Some(toast) = &self.toast {
             let undo = toast.undo;
@@ -918,7 +934,7 @@ impl eframe::App for App {
             self.handle(cmd);
         }
         self.poll_captures();
-        self.poll_output();
+        self.poll_output(ctx);
         self.track_position(ctx);
 
         if let Some(start) = self.record_started {

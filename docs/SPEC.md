@@ -119,6 +119,7 @@ IDs (FR-x) are referenced by the User Stories in section 6.
 - FR-24 Multi-select allows batch copy, save all to folder, export as PDF (images) and delete. Clear empties the buffer.
 - FR-25 The buffer persists on disk (default ~/Captures/.buffer) and survives a crash or restart. Retention is 7 days by default and configurable; pinned items are kept.
 - FR-26 The Buffer button shows a live counter.
+- FR-30 The output folder and a file name prefix can be changed directly from the bar. Files are named prefix + local timestamp.
 
 ### 3.6 Annotation (v1.1)
 
@@ -168,7 +169,7 @@ Threads: a UI thread, a capture thread per active source, an encode worker pool,
 
 ## 6. Backlog — Epics, User Stories, Tasks
 
-The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboard (M-ref, section 1) and the requirements it covers (FR/NFR). Story IDs are stable so they can be imported into Jira, Linear or GitHub Issues as they are.
+The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboard (M-ref, section 1) and the requirements it covers (FR/NFR). Story IDs are stable so they can be imported into Jira, Linear or GitHub Issues as they are.
 
 | Epic | Title | Mockup | Covers | Release |
 | --- | --- | --- | --- | --- |
@@ -177,7 +178,7 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 | E3 | Global shortcuts | M3 | FR-11, 14, 28 | MVP |
 | E4 | Screenshot capture | M1, M2.4, M2.6 | FR-7–13 | MVP |
 | E5 | Screen recording | M1, M2.2 | FR-14–19 | MVP |
-| E6 | Capture buffer | M1, M3 | FR-20–26 | MVP |
+| E6 | Capture buffer | M1, M3 | FR-20–26, FR-30 | MVP |
 | E7 | Annotation | M2.6 | FR-27 | v1.1 |
 | E8 | Settings, permissions & onboarding | M1 (settings button) | FR-29, NFR-10, 13, 14 | MVP |
 | E9 | Packaging, signing & distribution | — | NFR-1, 11 | MVP |
@@ -344,8 +345,8 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 
 - AC: ⌥⇧B and the Buffer button toggle the tray; the counter matches the item count; the empty state shows the hint text from M1.
 
-- [ ] Tray panel anchored to the bar (above or below, depending on space)
-- [ ] Async thumbnail generation + cache
+- [x] Tray panel anchored to the bar (above or below, depending on space)
+- [x] Async thumbnail generation + cache — made on the output worker, kept as textures while the item is in the buffer
 
 **US-6.4** As a user, I want to copy, save, annotate, delete or drag out any capture. (M1 · FR-23)
 
@@ -373,6 +374,18 @@ The backlog has 9 Epics and 34 User Stories. Each story names its mockup artboar
 
 - [ ] GIF encoder (palette quantisation, gif crate)
 - [ ] PDF writer (printpdf or similar, permissive licence)
+
+**US-6.8** As a user, I want to choose where captures go and how they are named, right from the bar, so that I can keep each piece of work apart without opening settings. (no artboard yet · FR-30)
+
+- AC: a chip on the bar and ⌥⇧L open a small panel with the prefix, the folder and a preview of the next file name; the chip shows the current prefix.
+- AC: files are named `<prefix>_<YYYY-MM-DD_HH-MM-SS>.png` in local time; with no prefix, the timestamp alone. Characters a file name cannot hold cannot be typed.
+- AC: a change applies to the next capture; earlier captures keep their name and place. Capturing still never prompts (FR-20).
+- AC: an existing file is never overwritten: a second capture in the same second gets `-2`.
+- AC: prefix and folder are remembered between launches.
+
+- [ ] Prefix and folder panel, opened from a bar chip and a shortcut
+- [ ] Native folder picker on a worker thread
+- [ ] Naming and no-overwrite in the output worker
 
 ### E7 · Annotation (v1.1)
 

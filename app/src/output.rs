@@ -9,6 +9,12 @@ use std::time::UNIX_EPOCH;
 use cb_buffer::ItemId;
 use cb_core::Frame;
 
+/// Twice the tray's card size in points, to stay sharp on HiDPI screens.
+const THUMBNAIL_PIXELS: (u32, u32) = (
+    cb_ui::THUMBNAIL_SIZE.x as u32 * 2,
+    cb_ui::THUMBNAIL_SIZE.y as u32 * 2,
+);
+
 pub enum Job {
     /// Copy to the clipboard, then write the file.
     Store {
@@ -20,6 +26,11 @@ pub enum Job {
 }
 
 pub enum Done {
+    /// Sent before the slower clipboard and file work, so the tray shows it early.
+    Thumbnail {
+        item: ItemId,
+        thumbnail: Frame,
+    },
     Stored {
         item: ItemId,
         path: PathBuf,
@@ -75,6 +86,16 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> (mpsc::Sender<Job>, mpsc::Rece
                 let frame = match &job {
                     Job::Store { frame, .. } | Job::Copy(frame) => frame,
                 };
+                if let Job::Store { item, frame, .. } = &job {
+                    match cb_encode::thumbnail(frame, THUMBNAIL_PIXELS.0, THUMBNAIL_PIXELS.1) {
+                        Ok(thumbnail) => {
+                            let item = *item;
+                            let _ = done_tx.send(Done::Thumbnail { item, thumbnail });
+                            wake();
+                        }
+                        Err(e) => tracing::warn!(error = %e, "no thumbnail"),
+                    }
+                }
                 if let Err(e) = copy(&mut clipboard, frame) {
                     let _ = done_tx.send(Done::ClipboardFailed(e));
                 }
@@ -123,14 +144,20 @@ mod tests {
             path: path.clone(),
         })
         .unwrap();
+        let mut thumbnail_seen = None;
         let stored = done
             .iter()
             .find_map(|d| match d {
                 Done::Stored { item, result, .. } => Some((item, result)),
+                Done::Thumbnail { item, thumbnail } => {
+                    thumbnail_seen = Some((item, thumbnail.width));
+                    None
+                }
                 Done::ClipboardFailed(_) => None,
             })
             .unwrap();
         assert_eq!(stored, (ItemId(3), Ok(())));
+        assert_eq!(thumbnail_seen, Some((ItemId(3), 2)), "before the file");
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[1..4], b"PNG");
         std::fs::remove_dir_all(dir).unwrap();
