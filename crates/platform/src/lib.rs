@@ -13,6 +13,10 @@ mod tray;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
+mod windows_mp4;
+#[cfg(windows)]
+mod windows_record;
+#[cfg(windows)]
 mod windows_spike;
 
 mod stub;
@@ -95,6 +99,70 @@ pub fn spike_record(
     {
         let _ = (path, display, seconds, fps);
         Err(cb_core::CaptureError::NotImplemented("spike_record"))
+    }
+}
+
+/// Get the first recording to start as fast as later ones (US-5.1). Blocks for a few
+/// hundred milliseconds: call it on a worker thread at launch.
+pub fn warm_up_recording() {
+    #[cfg(windows)]
+    windows_record::warm_up();
+}
+
+/// The app's icon, the tray's disc: square RGBA pixels and their side. None on Linux,
+/// which has no tray icon yet.
+pub fn app_icon() -> Option<(Vec<u8>, u32)> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        Some((tray::icon_pixels(), tray::ICON_SIZE))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        None
+    }
+}
+
+/// Give a window a taskbar button, or take it away. The bar has none while it floats,
+/// and gets one while minimized, as the way back. Windows only for now: elsewhere the
+/// bar collapses to its pill instead. Call from the thread that owns the window.
+pub fn show_in_taskbar(
+    window: &impl raw_window_handle::HasWindowHandle,
+    show: bool,
+) -> cb_core::CaptureResult<()> {
+    #[cfg(windows)]
+    {
+        windows::show_in_taskbar(window, show)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (window, show);
+        Err(cb_core::CaptureError::NotImplemented("show_in_taskbar"))
+    }
+}
+
+/// Brings a minimized window back from any thread. eframe runs no frames while its
+/// window is minimized, so shortcuts and the tray icon restore the bar first; their
+/// command runs once it is back. Windows only, the one place the bar minimizes.
+#[derive(Debug, Clone, Copy)]
+pub struct Restorer(#[cfg_attr(not(windows), allow(dead_code))] isize);
+
+impl Restorer {
+    /// None where the bar never minimizes.
+    pub fn new(window: &impl raw_window_handle::HasWindowHandle) -> Option<Self> {
+        #[cfg(windows)]
+        {
+            windows::window_id(window).map(Self)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = window;
+            None
+        }
+    }
+
+    pub fn restore_if_minimized(self) {
+        #[cfg(windows)]
+        windows::restore_if_minimized(self.0);
     }
 }
 
@@ -185,6 +253,45 @@ pub fn drag_file_out(path: &std::path::Path) -> cb_core::CaptureResult<()> {
     {
         let _ = path;
         Err(cb_core::CaptureError::NotImplemented("drag_file_out"))
+    }
+}
+
+/// Open `path` in the app the system uses for its type: a recording in the video player.
+pub fn open_file(path: &std::path::Path) -> cb_core::CaptureResult<()> {
+    #[cfg(windows)]
+    {
+        windows::open_file(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        std::process::Command::new(opener)
+            .arg(path)
+            .spawn()
+            .map(drop)
+            .map_err(|e| cb_core::CaptureError::Platform(e.to_string()))
+    }
+}
+
+/// `count` frames spread evenly over the video at `path`, for a preview, each handed to
+/// `each` as it is decoded. Slow: call it from a worker thread.
+pub fn video_frames(
+    path: &std::path::Path,
+    count: u32,
+    each: &mut dyn FnMut(cb_core::Frame),
+) -> cb_core::CaptureResult<()> {
+    #[cfg(windows)]
+    {
+        windows_mp4::video_frames(path, count, each).map_err(windows::platform_err)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, count, each);
+        Err(cb_core::CaptureError::NotImplemented("video_frames"))
     }
 }
 

@@ -17,12 +17,13 @@ impl ScreenSource for StubScreenSource {
     fn grab(&self, _target: &CaptureTarget) -> CaptureResult<Frame> {
         Err(CaptureError::NotImplemented("grab"))
     }
-    fn start_stream(
+    fn start_recording(
         &self,
         _target: &CaptureTarget,
         _fps: u32,
-        _sink: Box<dyn FrameSink>,
+        _path: &std::path::Path,
+        _done: Box<dyn FnOnce(CaptureResult<Recording>) + Send>,
     ) -> CaptureResult<Box<dyn StreamHandle>> {
-        Err(CaptureError::NotImplemented("start_stream"))
+        Err(CaptureError::NotImplemented("recording"))
     }
 }

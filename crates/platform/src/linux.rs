@@ -42,12 +42,13 @@ impl ScreenSource for LinuxScreenSource {
         // TODO(US-1.2): X11 XShmGetImage, or the Screenshot portal on Wayland.
         self.inner.grab(target)
     }
-    fn start_stream(
+    fn start_recording(
         &self,
         target: &CaptureTarget,
         fps: u32,
-        sink: Box<dyn FrameSink>,
+        path: &std::path::Path,
+        done: Box<dyn FnOnce(CaptureResult<Recording>) + Send>,
     ) -> CaptureResult<Box<dyn StreamHandle>> {
-        self.inner.start_stream(target, fps, sink)
+        self.inner.start_recording(target, fps, path, done)
     }
 }

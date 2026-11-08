@@ -1,9 +1,8 @@
 //! Windows backend.
 //! Capture: Windows.Graphics.Capture (one session per grab, polled free-threaded).
-//! Encode:  Media Foundation H.264, see `windows_spike` (US-1.2).
+//! Encode:  Media Foundation H.264 from GPU textures, see `windows_record` (US-5.1).
 //! Exclude the bar from captures: SetWindowDisplayAffinity (US-2.1).
 
-use crate::stub::StubScreenSource;
 use cb_core::*;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -73,6 +72,47 @@ pub(crate) fn exclude_from_capture(
     let hwnd = hwnd_of(window)?;
     // SAFETY: `hwnd` comes from a live window borrowed for this call.
     unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) }.map_err(platform_err)
+}
+
+/// The window's handle as a number, which can cross threads: see [`crate::Restorer`].
+pub(crate) fn window_id(window: &impl raw_window_handle::HasWindowHandle) -> Option<isize> {
+    hwnd_of(window).ok().map(|hwnd| hwnd.0 as isize)
+}
+
+/// See [`crate::Restorer`].
+pub(crate) fn restore_if_minimized(id: isize) {
+    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, ShowWindowAsync, SW_RESTORE};
+    let hwnd = HWND(id as *mut _);
+    // SAFETY: both calls accept any value; a stale handle only makes them fail.
+    // Async: the window's thread does the work, so this never blocks the caller.
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindowAsync(hwnd, SW_RESTORE);
+        }
+    }
+}
+
+/// See [`crate::show_in_taskbar`].
+pub(crate) fn show_in_taskbar(
+    window: &impl raw_window_handle::HasWindowHandle,
+    show: bool,
+) -> CaptureResult<()> {
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
+    let hwnd = hwnd_of(window)?;
+    // SAFETY: plain COM calls on the window's thread, where winit initialised COM;
+    // `hwnd` comes from a live window borrowed for this call.
+    unsafe {
+        let list: ITaskbarList =
+            CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER).map_err(platform_err)?;
+        list.HrInit().map_err(platform_err)?;
+        if show {
+            list.AddTab(hwnd)
+        } else {
+            list.DeleteTab(hwnd)
+        }
+        .map_err(platform_err)
+    }
 }
 
 /// winit keeps a 1 px strip above the client area of borderless windows, which
@@ -167,8 +207,8 @@ pub(crate) fn ensure_mta() {
 }
 
 /// One D3D11 device for the process: creating it costs ~75 ms per grab (NFR-4).
-struct SharedGpu {
-    device: ID3D11Device,
+pub(crate) struct SharedGpu {
+    pub device: ID3D11Device,
     context: ID3D11DeviceContext,
     winrt_device: IDirect3DDevice,
 }
@@ -179,7 +219,7 @@ unsafe impl Send for SharedGpu {}
 unsafe impl Sync for SharedGpu {}
 
 // chisle: no device-lost recovery (driver reset breaks grabs until relaunch); add in US-4.4.
-fn shared_gpu() -> WinResult<&'static SharedGpu> {
+pub(crate) fn shared_gpu() -> WinResult<&'static SharedGpu> {
     static GPU: OnceLock<WinResult<SharedGpu>> = OnceLock::new();
     GPU.get_or_init(|| {
         let mut device: Option<ID3D11Device> = None;
@@ -226,7 +266,7 @@ fn capture_items() -> &'static Mutex<HashMap<u64, GraphicsCaptureItem>> {
     ITEMS.get_or_init(Default::default)
 }
 
-fn capture_item(monitor: HMONITOR) -> WinResult<GraphicsCaptureItem> {
+pub(crate) fn capture_item(monitor: HMONITOR) -> WinResult<GraphicsCaptureItem> {
     ensure_mta();
     let mut items = capture_items().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(item) = items.get(&(monitor.0 as u64)) {
@@ -247,7 +287,7 @@ fn forget_capture_item(monitor: HMONITOR) {
 /// A running capture session on one monitor or window, with a CPU-readable copy of the newest frame.
 pub(crate) struct MonitorCapture {
     pub device: ID3D11Device,
-    context: ID3D11DeviceContext,
+    pub context: ID3D11DeviceContext,
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     staging: ID3D11Texture2D,
@@ -270,7 +310,7 @@ impl MonitorCapture {
         started
     }
 
-    fn start_with(item: &GraphicsCaptureItem, cursor: bool) -> WinResult<Self> {
+    pub fn start_with(item: &GraphicsCaptureItem, cursor: bool) -> WinResult<Self> {
         let gpu = shared_gpu()?;
         let (device, context) = (gpu.device.clone(), gpu.context.clone());
         let size = item.Size()?;
@@ -321,21 +361,28 @@ impl MonitorCapture {
     /// Drain the pool and copy the newest frame to the staging texture.
     /// Returns false if no new frame arrived since the last call.
     pub fn copy_latest(&self) -> WinResult<bool> {
+        let Some(texture) = self.latest_texture()? else {
+            return Ok(false);
+        };
+        // SAFETY: the texture is on our device, same size and format as staging.
+        unsafe { self.context.CopyResource(&self.staging, &texture) };
+        Ok(true)
+    }
+
+    /// Drain the pool: the newest frame's texture, if one arrived since the last call.
+    /// Copy from it before the next call, which hands its buffer back to the pool.
+    pub fn latest_texture(&self) -> WinResult<Option<ID3D11Texture2D>> {
         let mut latest = None;
         // TryGetNextFrame fails or returns null once the pool is empty.
         while let Ok(frame) = self.pool.TryGetNextFrame() {
             latest = Some(frame);
         }
         let Some(frame) = latest else {
-            return Ok(false);
+            return Ok(None);
         };
         let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
-        // SAFETY: the surface is a D3D11 texture on our device, same size and format as staging.
-        unsafe {
-            let texture: ID3D11Texture2D = access.GetInterface()?;
-            self.context.CopyResource(&self.staging, &texture);
-        }
-        Ok(true)
+        // SAFETY: the surface of a frame from our pool is a D3D11 texture.
+        Ok(Some(unsafe { access.GetInterface()? }))
     }
 
     /// Poll until the first frame is copied, or time out.
@@ -497,7 +544,7 @@ fn window_info(hwnd: HWND, own_process: u32, shell: HWND) -> Option<WindowInfo> 
     }
 }
 
-fn grab_window(id: WindowId) -> CaptureResult<Frame> {
+fn window_item(id: WindowId) -> CaptureResult<GraphicsCaptureItem> {
     ensure_mta();
     let hwnd = HWND(id.0 as *mut _);
     // SAFETY: IsWindow accepts any value.
@@ -507,9 +554,77 @@ fn grab_window(id: WindowId) -> CaptureResult<Frame> {
     let interop =
         factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(platform_err)?;
     // SAFETY: `hwnd` was just checked to be a window.
-    let item: GraphicsCaptureItem =
-        unsafe { interop.CreateForWindow(hwnd) }.map_err(platform_err)?;
-    let capture = MonitorCapture::start_with(&item, false).map_err(platform_err)?;
+    unsafe { interop.CreateForWindow(hwnd) }.map_err(platform_err)
+}
+
+/// The monitor that holds most of `rect`.
+fn monitor_of(rect: &Rect) -> HMONITOR {
+    let r = RECT {
+        left: rect.x,
+        top: rect.y,
+        right: rect.x + rect.width as i32,
+        bottom: rect.y + rect.height as i32,
+    };
+    // SAFETY: `r` is valid for the duration of the call.
+    unsafe { MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST) }
+}
+
+/// The part of `rect` on `monitor`, in the pixels of a `width` x `height` capture of it:
+/// (x, y, width, height).
+fn crop_on_monitor(
+    monitor: HMONITOR,
+    rect: Rect,
+    width: u32,
+    height: u32,
+) -> CaptureResult<(u32, u32, u32, u32)> {
+    let (origin, ..) = monitor_bounds(monitor).ok_or(CaptureError::TargetGone)?;
+    let left = (rect.x - origin.left).max(0) as u32;
+    let top = (rect.y - origin.top).max(0) as u32;
+    let right = ((rect.x - origin.left + rect.width as i32).max(0) as u32).min(width);
+    let bottom = ((rect.y - origin.top + rect.height as i32).max(0) as u32).min(height);
+    if right <= left || bottom <= top {
+        return Err(CaptureError::Platform("region is off screen".into()));
+    }
+    Ok((left, top, right - left, bottom - top))
+}
+
+/// A session for a recording, with the cursor, and the part of its frames to keep:
+/// (x, y, width, height). A region across monitors keeps the part on the monitor
+/// that holds most of it.
+pub(crate) fn recording_source(
+    target: &CaptureTarget,
+) -> CaptureResult<(MonitorCapture, (u32, u32, u32, u32))> {
+    let (capture, region) = match target {
+        CaptureTarget::Display(id) => (
+            MonitorCapture::start(resolve_display(*id)?).map_err(platform_err)?,
+            None,
+        ),
+        CaptureTarget::Region(rect) => {
+            let monitor = monitor_of(rect);
+            (
+                MonitorCapture::start(monitor).map_err(platform_err)?,
+                Some((monitor, *rect)),
+            )
+        }
+        CaptureTarget::Window(id) => (
+            MonitorCapture::start_with(&window_item(*id)?, true).map_err(platform_err)?,
+            None,
+        ),
+        CaptureTarget::Desktop => {
+            return Err(CaptureError::NotImplemented(
+                "recording every display at once",
+            ))
+        }
+    };
+    let area = match region {
+        None => (0, 0, capture.width, capture.height),
+        Some((monitor, rect)) => crop_on_monitor(monitor, rect, capture.width, capture.height)?,
+    };
+    Ok((capture, area))
+}
+
+fn grab_window(id: WindowId) -> CaptureResult<Frame> {
+    let capture = MonitorCapture::start_with(&window_item(id)?, false).map_err(platform_err)?;
     capture.wait_first_frame()?;
     let (w, h) = (capture.width, capture.height);
     let rgba = capture
@@ -523,15 +638,11 @@ fn grab_window(id: WindowId) -> CaptureResult<Frame> {
     })
 }
 
-pub struct WinScreenSource {
-    inner: StubScreenSource,
-}
+pub struct WinScreenSource;
 
 impl WinScreenSource {
     pub fn new() -> Self {
-        Self {
-            inner: StubScreenSource,
-        }
+        Self
     }
 }
 
@@ -598,15 +709,7 @@ impl ScreenSource for WinScreenSource {
                     )
                     .ok_or_else(|| CaptureError::Platform("region is off screen".into()));
                 }
-                let r = RECT {
-                    left: rect.x,
-                    top: rect.y,
-                    right: rect.x + rect.width as i32,
-                    bottom: rect.y + rect.height as i32,
-                };
-                // SAFETY: `r` is valid for the duration of the call.
-                let m = unsafe { MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST) };
-                (m, Some(*rect))
+                (monitor_of(rect), Some(*rect))
             }
             CaptureTarget::Window(id) => return grab_window(*id),
             CaptureTarget::Desktop => {
@@ -628,19 +731,7 @@ impl ScreenSource for WinScreenSource {
         // Crop to the part of the region on this monitor, in monitor coordinates.
         let (x, y, w, h) = match region {
             None => (0, 0, capture.width, capture.height),
-            Some(rect) => {
-                let (origin, ..) = monitor_bounds(monitor).ok_or(CaptureError::TargetGone)?;
-                let left = (rect.x - origin.left).max(0) as u32;
-                let top = (rect.y - origin.top).max(0) as u32;
-                let right =
-                    ((rect.x - origin.left + rect.width as i32).max(0) as u32).min(capture.width);
-                let bottom =
-                    ((rect.y - origin.top + rect.height as i32).max(0) as u32).min(capture.height);
-                if right <= left || bottom <= top {
-                    return Err(CaptureError::Platform("region is off screen".into()));
-                }
-                (left, top, right - left, bottom - top)
-            }
+            Some(rect) => crop_on_monitor(monitor, rect, capture.width, capture.height)?,
         };
 
         let rgba = capture
@@ -656,14 +747,19 @@ impl ScreenSource for WinScreenSource {
         })
     }
 
-    fn start_stream(
+    fn start_recording(
         &self,
         target: &CaptureTarget,
         fps: u32,
-        sink: Box<dyn FrameSink>,
+        path: &std::path::Path,
+        done: Box<dyn FnOnce(CaptureResult<Recording>) + Send>,
     ) -> CaptureResult<Box<dyn StreamHandle>> {
-        // US-5.1; the US-1.2 spike records through `windows_spike` directly.
-        self.inner.start_stream(target, fps, sink)
+        Ok(crate::windows_record::start(
+            target.clone(),
+            fps,
+            path.to_path_buf(),
+            done,
+        ))
     }
 }
 
@@ -686,6 +782,31 @@ pub(crate) fn drag_file_out(path: &std::path::Path) -> CaptureResult<()> {
         SHDoDragDrop(None, &data, None::<&IDropSource>, DROPEFFECT_COPY).map_err(platform_err)?;
     }
     Ok(())
+}
+
+/// See [`crate::open_file`].
+pub(crate) fn open_file(path: &std::path::Path) -> CaptureResult<()> {
+    use windows::core::{w, HSTRING};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    // SAFETY: both strings outlive the call.
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            &HSTRING::from(path.as_os_str()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    // Values above 32 mean success; the rest are error codes.
+    match result.0 as isize {
+        code if code > 32 => Ok(()),
+        code => Err(CaptureError::Platform(format!(
+            "could not open the file (error {code})"
+        ))),
+    }
 }
 
 /// See [`crate::move_to_trash`].

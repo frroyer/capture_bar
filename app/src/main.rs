@@ -13,7 +13,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use cb_buffer::{index, Buffer, BufferItem, ItemId, ItemKind, ItemState, Selection};
 use cb_capture::{CaptureEvent, CaptureService};
-use cb_core::{CaptureMode, CaptureTarget, Command, DisplayId, Edge, Frame, Rect, Settings};
+use cb_core::{
+    CaptureMode, CaptureResult, CaptureTarget, Command, DisplayId, Edge, Frame, Recording, Rect,
+    Settings, StreamHandle,
+};
 use cb_platform::TrayAction;
 use cb_ui::{
     tr, BarState, BatchAction, Editor, EditorResult, ItemAction, Overlay, OverlayResult, SelectHow,
@@ -90,8 +93,17 @@ fn main() -> eframe::Result<()> {
         "starting Capture Bar"
     );
 
+    let mut viewport = egui::ViewportBuilder::default();
+    // Shown on the taskbar button while the bar is minimized.
+    if let Some((rgba, side)) = cb_platform::app_icon() {
+        viewport = viewport.with_icon(egui::IconData {
+            rgba,
+            width: side,
+            height: side,
+        });
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+        viewport: viewport
             .with_title("Capture Bar")
             .with_inner_size(INITIAL_SIZE)
             .with_decorations(false)
@@ -232,9 +244,34 @@ impl Toast {
     }
 }
 
+/// A recording's place in the buffer and how it ended.
+type Recorded = (ItemId, CaptureResult<Recording>);
+
+/// Where the bar is on its way to or from the taskbar (Windows). It has a taskbar
+/// button only while minimized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Taskbar {
+    /// Floating, with no taskbar button.
+    #[default]
+    Off,
+    /// The collapse button was pressed: minimize on the next frame.
+    Asked,
+    /// Minimized, with a taskbar button to click. eframe runs no frames meanwhile, so
+    /// the next frame means the bar is back.
+    In,
+}
+
+struct ActiveRecording {
+    handle: Box<dyn StreamHandle>,
+    /// Its place in the buffer, there from the start.
+    item: ItemId,
+    started: Instant,
+}
+
 struct App {
     bar: BarState,
     collapsed: bool,
+    taskbar: Taskbar,
     /// FR-4: nothing is drawn and clicks go through. The window stays open, because
     /// eframe stops running a hidden window and it would never hear the shortcut again.
     hidden: bool,
@@ -256,6 +293,8 @@ struct App {
     selection: Selection,
     /// What the tray shows for each capture (FR-22).
     thumbnails: HashMap<ItemId, egui::TextureHandle>,
+    /// The frames a recording's card plays while the cursor is on it.
+    previews: HashMap<ItemId, Vec<egui::TextureHandle>>,
     capture: CaptureService,
     pending: HashMap<u64, ItemId>,
     /// The desktop grab an overlay is waiting for, and that overlay's mode.
@@ -272,7 +311,14 @@ struct App {
     /// Where annotated captures are kept as taken, out of sight (US-7.1).
     originals_dir: PathBuf,
     last_region: Option<Rect>,
-    record_started: Option<Instant>,
+    /// The running recording (US-5.1).
+    recording: Option<ActiveRecording>,
+    /// Finished recordings, sent from their own threads.
+    recorded: (mpsc::Sender<Recorded>, mpsc::Receiver<Recorded>),
+    /// Wakes the UI when a recording finishes.
+    repaint: egui::Context,
+    /// The overlay picks what to record rather than what to capture.
+    overlay_records: bool,
     toast: Option<Toast>,
     /// Where new captures go (FR-30). Their prefix is `bar.prefix`.
     captures_dir: PathBuf,
@@ -402,6 +448,13 @@ impl App {
         // With a handler set, the crate no longer fills `GlobalHotKeyEvent::receiver()`.
         // Waking the UI here makes shortcuts work even if it is idle.
         let (commands_tx, commands) = mpsc::channel();
+        // Minimized to the taskbar, the bar runs no frames: bring it back first.
+        let restorer = cb_platform::Restorer::new(cc);
+        let restore = move || {
+            if let Some(restorer) = restorer {
+                restorer.restore_if_minimized();
+            }
+        };
         let ctx = cc.egui_ctx.clone();
         let tx = commands_tx.clone();
         let toast = shortcut_map
@@ -410,6 +463,7 @@ impl App {
         GlobalHotKeyEvent::set_event_handler(Some(move |ev: GlobalHotKeyEvent| {
             if let Some(cmd) = shortcut_command(&shortcut_map, &ev) {
                 tracing::debug!(?cmd, "shortcut");
+                restore();
                 let _ = tx.send(cmd);
                 ctx.request_repaint();
             }
@@ -418,6 +472,7 @@ impl App {
         let ctx = cc.egui_ctx.clone();
         let labels = tray_labels();
         let tray = cb_platform::create_tray(labels.each_ref().map(String::as_str), move |action| {
+            restore();
             match action {
                 TrayAction::ToggleBar => {
                     let _ = commands_tx.send(Command::ToggleBar);
@@ -465,12 +520,25 @@ impl App {
         let (output, output_done) = output::spawn(move || ctx.request_repaint());
         for item in buffer.newest_first() {
             if let Some(path) = item.path.clone() {
-                let item = item.id;
-                let _ = output.send(output::Job::Thumbnail { item, path });
+                let _ = output.send(match item.kind {
+                    ItemKind::Image => output::Job::Thumbnail {
+                        item: item.id,
+                        path,
+                    },
+                    ItemKind::Video { .. } => output::Job::Preview {
+                        item: item.id,
+                        path,
+                    },
+                });
             }
         }
         let ctx = cc.egui_ctx.clone();
         let capture = CaptureService::new(source.clone(), move || ctx.request_repaint());
+        // The first recording would otherwise take ~650 ms to start, over US-5.1's 300 ms.
+        std::thread::Builder::new()
+            .name("recording warm-up".into())
+            .spawn(cb_platform::warm_up_recording)
+            .expect("spawn recording warm-up thread");
 
         Self {
             bar: BarState {
@@ -480,6 +548,7 @@ impl App {
                 ..Default::default()
             },
             collapsed: false,
+            taskbar: Taskbar::Off,
             hidden: false,
             click_through: false,
             bar_fade: 1.0,
@@ -491,6 +560,7 @@ impl App {
             tray_seen: Instant::now(),
             selection: Selection::default(),
             thumbnails: HashMap::new(),
+            previews: HashMap::new(),
             capture,
             pending: HashMap::new(),
             overlay_request: None,
@@ -503,7 +573,10 @@ impl App {
             last_region: cc
                 .storage
                 .and_then(|s| eframe::get_value(s, REGION_STORAGE_KEY)),
-            record_started: None,
+            recording: None,
+            recorded: mpsc::channel(),
+            repaint: cc.egui_ctx.clone(),
+            overlay_records: false,
             toast,
             captures_dir,
             prefs,
@@ -566,6 +639,7 @@ impl App {
     /// Capture now, or open the overlay to choose what. Asking again while it is open
     /// closes it: the way out if the overlay did not get the keyboard for Esc.
     fn begin_capture(&mut self, mode: CaptureMode) {
+        self.overlay_records = false;
         if self.overlay.take().is_some() || self.overlay_request.is_some() {
             return;
         }
@@ -608,14 +682,20 @@ impl App {
             Some(OverlayResult::Cancelled) => self.overlay = None,
             Some(OverlayResult::Window(id)) => {
                 self.overlay = None;
-                self.capture_still(mode, CaptureTarget::Window(id));
+                if self.overlay_records {
+                    self.start_recording(mode, CaptureTarget::Window(id));
+                } else {
+                    self.capture_still(mode, CaptureTarget::Window(id));
+                }
             }
             Some(OverlayResult::Region { rect, record }) => {
                 let frame = overlay.crop(rect);
                 self.overlay = None;
                 self.last_region = Some(rect);
                 match frame {
-                    _ if record => self.flash(tr!("toast-record-region-todo")),
+                    _ if record || self.overlay_records => {
+                        self.start_recording(mode, CaptureTarget::Region(rect));
+                    }
                     Some(frame) => {
                         let item = self.add_capture(mode);
                         self.store(item, frame);
@@ -637,6 +717,13 @@ impl App {
             Command::ToggleRecording => self.toggle_recording(),
             Command::TogglePause => self.flash(tr!("toast-pause-todo")),
             Command::ToggleBuffer => self.bar.tray_open = !self.bar.tray_open,
+            Command::ToggleBar if self.taskbar != Taskbar::Off => {
+                // Minimized: the shortcut brings the bar back, as its taskbar button does.
+                self.repaint
+                    .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                self.hidden = false;
+                self.focus_bar = true;
+            }
             Command::ToggleBar => {
                 self.hidden = !self.hidden;
                 // Shown from a shortcut, the bar takes the keyboard, so Tab reaches its
@@ -754,6 +841,7 @@ impl App {
     /// Drop a capture from the buffer and memory. Returns its file, if it got to disk.
     fn forget(&mut self, item: ItemId) -> Option<PathBuf> {
         self.thumbnails.remove(&item);
+        self.previews.remove(&item);
         self.selection.remove(item);
         if self
             .newest_frame
@@ -813,8 +901,15 @@ impl App {
                 }
             }
             (ItemAction::Annotate, _) => self.annotate(item),
+            // A recording goes on the clipboard as a file, to paste in a folder or a chat.
+            (ItemAction::Copy, Some(path)) if matches!(found.kind, ItemKind::Video { .. }) => {
+                let _ = self.output.send(output::Job::CopyFiles(vec![path]));
+            }
             (ItemAction::Copy, Some(path)) => {
                 let _ = self.output.send(output::Job::CopyFile(path));
+            }
+            (ItemAction::Play, Some(path)) => {
+                let _ = self.output.send(output::Job::Play(path));
             }
             (ItemAction::Save, Some(path)) => self.save_copy(frame, path),
             (ItemAction::DragOut, Some(path)) => {
@@ -826,7 +921,10 @@ impl App {
                 self.release_pointer = true;
             }
             // The tray only offers these once the file is on disk.
-            (ItemAction::Copy | ItemAction::Save | ItemAction::DragOut, None) => {}
+            (
+                ItemAction::Copy | ItemAction::Save | ItemAction::DragOut | ItemAction::Play,
+                None,
+            ) => {}
         }
     }
 
@@ -1168,6 +1266,28 @@ impl App {
                         self.thumbnails.insert(item, texture);
                     }
                 }
+                output::Done::Preview { item, frames } => {
+                    // Gone while it was decoded: nothing would ever remove it.
+                    if self.buffer.get(item).is_none() {
+                        continue;
+                    }
+                    let textures: Vec<_> = frames
+                        .iter()
+                        .enumerate()
+                        .map(|(n, frame)| {
+                            let image = egui::ColorImage::from_rgba_unmultiplied(
+                                [frame.width as usize, frame.height as usize],
+                                &frame.rgba,
+                            );
+                            let name = format!("preview {} {n}", item.0);
+                            ctx.load_texture(name, image, egui::TextureOptions::LINEAR)
+                        })
+                        .collect();
+                    if let Some(first) = textures.first() {
+                        self.thumbnails.insert(item, first.clone());
+                    }
+                    self.previews.insert(item, textures);
+                }
                 output::Done::Message(message) => self.flash(message),
                 output::Done::Loaded { item, result } => {
                     if self.editor_loading.take_if(|i| *i == item).is_none() {
@@ -1294,20 +1414,124 @@ impl App {
         }
     }
 
+    /// Minimize to the taskbar when asked, and take the taskbar button away again once
+    /// the bar is back, however it came back: the button, the shortcut or the tray icon.
+    fn follow_taskbar(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let minimized = ctx.input(|i| i.viewport().minimized).unwrap_or(false);
+        let before = self.taskbar;
+        self.taskbar = match self.taskbar {
+            Taskbar::Asked => match cb_platform::show_in_taskbar(frame, true) {
+                Ok(()) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    Taskbar::In
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "no taskbar button: collapsing instead");
+                    self.collapsed = true;
+                    Taskbar::Off
+                }
+            },
+            Taskbar::In if !minimized => {
+                if let Err(e) = cb_platform::show_in_taskbar(frame, false) {
+                    tracing::warn!(error = %e, "taskbar button stays");
+                }
+                Taskbar::Off
+            }
+            state => state,
+        };
+        if self.taskbar != before {
+            tracing::debug!(state = ?self.taskbar, minimized, "taskbar");
+        }
+    }
+
+    /// Stop the recording, or start one in the current mode (FR-14). Window and Region
+    /// open the overlay first, to pick what to record.
     fn toggle_recording(&mut self) {
-        match self.record_started.take() {
-            None => {
-                self.record_started = Some(Instant::now());
+        if let Some(recording) = self.recording.take() {
+            self.bar.recording = false;
+            // Stopping returns at once; `poll_recordings` gets the file.
+            recording.handle.stop();
+            return;
+        }
+        match self.bar.mode {
+            CaptureMode::Screen => self.start_recording(CaptureMode::Screen, self.screen_target()),
+            mode => {
+                self.begin_capture(mode);
+                self.overlay_records = self.overlay_request.is_some();
+            }
+        }
+    }
+
+    /// The recording shows in the buffer at once, as "saving" until its file is complete.
+    fn start_recording(&mut self, mode: CaptureMode, target: CaptureTarget) {
+        if self.recording.is_some() {
+            return;
+        }
+        self.overlay_records = false;
+        let name = output::file_name(&self.bar.prefix, SystemTime::now());
+        let path = self.captures_dir.join(name).with_extension("mp4");
+        let item = self.buffer.push(ItemKind::Video { duration_ms: 0 }, mode);
+        let (sender, repaint) = (self.recorded.0.clone(), self.repaint.clone());
+        let done = Box::new(move |result| {
+            let _ = sender.send((item, result));
+            repaint.request_repaint();
+        });
+        match self
+            .screen
+            .start_recording(&target, self.prefs.frame_rate, &path, done)
+        {
+            Ok(handle) => {
+                self.recording = Some(ActiveRecording {
+                    handle,
+                    item,
+                    started: Instant::now(),
+                });
                 self.bar.recording = true;
             }
-            Some(start) => {
+            Err(error) => {
+                self.buffer.remove(item);
+                self.flash(tr!("toast-record-failed", error = error.to_string()));
+            }
+        }
+    }
+
+    fn poll_recordings(&mut self) {
+        while let Ok((item, result)) = self.recorded.1.try_recv() {
+            // A recording that failed while running has nothing left to stop.
+            if self.recording.as_ref().is_some_and(|r| r.item == item) {
+                self.recording = None;
                 self.bar.recording = false;
-                let ms = start.elapsed().as_millis() as u64;
-                let id = self
-                    .buffer
-                    .push(ItemKind::Video { duration_ms: ms }, self.bar.mode);
-                if let Some(i) = self.buffer.get_mut(id) {
-                    i.state = ItemState::Failed(tr!("record-todo"));
+            }
+            let Some(found) = self.buffer.get_mut(item) else {
+                // Deleted while it was recording.
+                if let Ok(recording) = result {
+                    let _ = self.output.send(output::Job::Trash(vec![recording.path]));
+                }
+                continue;
+            };
+            match result {
+                Ok(recording) => {
+                    if recording.dropped > 0 {
+                        tracing::warn!(
+                            dropped = recording.dropped,
+                            frames = recording.frames,
+                            "recording skipped frames"
+                        );
+                    }
+                    let duration_ms = recording.duration.as_millis() as u64;
+                    found.kind = ItemKind::Video { duration_ms };
+                    found.path = Some(recording.path.clone());
+                    found.state = ItemState::Ready;
+                    let _ = self.output.send(output::Job::Preview {
+                        item,
+                        path: recording.path,
+                    });
+                    self.flash(tr!("toast-recorded", seconds = duration_ms.div_ceil(1000)));
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "recording");
+                    found.state = ItemState::Failed(error.to_string());
+                    self.flash(tr!("toast-record-failed", error = error.to_string()));
                 }
             }
         }
@@ -1434,7 +1658,12 @@ impl App {
             self.bar.cam_on = !self.bar.cam_on;
         }
         if out.collapse {
-            self.collapsed = true;
+            // Windows minimizes to the taskbar; elsewhere the bar shrinks to its pill (M2.3).
+            if cfg!(windows) {
+                self.taskbar = Taskbar::Asked;
+            } else {
+                self.collapsed = true;
+            }
             self.bar.tray_open = false;
         }
         if out.expand {
@@ -1470,10 +1699,19 @@ impl App {
             } else {
                 self.bar_size.x
             };
-            let (buffer, selection, thumbnails) = (&self.buffer, &self.selection, &self.thumbnails);
+            let (buffer, selection) = (&self.buffer, &self.selection);
+            let (thumbnails, previews) = (&self.thumbnails, &self.previews);
             let mut asked = cb_ui::TrayOutput::default();
             self.tray_size = content_size(ui, |ui| {
-                asked = cb_ui::tray(ui, buffer, selection, thumbnails, destination, width);
+                asked = cb_ui::tray(
+                    ui,
+                    buffer,
+                    selection,
+                    thumbnails,
+                    previews,
+                    destination,
+                    width,
+                );
             });
             self.bar.prefix = output::clean_prefix(&self.bar.prefix);
             self.item_action = self.item_action.or(asked.item);
@@ -1721,14 +1959,16 @@ impl eframe::App for App {
             self.handle(cmd);
         }
         self.poll_captures();
+        self.poll_recordings();
         self.poll_output(ctx);
         self.poll_folder_choice();
         self.poll_autostart();
+        self.follow_taskbar(ctx, frame);
         self.sweep();
         self.track_position(ctx);
 
-        if let Some(start) = self.record_started {
-            self.bar.elapsed_secs = start.elapsed().as_secs();
+        if let Some(recording) = &self.recording {
+            self.bar.elapsed_secs = recording.started.elapsed().as_secs();
         }
 
         if std::mem::take(&mut self.focus_bar) {

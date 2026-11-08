@@ -9,7 +9,7 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 
 use crate::TrayAction;
 
-const ICON_SIZE: u32 = 32;
+pub(crate) const ICON_SIZE: u32 = 32;
 
 /// Dropping this removes the icon.
 pub struct Tray {
@@ -80,7 +80,7 @@ pub fn create(
 
 /// A white shutter ring on a blue disc: readable on light and dark taskbars.
 /// Drawn in code, so the binary needs no image decoder for it.
-fn icon_pixels() -> Vec<u8> {
+pub(crate) fn icon_pixels() -> Vec<u8> {
     let center = (ICON_SIZE as f32 - 1.0) / 2.0;
     let mut pixels = Vec::with_capacity((ICON_SIZE * ICON_SIZE * 4) as usize);
     for y in 0..ICON_SIZE {
