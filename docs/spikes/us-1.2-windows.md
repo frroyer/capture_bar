@@ -51,4 +51,28 @@ This is not the "4-core 2020 laptop" NFR-6 names, so its CPU figure is only indi
 2. **Run variance.** Earlier runs with a different test window on DisplayLink dropped 0.17–0.67%,
    with 18 new frames per second. Motion content and window size change the results.
 3. **Not exercised:** the 4-core reference laptop, Windows 10 1903, ARM64, Window capture (US-4.3).
-4. **`start_stream` is still a stub.** The spike records through `windows_spike` directly (US-5.1).
+4. ~~**`start_stream` is still a stub.**~~ Done in US-5.1, see below.
+
+## US-5.1 follow-up: GPU path
+
+Measured 2026-11-08, same machine, release build, primary display 1920×1200 at 60 fps:
+
+```
+cargo test -p cb-platform --release --test record -- --ignored --nocapture
+```
+
+| Metric | Target | CPU path (spike) | GPU path (US-5.1) |
+| --- | --- | --- | --- |
+| Dropped frame slots, 10 s | ≤ 1% (NFR-6) | 5.00% | 0 of 587, three runs |
+| Start, request to first frame | ≤ 300 ms (US-5.1) | not measured | 237–249 ms after the launch warm-up; ~650 ms without it |
+
+- **What changed:** each new capture frame is cropped into its own D3D11 texture and given to the
+  sink writer as a DXGI surface buffer, so nothing is mapped or copied on the CPU.
+- **Input format:** the sink writer only accepts `B8G8R8A8` textures declared as `MFVideoFormat_ARGB32`.
+  `RGB32` fails at `Finalize` with `E_INVALIDARG`.
+- **Drops:** a slot's time in the file comes from its index, so a slot written a little late plays on time.
+  Only lagging by more than 4 slots skips any. With a 1-slot limit, scheduler jitter alone dropped 0–1.2%.
+- **Start latency:** a warm process spends ~15 ms on the capture session and ~215 ms opening the sink
+  writer. The first recording in a process also loads the GPU device, the capture item and the hardware
+  encoder. The app pays that on a thread at launch.
+- **Not measured yet:** motion on screen during the 10 s run, CPU share, the 4-core reference laptop.

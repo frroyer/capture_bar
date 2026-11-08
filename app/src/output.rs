@@ -1,7 +1,7 @@
 //! Where finished frames go: the clipboard and a PNG file, on a worker thread, so the
 //! UI thread never waits for them (FR-12, FR-20).
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use cb_buffer::ItemId;
-use cb_core::Frame;
+use cb_core::{create_unique, Frame};
 use cb_ui::tr;
 use chrono::{DateTime, Local};
 
@@ -18,6 +18,9 @@ const THUMBNAIL_PIXELS: (u32, u32) = (
     cb_ui::THUMBNAIL_SIZE.x as u32 * 2,
     cb_ui::THUMBNAIL_SIZE.y as u32 * 2,
 );
+
+/// Frames in a recording's hover preview: 3 s at the tray's 4 per second.
+const PREVIEW_FRAMES: u32 = 12;
 
 pub enum Job {
     /// Copy to the clipboard, then write the file.
@@ -54,6 +57,13 @@ pub enum Job {
         files: Vec<(ItemId, PathBuf)>,
         prefix: String,
     },
+    /// Decode a recording's thumbnail and hover preview frames.
+    Preview {
+        item: ItemId,
+        path: PathBuf,
+    },
+    /// Open a recording in the system's video player.
+    Play(PathBuf),
     /// Make the thumbnail of a capture restored from the last run (FR-25).
     Thumbnail {
         item: ItemId,
@@ -83,6 +93,11 @@ pub enum Job {
 }
 
 pub enum Done {
+    /// A recording's preview, thumbnail-sized, the first frame its thumbnail.
+    Preview {
+        item: ItemId,
+        frames: Vec<Frame>,
+    },
     /// Sent before the slower clipboard and file work, so the tray shows it early.
     Thumbnail {
         item: ItemId,
@@ -236,27 +251,6 @@ pub fn file_name(prefix: &str, at: SystemTime) -> String {
     }
 }
 
-/// Create `path`, or `<stem>-2.png`, `-3`… when it exists: a file is never overwritten.
-fn create_unique(path: &Path) -> std::io::Result<(File, PathBuf)> {
-    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-    let extension = path.extension().unwrap_or_default().to_string_lossy();
-    for n in 1u32.. {
-        let candidate = match n {
-            1 => path.to_path_buf(),
-            n => path.with_file_name(format!("{stem}-{n}.{extension}")),
-        };
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
-            opened => return opened.map(|file| (file, candidate)),
-        }
-    }
-    unreachable!("every name from -2 to -{} exists", u32::MAX)
-}
-
 /// Returns where the file went, which differs from `path` when that was taken.
 fn write_png(frame: &Frame, path: &Path) -> Result<PathBuf, String> {
     if let Some(dir) = path.parent() {
@@ -313,6 +307,22 @@ fn copy(clipboard: &mut Option<arboard::Clipboard>, frame: &Frame) -> Result<(),
 fn read_thumbnail(path: &Path) -> Result<Frame, String> {
     let frame = read_image(path)?;
     cb_encode::thumbnail(&frame, THUMBNAIL_PIXELS.0, THUMBNAIL_PIXELS.1).map_err(|e| e.to_string())
+}
+
+/// A recording's hover preview, thumbnail-sized; empty if it cannot be decoded.
+fn preview(path: &Path) -> Vec<Frame> {
+    let mut frames = Vec::new();
+    let decoded = cb_platform::video_frames(path, PREVIEW_FRAMES, &mut |frame| {
+        let (w, h) = THUMBNAIL_PIXELS;
+        match cb_encode::thumbnail(&frame, w, h) {
+            Ok(small) => frames.push(small),
+            Err(e) => tracing::warn!(error = %e, "preview frame"),
+        }
+    });
+    if let Err(e) = decoded {
+        tracing::warn!(error = %e, ?path, "no preview");
+    }
+    frames
 }
 
 /// Write the PNGs in `files` as one PDF at `to`, reading each only for its page. A
@@ -419,6 +429,8 @@ fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
         Job::Store { .. }
         | Job::Copy(_)
         | Job::Thumbnail { .. }
+        | Job::Preview { .. }
+        | Job::Play(_)
         | Job::Rename { .. }
         | Job::Load { .. }
         | Job::Annotate { .. }
@@ -429,9 +441,25 @@ fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
 }
 
 /// `wake` runs after each finished job, to get the UI to read the result.
-pub fn spawn(wake: impl Fn() + Send + 'static) -> (mpsc::Sender<Job>, mpsc::Receiver<Done>) {
+pub fn spawn(wake: impl Fn() + Send + Sync + 'static) -> (mpsc::Sender<Job>, mpsc::Receiver<Done>) {
     let (job_tx, jobs) = mpsc::channel::<Job>();
     let (done_tx, done) = mpsc::channel();
+    let wake = Arc::new(wake);
+    // Decoding a recording takes seconds: on its own thread, saves never wait for it.
+    let (preview_tx, previews) = mpsc::channel::<(ItemId, PathBuf)>();
+    let (preview_done, preview_wake) = (done_tx.clone(), wake.clone());
+    std::thread::Builder::new()
+        .name("preview".into())
+        .spawn(move || {
+            for (item, path) in previews {
+                let frames = preview(&path);
+                if !frames.is_empty() {
+                    let _ = preview_done.send(Done::Preview { item, frames });
+                    preview_wake();
+                }
+            }
+        })
+        .expect("spawn preview thread");
     std::thread::Builder::new()
         .name("output".into())
         .spawn(move || {
@@ -463,6 +491,19 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> (mpsc::Sender<Job>, mpsc::Rece
                         };
                         let _ = done_tx.send(Done::Message(message));
                         wake();
+                        continue;
+                    }
+                    Job::Preview { item, path } => {
+                        let _ = preview_tx.send((*item, path.clone()));
+                        continue;
+                    }
+                    Job::Play(path) => {
+                        if let Err(e) = cb_platform::open_file(path) {
+                            tracing::warn!(error = %e, ?path, "play");
+                            let message = tr!("toast-play-failed", error = e.to_string());
+                            let _ = done_tx.send(Done::Message(message));
+                            wake();
+                        }
                         continue;
                     }
                     Job::Thumbnail { item, path } => {
@@ -677,6 +718,7 @@ mod tests {
                 }
                 Done::ClipboardFailed(_)
                 | Done::Message(_)
+                | Done::Preview { .. }
                 | Done::Renamed { .. }
                 | Done::Loaded { .. }
                 | Done::Annotated { .. } => None,

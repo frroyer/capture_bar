@@ -13,6 +13,10 @@ mod tray;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
+mod windows_mp4;
+#[cfg(windows)]
+mod windows_record;
+#[cfg(windows)]
 mod windows_spike;
 
 mod stub;
@@ -96,6 +100,13 @@ pub fn spike_record(
         let _ = (path, display, seconds, fps);
         Err(cb_core::CaptureError::NotImplemented("spike_record"))
     }
+}
+
+/// Get the first recording to start as fast as later ones (US-5.1). Blocks for a few
+/// hundred milliseconds: call it on a worker thread at launch.
+pub fn warm_up_recording() {
+    #[cfg(windows)]
+    windows_record::warm_up();
 }
 
 /// Keep a window out of every screenshot and recording (FR-6).
@@ -185,6 +196,45 @@ pub fn drag_file_out(path: &std::path::Path) -> cb_core::CaptureResult<()> {
     {
         let _ = path;
         Err(cb_core::CaptureError::NotImplemented("drag_file_out"))
+    }
+}
+
+/// Open `path` in the app the system uses for its type: a recording in the video player.
+pub fn open_file(path: &std::path::Path) -> cb_core::CaptureResult<()> {
+    #[cfg(windows)]
+    {
+        windows::open_file(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        std::process::Command::new(opener)
+            .arg(path)
+            .spawn()
+            .map(drop)
+            .map_err(|e| cb_core::CaptureError::Platform(e.to_string()))
+    }
+}
+
+/// `count` frames spread evenly over the video at `path`, for a preview, each handed to
+/// `each` as it is decoded. Slow: call it from a worker thread.
+pub fn video_frames(
+    path: &std::path::Path,
+    count: u32,
+    each: &mut dyn FnMut(cb_core::Frame),
+) -> cb_core::CaptureResult<()> {
+    #[cfg(windows)]
+    {
+        windows_mp4::video_frames(path, count, each).map_err(windows::platform_err)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, count, each);
+        Err(cb_core::CaptureError::NotImplemented("video_frames"))
     }
 }
 

@@ -362,23 +362,62 @@ pub trait ScreenSource: Send + Sync {
     fn windows(&self) -> CaptureResult<Vec<WindowInfo>>;
     /// Grab a single still (FR-11). Must not block the UI thread for long.
     fn grab(&self, target: &CaptureTarget) -> CaptureResult<Frame>;
-    /// Start a frame stream for recording (FR-14). Frames go to `sink`.
-    fn start_stream(
+    /// Start recording `target` into an MP4 at `path` (FR-14), or a free name next to it
+    /// (see [`create_unique`]). Returns at once: setup runs on the recording's own thread,
+    /// and `done` runs there once the file is complete or recording failed.
+    fn start_recording(
         &self,
         target: &CaptureTarget,
         fps: u32,
-        sink: Box<dyn FrameSink>,
+        path: &std::path::Path,
+        done: Box<dyn FnOnce(CaptureResult<Recording>) + Send>,
     ) -> CaptureResult<Box<dyn StreamHandle>>;
 }
 
-pub trait FrameSink: Send {
-    fn push(&mut self, frame: Frame);
+/// A finished recording.
+#[derive(Debug, Clone)]
+pub struct Recording {
+    pub path: std::path::PathBuf,
+    pub width: u32,
+    pub height: u32,
+    pub duration: std::time::Duration,
+    /// Frame slots written, and the ones skipped because capture or encoding fell behind (NFR-6).
+    pub frames: u64,
+    pub dropped: u64,
+    /// From the start request to the first frame written (US-5.1: at most 300 ms).
+    pub start_latency: std::time::Duration,
 }
 
+/// A running recording. Dropping it stops it too.
 pub trait StreamHandle: Send {
     fn pause(&mut self);
     fn resume(&mut self);
+    /// Returns at once; the recording's `done` runs when the file is complete.
     fn stop(self: Box<Self>);
+}
+
+/// Create `path`, or `<stem>-2.<ext>`, `-3`… when it exists: a file is never overwritten (FR-30).
+pub fn create_unique(
+    path: &std::path::Path,
+) -> std::io::Result<(std::fs::File, std::path::PathBuf)> {
+    use std::io::ErrorKind;
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = path.extension().unwrap_or_default().to_string_lossy();
+    for n in 1u32.. {
+        let candidate = match n {
+            1 => path.to_path_buf(),
+            n => path.with_file_name(format!("{stem}-{n}.{extension}")),
+        };
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            opened => return opened.map(|file| (file, candidate)),
+        }
+    }
+    unreachable!("every name from -2 to -{} exists", u32::MAX)
 }
 
 #[cfg(test)]

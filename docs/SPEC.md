@@ -267,7 +267,7 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 - AC: the overlay shows dimensions and handles; Enter, R, Space, Esc and ⇧ behave as in M2.4, across all monitors.
 
 - [x] Full-screen overlay with frozen-frame background — one window across all monitors, not one per monitor; Windows verified on one monitor
-- [x] Handles, aspect lock, window snap — R only reports that recording waits for US-5.1
+- [x] Handles, aspect lock, window snap — R records the region (US-5.1)
 - [x] Key hints chip row — built from the M2.4 description without the artboard
 
 **US-4.3** As a user, I want to capture a window or a whole screen in one click. (M1 · FR-9, FR-10)
@@ -291,9 +291,9 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: ⌥⇧R starts within 300 ms; stopping produces a valid MP4 in the buffer; 1080p60 meets NFR-6.
 
-- [ ] Capture pipeline: GPU frames → hardware encoder (VideoToolbox / Media Foundation / VA-API)
-- [ ] Software H.264 fallback + licence review
-- [ ] MP4 muxer, fragmented writes so a crash leaves a playable file (NFR-12)
+- [ ] Capture pipeline: GPU frames → hardware encoder (VideoToolbox / Media Foundation / VA-API) — Windows done: capture textures go to Media Foundation with no CPU copy (`windows_record.rs`); 10 s at 1080p60 dropped 0 slots and started in ~240 ms (`tests/record.rs`, ignored: needs a desktop). macOS and Linux wait for their US-1.2 spikes
+- [ ] Software H.264 fallback + licence review — Windows: Media Foundation falls back to Microsoft's software encoder, licensed with the OS. macOS and Linux still open
+- [x] MP4 muxer, fragmented writes so a crash leaves a playable file (NFR-12) — Windows writes fragmented MP4; a file never finalised still decodes up to its last fragment (unit test)
 
 **US-5.2** As a user, I want a compact recording bar with timer, pause and stop. (M2.2 · FR-15, FR-19)
 

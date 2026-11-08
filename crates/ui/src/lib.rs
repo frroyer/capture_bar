@@ -43,6 +43,8 @@ pub mod palette {
 
 /// The picture area of a card in the tray, in points.
 pub const THUMBNAIL_SIZE: Vec2 = vec2(160.0, 100.0);
+/// Seconds each frame of a recording's hover preview stays up.
+const PREVIEW_FRAME: f32 = 0.25;
 
 /// Everything the bar needs to draw itself.
 #[derive(Debug, Clone, Default)]
@@ -876,6 +878,8 @@ pub enum ItemAction {
     /// Save a copy elsewhere, through a file dialog.
     Save,
     Annotate,
+    /// Open a recording in the system's video player.
+    Play,
     Delete,
     /// The picture is being dragged: hand the file to the OS drag and drop.
     DragOut,
@@ -929,6 +933,7 @@ fn tray_card(
     ui: &mut Ui,
     item: &BufferItem,
     thumbnail: Option<&TextureHandle>,
+    preview: &[TextureHandle],
     selected: bool,
 ) -> Option<ItemAction> {
     use palette::*;
@@ -999,7 +1004,20 @@ fn tray_card(
                 };
                 ui.painter()
                     .rect_filled(slot, CornerRadius::same(4), SLOT_BG);
-                if let Some(texture) = thumbnail {
+                // A recording plays its preview frames while the cursor is on it.
+                let texture = match preview.len() {
+                    0 => thumbnail,
+                    n if response.hovered() => {
+                        let time = ui.input(|i| i.time);
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_secs_f32(
+                                PREVIEW_FRAME,
+                            ));
+                        preview.get((time / f64::from(PREVIEW_FRAME)) as usize % n)
+                    }
+                    _ => thumbnail.or(preview.first()),
+                };
+                if let Some(texture) = texture {
                     let size = texture.size_vec2();
                     let fit = (slot.width() / size.x).min(slot.height() / size.y).min(1.0);
                     let picture = egui::Rect::from_center_size(slot.center(), size * fit);
@@ -1065,12 +1083,17 @@ fn tray_card(
                     let buttons = [
                         (Icon::Copy, tr!("card-copy"), ItemAction::Copy, has_file),
                         (Icon::Save, tr!("card-save"), ItemAction::Save, has_file),
-                        (
-                            Icon::Pen,
-                            tr!("card-annotate"),
-                            ItemAction::Annotate,
-                            has_file,
-                        ),
+                        match item.kind {
+                            ItemKind::Image => (
+                                Icon::Pen,
+                                tr!("card-annotate"),
+                                ItemAction::Annotate,
+                                has_file,
+                            ),
+                            ItemKind::Video { .. } => {
+                                (Icon::Play, tr!("card-play"), ItemAction::Play, has_file)
+                            }
+                        },
                         (Icon::Trash, tr!("card-delete"), ItemAction::Delete, true),
                     ];
                     for (icon, tooltip, what, enabled) in buttons {
@@ -1193,11 +1216,13 @@ fn batch_row(ui: &mut Ui, selected: usize) -> Option<BatchAction> {
 }
 
 /// The buffer tray (M1, FR-22), `width` points wide. Cards in `selection` are highlighted.
+/// A recording with `previews` frames plays them while the cursor is on its picture.
 pub fn tray(
     ui: &mut Ui,
     buffer: &Buffer,
     selection: &Selection,
     thumbnails: &HashMap<ItemId, TextureHandle>,
+    previews: &HashMap<ItemId, Vec<TextureHandle>>,
     mut destination: Destination,
     width: f32,
 ) -> TrayOutput {
@@ -1241,7 +1266,8 @@ pub fn tray(
                     for item in buffer.newest_first() {
                         let selected = selection.contains(item.id);
                         let thumbnail = thumbnails.get(&item.id);
-                        if let Some(what) = tray_card(ui, item, thumbnail, selected) {
+                        let preview = previews.get(&item.id).map_or(&[][..], Vec::as_slice);
+                        if let Some(what) = tray_card(ui, item, thumbnail, preview, selected) {
                             out.item = Some((item.id, what));
                         }
                     }
@@ -1272,7 +1298,15 @@ mod tests {
             focus: false,
             rename_offer: None,
         };
-        tray(ui, buffer, selection, thumbnails, destination, width)
+        tray(
+            ui,
+            buffer,
+            selection,
+            thumbnails,
+            &HashMap::new(),
+            destination,
+            width,
+        )
     }
 
     #[test]
@@ -1498,6 +1532,7 @@ mod tests {
                     &Buffer::new(),
                     &Selection::default(),
                     &HashMap::new(),
+                    &HashMap::new(),
                     destination,
                     800.0,
                 );
@@ -1587,6 +1622,7 @@ mod tests {
                         &buffer,
                         &Selection::default(),
                         &thumbnails,
+                        &HashMap::new(),
                         destination,
                         800.0,
                     );

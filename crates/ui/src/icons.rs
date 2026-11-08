@@ -17,6 +17,8 @@ pub enum Icon {
     RecordDot,
     Stop,
     Pause,
+    /// Play a recording: a triangle pointing right.
+    Play,
     Layers,
     ChevronUp,
     ChevronDown,
@@ -119,6 +121,13 @@ pub fn paint(p: &Painter, center: Pos2, icon: Icon, color: Color32) {
             p.circle_filled(center, 5.5, color);
         }
         Icon::Stop => block(-5.0, -5.0, 5.0, 5.0, 2),
+        Icon::Play => {
+            p.add(egui::Shape::convex_polygon(
+                vec![at(-3.5, -5.5), at(5.5, 0.0), at(-3.5, 5.5)],
+                color,
+                Stroke::NONE,
+            ));
+        }
         Icon::Pause => {
             block(-4.5, -5.5, -1.5, 5.5, 1);
             block(1.5, -5.5, 4.5, 5.5, 1);

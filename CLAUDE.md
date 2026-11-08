@@ -29,7 +29,7 @@ app/              entry point: window, shortcuts, command dispatch
 crates/core       Command, CaptureMode, Frame, traits ScreenSource / FrameSink / StreamHandle
 crates/ui         egui drawing of the bar (M1/M2.x) and tray; returns commands only
 crates/capture    CaptureService: queues grabs on a worker thread
-crates/encode     PNG, GIF (frames → animation) and PDF (images → pages); MP4 and the encode queue next
+crates/encode     PNG, GIF (frames → animation) and PDF (images → pages); MP4 is written by the platform encoder
 crates/buffer     the capture buffer; write-ahead index + files next (US-6.1, 6.6)
 crates/annotate   annotation shapes, undo history, flattening into the image (US-7.1)
 crates/platform   OS backends behind the core traits: macos.rs / windows.rs / linux.rs
@@ -56,8 +56,17 @@ only if a spike shows a need.
   monitors change. The bar docks to screen edges, vertical on left and right. `App::bar_pos` is the source of
   truth; the window follows it, because the tray, toast and tooltip band open on whichever side has room.
 - Screenshots work on Windows (Windows.Graphics.Capture): Screen takes the monitor under the cursor; Window and Region open one overlay window across all monitors, over a frozen image; Region opens with the last region selected, with Capture / Record buttons under it (double-click inside also captures). Each capture goes to the buffer, the clipboard and a PNG on a worker thread, with an Undo toast. Files are `<prefix>_<local timestamp>.png`, never overwriting; the prefix and folder (default `~/Captures`) are set on the tray's title line, which Ctrl+Shift+L opens with the keyboard in the prefix; after a prefix change the tray offers to rename the buffer's captures, keeping their timestamps (US-6.8). The buffer survives restarts: its index is `~/Captures/.buffer/index.ron`, and unpinned captures leave it after 7 days while their files stay (US-6.6).
-- Windows: the bar is excluded from captures and has no OS frame. `start_stream` is a stub. The US-1.2 spike records MP4 via `windows_spike`; results
-  in `docs/spikes/us-1.2-windows.md`.
+- Windows: the bar is excluded from captures and has no OS frame.
+- Recording (US-5.1) works on Windows: Record / Ctrl+Shift+R records the monitor under the cursor in Screen mode;
+  Window and Region open the overlay to pick what to record. `ScreenSource::start_recording` returns at once and
+  runs on its own thread: capture textures are cropped on the GPU and go straight to the hardware H.264 encoder
+  (`windows_record.rs`, `windows_mp4.rs`), into a fragmented MP4 `<prefix>_<timestamp>.mp4` in the captures
+  folder. The buffer shows it as saving until the file is complete. A warm-up thread at launch loads the GPU
+  device and encoder so the first recording starts in ~240 ms, not ~650. A recording's card shows its first
+  frame and plays 12 frames spread over it while hovered (`cb_platform::video_frames`, decoded on the output
+  worker); its Play button opens the system player, and Copy puts the file on the clipboard. Pause, the M2.2
+  layout, audio and webcam are not done (US-5.2–5.5). The US-1.2 CPU-path spike stays in
+  `windows_spike`; results in `docs/spikes/us-1.2-windows.md`.
 - macOS and Linux backends are still **stubs**: captures appear in the buffer, then show
   "not implemented on this platform yet". Next step is the rest of **US-1.2** (macOS, Linux spikes).
 
