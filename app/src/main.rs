@@ -34,7 +34,7 @@ const TRAY_WIDTH_BESIDE_BAR: f32 = 640.0;
 /// How often captures past the retention period are looked for (FR-25).
 const SWEEP_EVERY: Duration = Duration::from_secs(60 * 60);
 /// The tray folds away once the cursor has been off the bar's window this long.
-const TRAY_IDLE: Duration = Duration::from_secs(5);
+const TRAY_IDLE: Duration = Duration::from_secs(2);
 
 /// Whether an open tray should fold now. `seen` is when the cursor was last on the window,
 /// or when the tray was closed: the wait starts again each time it opens.
@@ -1073,6 +1073,9 @@ impl App {
                 }
             }
         }
+        if out.closes_tray() {
+            self.bar.tray_open = false;
+        }
         if out.toggle_mic {
             self.bar.mic_on = !self.bar.mic_on;
         }
@@ -1427,25 +1430,33 @@ mod tests {
     fn the_tray_folds_after_the_cursor_has_been_away_a_while() {
         let start = Instant::now();
         let mut seen = start;
-        let at = |secs: u64| start + Duration::from_secs(secs);
-        assert!(!tray_idle(true, false, &mut seen, at(4)));
-        assert!(tray_idle(true, false, &mut seen, at(5)));
+        let tick = Duration::from_millis(100);
+        let mut now = start + TRAY_IDLE - tick;
+        assert!(!tray_idle(true, false, &mut seen, now));
+        now += tick;
+        assert!(tray_idle(true, false, &mut seen, now));
+        now += tick;
         assert!(
-            !tray_idle(true, true, &mut seen, at(6)),
+            !tray_idle(true, true, &mut seen, now),
             "the cursor came back"
         );
+        let back = now;
+        now = back + TRAY_IDLE - tick;
         assert!(
-            !tray_idle(true, false, &mut seen, at(10)),
-            "and the wait started again"
+            !tray_idle(true, false, &mut seen, now),
+            "the wait started again"
         );
-        assert!(tray_idle(true, false, &mut seen, at(11)));
+        now = back + TRAY_IDLE;
+        assert!(tray_idle(true, false, &mut seen, now));
+        now += TRAY_IDLE * 10;
         assert!(
-            !tray_idle(false, false, &mut seen, at(30)),
-            "a closed tray resets the wait"
+            !tray_idle(false, false, &mut seen, now),
+            "closed: the wait resets"
         );
+        now += tick;
         assert!(
-            !tray_idle(true, false, &mut seen, at(31)),
-            "so a reopened one gets its 5 s"
+            !tray_idle(true, false, &mut seen, now),
+            "so a reopened tray waits again"
         );
     }
 
