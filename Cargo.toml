@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "app",
     "crates/core",
+    "crates/annotate",
     "crates/buffer",
     "crates/capture",
     "crates/encode",
@@ -18,6 +19,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 cb-core = { path = "crates/core" }
+cb-annotate = { path = "crates/annotate" }
 cb-buffer = { path = "crates/buffer" }
 cb-capture = { path = "crates/capture" }
 cb-encode = { path = "crates/encode" }

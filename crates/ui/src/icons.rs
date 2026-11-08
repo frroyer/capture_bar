@@ -33,6 +33,15 @@ pub enum Icon {
     Pin,
     /// Again: a circling arrow.
     Repeat,
+    // Annotation tools (US-7.1).
+    ArrowTool,
+    BoxTool,
+    TextTool,
+    Highlighter,
+    /// Freehand: a wavy line.
+    Pencil,
+    Undo,
+    Redo,
 }
 
 /// Draw `icon` centred on `center`. Coordinates below run from -8 to 8.
@@ -219,7 +228,53 @@ pub fn paint(p: &Painter, center: Pos2, icon: Icon, color: Color32) {
             seg(-1.5, -1.5, -1.5, 4.0);
             seg(1.5, -1.5, 1.5, 4.0);
         }
+        Icon::ArrowTool => {
+            seg(-6.0, 6.0, 6.0, -6.0);
+            p.line(vec![at(-0.5, -6.0), at(6.0, -6.0), at(6.0, 0.5)], s);
+        }
+        Icon::BoxTool => frame(-6.5, -5.0, 6.5, 5.0, 1),
+        Icon::TextTool => {
+            seg(-6.0, -6.5, 6.0, -6.5);
+            seg(0.0, -6.5, 0.0, 6.5);
+            seg(-2.5, 6.5, 2.5, 6.5);
+        }
+        Icon::Highlighter => {
+            p.add(egui::Shape::closed_line(
+                vec![at(-4.0, 2.0), at(2.5, -4.5), at(5.5, -1.5), at(-1.0, 5.0)],
+                s,
+            ));
+            p.add(egui::Shape::convex_polygon(
+                vec![at(-4.0, 2.0), at(-1.0, 5.0), at(-5.5, 5.0)],
+                color,
+                Stroke::NONE,
+            ));
+            block(-7.0, 6.5, 7.0, 8.0, 0);
+        }
+        Icon::Pencil => {
+            let wave = (0..=16)
+                .map(|i| {
+                    let x = -7.0 + 14.0 * i as f32 / 16.0;
+                    at(x, 4.0 * (x * 0.55).sin() + x * 0.25)
+                })
+                .collect();
+            p.line(wave, s);
+        }
+        Icon::Undo => p_turn(p, center, -1.0, s),
+        Icon::Redo => p_turn(p, center, 1.0, s),
     }
+}
+
+/// Undo (`side` -1) or redo (1): a half turn over the top, its head pointing down.
+fn p_turn(p: &Painter, c: Pos2, side: f32, s: Stroke) {
+    let arc: Vec<Pos2> = (0..=12)
+        .map(|i| {
+            let a = std::f32::consts::PI * i as f32 / 12.0;
+            pos2(c.x - side * 5.5 * a.cos(), c.y + 2.0 - 5.5 * a.sin())
+        })
+        .collect();
+    let tip = arc[0];
+    p.line(arc, s);
+    p.line(vec![tip + vec2(-3.0, -3.0), tip, tip + vec2(3.0, -3.0)], s);
 }
 
 /// `dir` is -1 to point up, 1 to point down.

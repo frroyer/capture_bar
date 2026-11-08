@@ -283,7 +283,7 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - [x] Frame grab → lock-free queue → PNG worker — a plain channel to one worker thread; bounded memory is US-6.1
 - [x] Clipboard write (arboard) — Windows verified
-- [x] Toast component with Undo (M2.6), built without the artboard — Annotate comes with the editor (E7)
+- [x] Toast component with Undo (M2.6), built without the artboard — Annotate added with the editor (US-7.1)
 
 ### E5 · Screen recording
 
@@ -352,7 +352,7 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: each action works per item; dragging into Slack, a mail client or Finder/Explorer delivers the file.
 
-- [x] Per-item action row — Copy, Save a copy as…, Annotate (opens with US-7.1), Delete (file to the Recycle Bin)
+- [x] Per-item action row — Copy, Save a copy as…, Annotate (US-7.1), Delete (file to the Recycle Bin)
 - [ ] OS drag-and-drop source (NSDraggingSource / OLE IDropSource / XDND + Wayland DnD) — Windows done (shell data object + SHDoDragDrop); macOS and Linux with their backends
 
 **US-6.5** As a user, I want batch actions on several captures. (M1 · FR-24)
@@ -393,8 +393,9 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: Annotate from the toast or the tray opens the editor; saving updates the same buffer item; undo/redo is unlimited.
 
-- [ ] Canvas editor window (egui)
-- [ ] Vector layer model, flattened on export
+- [x] Canvas editor window (egui) — its own window: Arrow, Box, Pen (freehand), Text, Highlight (A/R/P/T/H), icon buttons named in tooltips, six colours, line and text size scaled to the image; Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) without limit, Ctrl+S saves, Esc or closing asks before losing annotations; the window is never narrower than its toolbar
+- [x] Vector layer model, flattened on export — `crates/annotate`, drawn with vello_cpu and skrifa (already in the tree through egui); saving rewrites the same file in place, refreshes the thumbnail and copies the result
+- [x] The original stays recoverable — the first save keeps the capture as taken in `~/Captures/.buffer/originals` (never shown in the tray) and the shapes in the buffer index; Annotate again reopens the original with the shapes as layers, so they can be changed or undone; Original undoes them all, and saving that puts the original back
 
 **US-7.2** As a user, I want to blur sensitive info and crop. (FR-27)
 

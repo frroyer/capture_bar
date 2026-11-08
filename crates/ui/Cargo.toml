@@ -8,5 +8,6 @@ license.workspace = true
 [dependencies]
 cb-core.workspace = true
 cb-buffer.workspace = true
+cb-annotate.workspace = true
 egui.workspace = true
 chrono.workspace = true

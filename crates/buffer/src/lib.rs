@@ -41,6 +41,13 @@ pub struct BufferItem {
     pub state: ItemState,
     pub path: Option<PathBuf>,
     pub pinned: bool,
+    /// The capture as taken, kept out of sight once it is annotated, so the annotations
+    /// can be changed or taken back later (US-7.1). `path` holds the annotated picture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<PathBuf>,
+    /// The annotations drawn into `path` over `original`, bottom first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<cb_annotate::Shape>,
 }
 
 #[derive(Debug, Default)]
@@ -65,6 +72,13 @@ impl Buffer {
                 i.state == ItemState::Ready && i.path.as_deref().is_some_and(|p| p.is_file())
             })
             .collect();
+        for item in &mut items {
+            // Without the original, the annotations are only in the picture: nothing to edit.
+            if item.original.as_deref().is_some_and(|p| !p.is_file()) {
+                item.original = None;
+                item.annotations.clear();
+            }
+        }
         items.sort_by_key(|i| i.id);
         let next_id = items.last().map_or(0, |i| i.id.0);
         Self {
@@ -116,6 +130,8 @@ impl Buffer {
             state,
             path: None,
             pinned: false,
+            original: None,
+            annotations: Vec::new(),
         });
         id
     }
@@ -326,6 +342,61 @@ mod tests {
         assert_eq!(kept, vec![ids[2], ids[0]], "1.png was deleted meanwhile");
         let next = back.push(ItemKind::Image, CaptureMode::Region);
         assert!(next > ids[2], "ids go on from the newest");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn annotations_come_back_only_with_their_original() {
+        let dir = std::env::temp_dir().join(format!("cb-buffer-original-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shape = cb_annotate::Shape::Text {
+            at: cb_annotate::Point::new(1.0, 2.0),
+            text: "x".into(),
+            color: cb_annotate::Rgba([1, 2, 3, 255]),
+            size: 12.0,
+        };
+        let mut b = Buffer::new();
+        let ids: Vec<_> = ["kept", "lost"]
+            .iter()
+            .map(|name| {
+                let id = b.push(ItemKind::Image, CaptureMode::Region);
+                let path = dir.join(format!("{name}.png"));
+                std::fs::write(&path, "png").unwrap();
+                let item = b.get_mut(id).unwrap();
+                item.path = Some(path);
+                item.original = Some(dir.join(format!("{name}-original.png")));
+                item.annotations = vec![shape.clone()];
+                id
+            })
+            .collect();
+        std::fs::write(dir.join("kept-original.png"), "png").unwrap();
+
+        let index = dir.join(index::INDEX_FILE);
+        index::write(&index, &b.snapshot()).unwrap();
+        let back = Buffer::restore(index::read(&index).unwrap());
+        let kept = back.get(ids[0]).unwrap();
+        assert_eq!(kept.annotations, vec![shape]);
+        assert!(kept.original.is_some());
+        let lost = back.get(ids[1]).unwrap();
+        assert!(lost.original.is_none() && lost.annotations.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_index_from_before_annotations_still_reads() {
+        let dir = std::env::temp_dir().join(format!("cb-buffer-v1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = dir.join(index::INDEX_FILE);
+        let mut b = Buffer::new();
+        let id = b.push(ItemKind::Image, CaptureMode::Region);
+        b.get_mut(id).unwrap().path = Some(dir.join("a.png"));
+        index::write(&index, &b.snapshot()).unwrap();
+        let text = std::fs::read_to_string(&index).unwrap();
+        assert!(
+            !text.contains("annotations"),
+            "unannotated items keep the old form"
+        );
+        assert_eq!(index::read(&index).unwrap().len(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

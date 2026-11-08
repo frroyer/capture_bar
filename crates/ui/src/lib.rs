@@ -1,9 +1,11 @@
 //! The bar UI (Epic E2), matching mockup M1 / M2.1 / M2.2.
 //! The UI only *returns commands*; it never calls OS or capture code directly.
 
+mod editor;
 mod icons;
 mod overlay;
 
+pub use editor::{Editor, EditorResult};
 pub use overlay::{Overlay, OverlayResult};
 
 use cb_buffer::{Buffer, BufferItem, ItemId, ItemKind, ItemState, Selection};
@@ -658,10 +660,17 @@ fn mode_switch(ui: &mut Ui, current: CaptureMode, out: &mut BarOutput) {
     }
 }
 
-/// A confirmation beside the bar (M2.6). Returns true when Undo was clicked.
-pub fn toast(ui: &mut Ui, message: &str, can_undo: bool) -> bool {
+/// What a button on the capture toast asked for (M2.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastAction {
+    Annotate,
+    Undo,
+}
+
+/// A confirmation beside the bar (M2.6). A capture's confirmation offers Annotate and Undo.
+pub fn toast(ui: &mut Ui, message: &str, capture: bool) -> Option<ToastAction> {
     use palette::*;
-    let mut undo = false;
+    let mut action = None;
     Frame::new()
         .fill(BAR)
         .stroke(Stroke::new(1.0, BORDER))
@@ -670,22 +679,23 @@ pub fn toast(ui: &mut Ui, message: &str, can_undo: bool) -> bool {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(message).color(TEXT).size(13.0));
-                if can_undo {
-                    undo = chip(
-                        ui,
-                        &[Piece::Text("Undo")],
-                        &ChipStyle {
-                            fill: CHIP,
-                            color: TEXT,
-                            height: H_IN_GROUP,
-                        },
-                        "Remove this capture",
-                    )
-                    .clicked();
+                if capture {
+                    let style = ChipStyle {
+                        fill: CHIP,
+                        color: TEXT,
+                        height: H_IN_GROUP,
+                    };
+                    let annotate = [Piece::Icon(Icon::Pen), Piece::Text("Annotate")];
+                    if chip(ui, &annotate, &style, "Draw on this capture").clicked() {
+                        action = Some(ToastAction::Annotate);
+                    }
+                    if chip(ui, &[Piece::Text("Undo")], &style, "Remove this capture").clicked() {
+                        action = Some(ToastAction::Undo);
+                    }
                 }
             });
         });
-    undo
+    action
 }
 
 /// `text` cut to `max` characters, with an ellipsis when cut.
@@ -1313,7 +1323,8 @@ mod tests {
                 };
                 let mut output = ctx.run_ui(input, |ui| {
                     let top = ui.next_widget_position();
-                    clicked |= toast(ui, "Added to buffer · 1", can_undo);
+                    clicked |=
+                        toast(ui, "Added to buffer · 1", can_undo) == Some(ToastAction::Undo);
                     width = ui.min_rect().right() - top.x;
                 });
                 output.textures_delta.clear();
