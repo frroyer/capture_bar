@@ -272,12 +272,13 @@ pub fn paint(p: &Painter, center: Pos2, icon: Icon, color: Color32) {
             p.line(vec![at(-4.0, -7.5), at(-4.0, 4.0), at(7.5, 4.0)], s);
             p.line(vec![at(-7.5, -4.0), at(4.0, -4.0), at(4.0, 7.5)], s);
         }
-        Icon::Undo => p_turn(p, center, -1.0, s),
-        Icon::Redo => p_turn(p, center, 1.0, s),
+        Icon::Undo => p_turn(p, center, 1.0, s),
+        Icon::Redo => p_turn(p, center, -1.0, s),
     }
 }
 
-/// Undo (`side` -1) or redo (1): a half turn over the top, its head pointing down.
+/// Undo (`side` 1, head on the left) or redo (-1, head on the right): a half turn
+/// over the top, its head pointing down.
 fn p_turn(p: &Painter, c: Pos2, side: f32, s: Stroke) {
     let arc: Vec<Pos2> = (0..=12)
         .map(|i| {
