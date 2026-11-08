@@ -280,6 +280,8 @@ struct App {
     settings_file: PathBuf,
     settings_writer: mpsc::Sender<Settings>,
     settings_window: Option<SettingsWindow>,
+    /// Give the bar's window the keyboard on the next frame.
+    focus_bar: bool,
     /// Whether the bar starts at login, as the OS had it when Settings opened (US-8.3).
     autostart: bool,
     /// The answer of the thread changing it.
@@ -511,6 +513,7 @@ impl App {
             settings_file,
             settings_writer,
             settings_window: None,
+            focus_bar: false,
             autostart: false,
             autostart_done: None,
             focus_prefix: false,
@@ -636,7 +639,12 @@ impl App {
             Command::ToggleRecording => self.toggle_recording(),
             Command::TogglePause => self.flash("Pause: not implemented yet (US-5.2)"),
             Command::ToggleBuffer => self.bar.tray_open = !self.bar.tray_open,
-            Command::ToggleBar => self.hidden = !self.hidden,
+            Command::ToggleBar => {
+                self.hidden = !self.hidden;
+                // Shown from a shortcut, the bar takes the keyboard, so Tab reaches its
+                // controls (NFR-13).
+                self.focus_bar = !self.hidden;
+            }
             Command::RepeatLastRegion => match self.last_region {
                 Some(rect) if self.overlay.is_none() => {
                     self.capture_still(CaptureMode::Region, CaptureTarget::Region(rect));
@@ -1718,6 +1726,9 @@ impl eframe::App for App {
             self.bar.elapsed_secs = start.elapsed().as_secs();
         }
 
+        if std::mem::take(&mut self.focus_bar) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
         if self.click_through != self.hidden {
             self.click_through = self.hidden;
             ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(self.hidden));

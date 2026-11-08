@@ -238,6 +238,7 @@ fn chip(ui: &mut Ui, pieces: &[Piece], style: &ChipStyle, tooltip: &str) -> Resp
 
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     response.widget_info(|| WidgetInfo::labeled(Role::Button, true, tooltip));
+    focus_ring(ui, &response, CHIP_RADIUS);
 
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
@@ -279,6 +280,30 @@ fn chip(ui: &mut Ui, pieces: &[Piece], style: &ChipStyle, tooltip: &str) -> Resp
     }
     show_tooltip(&response, tooltip);
     response
+}
+
+/// A chip that is on or off, told as such to screen readers (NFR-14).
+trait OnState {
+    fn on_state(self, on: bool, label: &str) -> Self;
+}
+
+impl OnState for Response {
+    fn on_state(self, on: bool, label: &str) -> Self {
+        self.widget_info(|| WidgetInfo::selected(Role::CheckBox, true, on, label));
+        self
+    }
+}
+
+/// The ring around the widget that has the keyboard (NFR-13), drawn over it.
+fn focus_ring(ui: &Ui, response: &Response, radius: impl Into<CornerRadius>) {
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            response.rect.expand(1.0),
+            radius,
+            Stroke::new(2.0, palette::ACCENT),
+            StrokeKind::Outside,
+        );
+    }
 }
 
 fn show_tooltip(response: &Response, text: &str) {
@@ -351,6 +376,8 @@ fn grip(ui: &mut Ui, vertical: bool, out: &mut BarOutput) {
         (vec2(22.0, H), Icon::Grip)
     };
     let (rect, grip) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    grip.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Move the bar"));
+    focus_ring(ui, &grip, 4);
     icons::paint(ui.painter(), rect.center(), icon, palette::MUTED);
     let grip = grip.on_hover_cursor(CursorIcon::Grab);
     show_tooltip(&grip, "Drag to move. Double-click to dock");
@@ -561,6 +588,7 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                         &toggle(state.mic_on),
                         "Microphone on or off",
                     )
+                    .on_state(state.mic_on, "Microphone")
                     .clicked()
                     {
                         out.toggle_mic = true;
@@ -571,6 +599,7 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                         &toggle(state.cam_on),
                         "Webcam on or off",
                     )
+                    .on_state(state.cam_on, "Webcam")
                     .clicked()
                     {
                         out.toggle_cam = true;
@@ -643,6 +672,7 @@ fn mode_switch(ui: &mut Ui, current: CaptureMode, out: &mut BarOutput) {
         let tip = format!("{}: {} captures now", mode.label(), shortcut(key));
         response
             .widget_info(|| WidgetInfo::selected(Role::RadioButton, true, mode == current, &tip));
+        focus_ring(ui, &response, 6);
         let color = if mode == current {
             Color32::WHITE
         } else if response.hovered() {
@@ -920,6 +950,9 @@ fn tray_card(
                     Sense::click()
                 };
                 let (slot, response) = ui.allocate_exact_size(THUMBNAIL_SIZE, sense);
+                response.widget_info(|| {
+                    WidgetInfo::selected(Role::Button, true, selected, format!("{name}, {details}"))
+                });
                 if response.drag_started() {
                     action = Some(ItemAction::DragOut);
                 }
@@ -949,6 +982,7 @@ fn tray_card(
                         .corner_radius(CornerRadius::same(4))
                         .paint_at(ui, picture);
                 }
+                focus_ring(ui, &response, 4);
                 // On top of the picture, so it takes the clicks there.
                 let pin_rect = egui::Rect::from_min_size(
                     slot.right_top() + vec2(-26.0, 4.0),
@@ -959,7 +993,12 @@ fn tray_card(
                     ui.make_persistent_id(("tray pin", item.id)),
                     Sense::click(),
                 );
-                if has_file && (item.pinned || response.hovered() || pin.hovered()) {
+                pin.widget_info(|| {
+                    WidgetInfo::selected(Role::CheckBox, has_file, item.pinned, "Pin")
+                });
+                let pin_seen = response.hovered() || pin.hovered() || pin.has_focus();
+                if has_file && (item.pinned || pin_seen) {
+                    focus_ring(ui, &pin, 11);
                     let color = if item.pinned { ACCENT } else { TEXT };
                     ui.painter().circle_filled(pin_rect.center(), 11.0, BAR);
                     icons::paint(ui.painter(), pin_rect.center(), Icon::Pin, color);
