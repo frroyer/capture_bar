@@ -10,9 +10,6 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-/// How long an unpinned capture stays in the buffer (FR-25). Its file stays on disk.
-pub const RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ItemId(pub u64);
 
@@ -406,12 +403,13 @@ mod tests {
         let old = b.push(ItemKind::Image, CaptureMode::Region);
         let pinned = b.push(ItemKind::Image, CaptureMode::Region);
         let fresh = b.push(ItemKind::Image, CaptureMode::Region);
-        let week_ago = SystemTime::now() - RETENTION - Duration::from_secs(60);
+        let week = Duration::from_secs(7 * 24 * 60 * 60);
+        let week_ago = SystemTime::now() - week - Duration::from_secs(60);
         for id in [old, pinned] {
             b.get_mut(id).unwrap().created_at = week_ago;
         }
         b.get_mut(pinned).unwrap().pinned = true;
-        assert_eq!(b.expired(SystemTime::now(), RETENTION), vec![old]);
+        assert_eq!(b.expired(SystemTime::now(), week), vec![old]);
         assert!(b.get(fresh).is_some());
     }
 

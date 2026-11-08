@@ -416,8 +416,8 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: changes apply without restart and are stored in a TOML file next to the binary (portable) or in the user config dir.
 
-- [ ] Settings window
-- [ ] Config schema + migration
+- [x] Settings window
+- [x] Config schema + migration
 
 **US-8.3** As a user, I want the bar to start at login. (FR-29)
 

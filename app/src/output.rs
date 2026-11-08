@@ -158,9 +158,6 @@ fn annotate(
     })
 }
 
-/// The prefix new captures get until the user picks one (FR-30).
-pub const DEFAULT_PREFIX: &str = "capture";
-
 /// `prefix` without what a file name cannot hold on any of our systems.
 pub fn clean_prefix(prefix: &str) -> String {
     prefix
