@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use cb_annotate::{
-    arrow_parts, corners, default_sizes, mosaic, History, Mosaic, Point, Rgba, Shape,
+    arrow_parts, corners, default_sizes, mosaic, pixel_rect, History, Mosaic, Point, Rgba, Shape,
 };
 use cb_buffer::ItemId;
 use egui::{
@@ -78,19 +78,30 @@ fn color32(c: Rgba) -> Color32 {
 struct View {
     origin: Pos2,
     scale: f32,
-    /// The image size, in image pixels.
+    /// The image pixel shown at `origin`: not the corner once the image is cropped.
+    min: Point,
+    /// The size of what is shown, in image pixels.
     size: (f32, f32),
 }
 
 impl View {
     fn to_screen(self, p: Point) -> Pos2 {
-        self.origin + vec2(p.x, p.y) * self.scale
+        self.origin + vec2(p.x - self.min.x, p.y - self.min.y) * self.scale
     }
 
-    /// Kept on the image: a drag past its edge stops at the edge.
+    /// Kept on what is shown: a drag past its edge stops at the edge.
     fn to_image(self, p: Pos2) -> Point {
         let v = (p - self.origin) / self.scale;
-        Point::new(v.x.clamp(0.0, self.size.0), v.y.clamp(0.0, self.size.1))
+        Point::new(
+            self.min.x + v.x.clamp(0.0, self.size.0),
+            self.min.y + v.y.clamp(0.0, self.size.1),
+        )
+    }
+
+    /// Where what is shown is on screen.
+    fn rect(self) -> Rect {
+        let max = Point::new(self.min.x + self.size.0, self.min.y + self.size.1);
+        Rect::from_min_max(self.origin, self.to_screen(max))
     }
 }
 
@@ -428,7 +439,17 @@ impl Editor {
     fn canvas(&mut self, ui: &mut Ui, texture: &TextureHandle) {
         let ppp = ui.ctx().pixels_per_point();
         let room = ui.max_rect().shrink(CANVAS_PAD);
-        let size = (self.base.width as f32, self.base.height as f32);
+        let shapes = self.history.shapes().to_vec();
+        // Once cropped, only what Save will keep is shown; Undo brings the rest back.
+        let (w, h) = (self.base.width, self.base.height);
+        let (x0, y0, x1, y1) = match shapes.iter().rev().find_map(|s| match s {
+            Shape::Crop { min, max } => Some(pixel_rect(*min, *max, w, h)),
+            _ => None,
+        }) {
+            Some((x0, y0, x1, y1)) if x1 > x0 && y1 > y0 => (x0, y0, x1, y1),
+            _ => (0, 0, w, h),
+        };
+        let size = ((x1 - x0) as f32, (y1 - y0) as f32);
         let scale = (1.0 / ppp)
             .min(room.width() / size.0)
             .min(room.height() / size.1)
@@ -437,33 +458,25 @@ impl Editor {
         let view = View {
             origin: rect.min,
             scale,
+            min: Point::new(x0 as f32, y0 as f32),
             size,
         };
         self.view = Some(view);
 
-        let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-        ui.painter()
-            .image(texture.id(), rect, whole, Color32::WHITE);
+        let uv = Rect::from_min_max(
+            pos2(x0 as f32 / w as f32, y0 as f32 / h as f32),
+            pos2(x1 as f32 / w as f32, y1 as f32 / h as f32),
+        );
+        ui.painter().image(texture.id(), rect, uv, Color32::WHITE);
         let response = ui.interact(
             rect,
             ui.scope_id().with("annotate canvas"),
             Sense::click_and_drag(),
         );
         let painter = ui.painter_at(rect);
-        let shapes = self.history.shapes().to_vec();
         self.mosaics.retain(|(s, ..)| shapes.contains(s));
         for shape in &shapes {
             self.paint_layer(ui.ctx(), &painter, view, shape);
-        }
-        // The crop being dragged replaces the one saved, on screen.
-        let new_crop =
-            self.tool == Tool::Crop && (self.drag_from.is_some() || response.drag_started());
-        let crop = shapes
-            .iter()
-            .rev()
-            .find(|s| matches!(s, Shape::Crop { .. }));
-        if let (false, Some(Shape::Crop { min, max })) = (new_crop, crop) {
-            paint_crop(&painter, view, *min, *max);
         }
 
         if self.tool == Tool::Pen {
@@ -705,10 +718,7 @@ fn swatch(ui: &mut Ui, color: Rgba, chosen: bool, name: &str) -> egui::Response 
 
 /// Shade what a crop leaves out.
 fn paint_crop(painter: &egui::Painter, view: View, min: Point, max: Point) {
-    let full = Rect::from_min_max(
-        view.to_screen(Point::default()),
-        view.to_screen(Point::new(view.size.0, view.size.1)),
-    );
+    let full = view.rect();
     let keep = Rect::from_min_max(view.to_screen(min), view.to_screen(max));
     let shade = Color32::from_black_alpha(160);
     for (a, b) in [
@@ -1044,6 +1054,33 @@ mod tests {
         assert!(*block >= 12.0, "blocks big enough to hide text: {block}");
         assert!(close(*c0, Point::new(50.0, 20.0)) && close(*c1, Point::new(390.0, 190.0)));
         assert_eq!(editor.mosaics.len(), 1, "only the layers kept are cached");
+
+        // Only what Save keeps is shown now, and shapes still land in image pixels.
+        run(&mut editor, vec![vec![]]);
+        let view = editor.view.unwrap();
+        assert_eq!(view.size, (340.0, 170.0));
+        assert!(close(
+            view.to_image(view.rect().min),
+            Point::new(50.0, 20.0)
+        ));
+        editor.tool = Tool::Rect;
+        drag(
+            &mut editor,
+            Point::new(60.0, 30.0),
+            Point::new(200.0, 100.0),
+        );
+        let Some(Shape::Rect { min, max, .. }) = editor.history.shapes().last() else {
+            panic!("a box on the cropped image");
+        };
+        assert!(close(*min, Point::new(60.0, 30.0)) && close(*max, Point::new(200.0, 100.0)));
+
+        editor.history.undo_all();
+        run(&mut editor, vec![vec![]]);
+        assert_eq!(
+            editor.view.unwrap().size,
+            (400.0, 200.0),
+            "Original uncrops"
+        );
     }
 
     #[test]
