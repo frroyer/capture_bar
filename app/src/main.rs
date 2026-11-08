@@ -3,6 +3,7 @@
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod config;
 mod output;
 
 use std::collections::HashMap;
@@ -12,11 +13,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use cb_buffer::{index, Buffer, BufferItem, ItemId, ItemKind, ItemState, Selection};
 use cb_capture::{CaptureEvent, CaptureService};
-use cb_core::{CaptureMode, CaptureTarget, Command, DisplayId, Edge, Frame, Rect};
+use cb_core::{CaptureMode, CaptureTarget, Command, DisplayId, Edge, Frame, Rect, Settings};
 use cb_platform::TrayAction;
 use cb_ui::{
     BarState, BatchAction, Editor, EditorResult, ItemAction, Overlay, OverlayResult, SelectHow,
-    ToastAction, TooltipSide,
+    SettingsWindow, ToastAction, TooltipSide,
 };
 use eframe::egui;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
@@ -27,6 +28,7 @@ const INITIAL_SIZE: [f32; 2] = [900.0, 54.0];
 const PLACEMENTS_STORAGE_KEY: &str = "bar_placements";
 const MODE_STORAGE_KEY: &str = "capture_mode";
 const REGION_STORAGE_KEY: &str = "last_region";
+/// Where the prefix and folder were kept before the settings file: read once, to move them.
 const PREFIX_STORAGE_KEY: &str = "file_prefix";
 const FOLDER_STORAGE_KEY: &str = "captures_dir";
 /// FR-3: a drop this close to an edge docks the bar.
@@ -269,6 +271,15 @@ struct App {
     toast: Option<Toast>,
     /// Where new captures go (FR-30). Their prefix is `bar.prefix`.
     captures_dir: PathBuf,
+    /// The settings without the ones above and `bar.prefix` / `bar.mic_on`, which are kept
+    /// where the bar uses them (see `App::settings`).
+    prefs: Settings,
+    /// What was last sent to `settings_writer`.
+    saved_settings: Settings,
+    /// The settings file (US-8.2).
+    settings_file: PathBuf,
+    settings_writer: mpsc::Sender<Settings>,
+    settings_window: Option<SettingsWindow>,
     /// Put the keyboard in the prefix field on the next frame.
     focus_prefix: bool,
     /// The prefix the captures in the buffer were last offered to be renamed to.
@@ -396,15 +407,43 @@ impl App {
         .inspect_err(|e| tracing::warn!(error = %e, "no tray icon"))
         .ok();
 
-        let default_dir = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("Captures");
-        let captures_dir = cc
-            .storage
-            .and_then(|s| eframe::get_value(s, FOLDER_STORAGE_KEY))
-            .unwrap_or_else(|| default_dir.clone());
+        let settings_file = config::path();
+        let loaded = config::load(&settings_file, |settings| {
+            let Some(storage) = cc.storage else {
+                return;
+            };
+            if let Some(folder) = eframe::get_value(storage, FOLDER_STORAGE_KEY) {
+                settings.folder = folder;
+            }
+            if let Some(prefix) = eframe::get_value(storage, PREFIX_STORAGE_KEY) {
+                settings.prefix = prefix;
+            }
+        });
+        tracing::info!(file = %settings_file.display(), "settings");
+        let toast = toast.or_else(|| match &loaded {
+            config::Loaded::Damaged(_, error) => {
+                tracing::warn!(%error, "settings file not read");
+                Some(Toast::new(
+                    "The settings file was damaged: defaults used",
+                    None,
+                ))
+            }
+            _ => None,
+        });
+        let settings_writer = config::spawn_writer(settings_file.clone(), |error| {
+            tracing::warn!(%error, "settings not written");
+        });
+        // A new file is written at once, so the moved values are not lost.
+        let saved_settings = match &loaded {
+            config::Loaded::New(_) => Settings {
+                version: 0,
+                ..Default::default()
+            },
+            _ => loaded.settings().clone(),
+        };
+        let prefs = loaded.settings().clone();
+        let captures_dir = prefs.folder.clone();
+        let default_dir = Settings::default_folder();
         // Where the default folder is, whichever folder captures go to now (FR-25).
         let index_path = default_dir.join(".buffer").join(index::INDEX_FILE);
         let originals_dir = default_dir.join(".buffer").join("originals");
@@ -415,10 +454,7 @@ impl App {
         let index = index::spawn_writer(index_path, |error| {
             tracing::warn!(%error, "buffer index not written");
         });
-        let prefix = cc
-            .storage
-            .and_then(|s| eframe::get_value(s, PREFIX_STORAGE_KEY))
-            .unwrap_or_else(|| output::DEFAULT_PREFIX.to_owned());
+        let prefix = prefs.prefix.clone();
 
         let source: Arc<dyn cb_core::ScreenSource> = Arc::from(cb_platform::screen_source());
         let ctx = cc.egui_ctx.clone();
@@ -434,7 +470,7 @@ impl App {
 
         Self {
             bar: BarState {
-                mic_on: true,
+                mic_on: prefs.microphone,
                 mode: saved_mode(cc.storage),
                 prefix: prefix.clone(),
                 ..Default::default()
@@ -466,6 +502,11 @@ impl App {
             record_started: None,
             toast,
             captures_dir,
+            prefs,
+            saved_settings,
+            settings_file,
+            settings_writer,
+            settings_window: None,
             focus_prefix: false,
             named_prefix: prefix,
             rename_offer: false,
@@ -597,7 +638,12 @@ impl App {
                 _ => self.begin_capture(CaptureMode::Region),
             },
             Command::CopyNewest => self.copy_newest(),
-            Command::OpenSettings => self.flash("Settings: not implemented yet (US-8.2)"),
+            Command::OpenSettings => {
+                self.hidden = false;
+                self.settings_window
+                    .get_or_insert_with(SettingsWindow::default)
+                    .focus();
+            }
             Command::EditPrefix => {
                 // From a shortcut, the bar may be hidden and another app has the keyboard.
                 self.hidden = false;
@@ -653,7 +699,9 @@ impl App {
             return;
         }
         self.swept_at = Some(Instant::now());
-        let expired = self.buffer.expired(SystemTime::now(), cb_buffer::RETENTION);
+        let expired = self
+            .buffer
+            .expired(SystemTime::now(), self.prefs.retention());
         if !expired.is_empty() {
             tracing::info!(
                 count = expired.len(),
@@ -947,6 +995,52 @@ impl App {
         match name {
             Some(name) => format!("Annotate · {name}"),
             None => "Annotate".into(),
+        }
+    }
+
+    /// The settings as they are now, wherever the app keeps each one.
+    fn settings(&self) -> Settings {
+        Settings {
+            folder: self.captures_dir.clone(),
+            prefix: self.bar.prefix.clone(),
+            microphone: self.bar.mic_on,
+            ..self.prefs.clone()
+        }
+    }
+
+    /// Put `settings` in effect at once (US-8.2).
+    fn apply_settings(&mut self, settings: Settings) {
+        if settings.retention_days != self.prefs.retention_days {
+            self.swept_at = None;
+        }
+        self.captures_dir = settings.folder.clone();
+        self.bar.prefix = output::clean_prefix(&settings.prefix);
+        self.bar.mic_on = settings.microphone;
+        self.prefs = settings;
+    }
+
+    fn show_settings(&mut self, ctx: &egui::Context) {
+        let before = self.settings();
+        let mut settings = before.clone();
+        let Some(window) = &mut self.settings_window else {
+            return;
+        };
+        let out = window.show(ctx, &mut settings, &self.settings_file);
+        if settings != before {
+            self.apply_settings(settings);
+        }
+        self.folder_requested |= out.choose_folder;
+        if out.closed {
+            self.settings_window = None;
+        }
+    }
+
+    /// Send the settings to be written when they changed, from any window.
+    fn save_settings(&mut self) {
+        let now = self.settings();
+        if now != self.saved_settings {
+            let _ = self.settings_writer.send(now.clone());
+            self.saved_settings = now;
         }
     }
 
@@ -1529,8 +1623,6 @@ impl eframe::App for App {
         eframe::set_value(storage, PLACEMENTS_STORAGE_KEY, &self.placements);
         eframe::set_value(storage, MODE_STORAGE_KEY, &self.bar.mode);
         eframe::set_value(storage, REGION_STORAGE_KEY, &self.last_region);
-        eframe::set_value(storage, PREFIX_STORAGE_KEY, &self.bar.prefix);
-        eframe::set_value(storage, FOLDER_STORAGE_KEY, &self.captures_dir);
     }
 
     /// The bar has no quit button yet, so a killed process should lose little.
@@ -1616,6 +1708,7 @@ impl eframe::App for App {
         self.place_window(ctx, used);
         self.show_overlay(ctx);
         self.show_editor(ctx);
+        self.show_settings(ctx);
         if std::mem::take(&mut self.folder_requested) {
             self.choose_folder(ctx, frame);
         }
@@ -1626,6 +1719,7 @@ impl eframe::App for App {
             self.batch_action(frame, action);
         }
         self.save_index();
+        self.save_settings();
 
         // Keep the timer and toast fresh without spinning the CPU (NFR-7). A drag polls
         // faster, to show the snap preview and catch the drop.

@@ -623,3 +623,68 @@ mod tests {
         assert_eq!(CaptureMode::Screen.label(), "Screen");
     }
 }
+
+/// What the settings panel changes (FR-29, US-8.2). Kept in a TOML file; fields missing
+/// from an older file take their default, so a file only ever gains keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// The schema the file was written with. Raised when a key changes meaning.
+    pub version: u32,
+    /// Where new captures go (FR-30).
+    pub folder: std::path::PathBuf,
+    /// What new capture file names start with (FR-30).
+    pub prefix: String,
+    /// How long an unpinned capture stays in the buffer (FR-25).
+    pub retention_days: u32,
+    /// Frames per second of recordings (FR-18): 30 or 60.
+    pub frame_rate: u32,
+    /// Record what the computer plays.
+    pub system_audio: bool,
+    /// Record the microphone. The bar's mic toggle is the same setting.
+    pub microphone: bool,
+}
+
+impl Settings {
+    pub const VERSION: u32 = 1;
+    pub const FRAME_RATES: [u32; 2] = [30, 60];
+    pub const RETENTION_DAYS: std::ops::RangeInclusive<u32> = 1..=365;
+
+    /// `~/Captures`, or `./Captures` when there is no home folder.
+    pub fn default_folder() -> std::path::PathBuf {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| ".".into())
+            .join("Captures")
+    }
+
+    /// Values a hand-edited file may have put out of range, brought back in.
+    pub fn sanitized(mut self) -> Self {
+        let days = Self::RETENTION_DAYS;
+        self.retention_days = self.retention_days.clamp(*days.start(), *days.end());
+        if !Self::FRAME_RATES.contains(&self.frame_rate) {
+            self.frame_rate = Self::FRAME_RATES[0];
+        }
+        self.version = Self::VERSION;
+        self
+    }
+
+    pub fn retention(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(u64::from(self.retention_days) * 24 * 60 * 60)
+    }
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            version: Self::VERSION,
+            folder: Self::default_folder(),
+            prefix: "capture".into(),
+            retention_days: 7,
+            frame_rate: 30,
+            system_audio: true,
+            microphone: true,
+        }
+    }
+}

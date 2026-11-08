@@ -4,9 +4,11 @@
 mod editor;
 mod icons;
 mod overlay;
+mod settings;
 
 pub use editor::{Editor, EditorResult};
 pub use overlay::{Overlay, OverlayResult};
+pub use settings::{SettingsOutput, SettingsWindow};
 
 use cb_buffer::{Buffer, BufferItem, ItemId, ItemKind, ItemState, Selection};
 use cb_core::{CaptureMode, Command};
