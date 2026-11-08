@@ -2,6 +2,7 @@
 //! The UI only *returns commands*; it never calls OS or capture code directly.
 
 mod editor;
+pub mod i18n;
 mod icons;
 mod overlay;
 mod settings;
@@ -141,6 +142,15 @@ pub fn install_fonts(ctx: &egui::Context, system: Option<(Vec<u8>, Vec<u8>)>) {
         .families
         .insert(FontFamily::Name(SEMIBOLD.into()), semibold);
     ctx.set_fonts(fonts);
+}
+
+/// The name of a capture mode in the interface's language.
+pub fn mode_name(mode: CaptureMode) -> String {
+    match mode {
+        CaptureMode::Region => tr!("mode-region"),
+        CaptureMode::Window => tr!("mode-window"),
+        CaptureMode::Screen => tr!("mode-screen"),
+    }
 }
 
 /// A default shortcut as shown to the user (FR-28, mockup M3).
@@ -376,11 +386,11 @@ fn grip(ui: &mut Ui, vertical: bool, out: &mut BarOutput) {
         (vec2(22.0, H), Icon::Grip)
     };
     let (rect, grip) = ui.allocate_exact_size(size, Sense::click_and_drag());
-    grip.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Move the bar"));
+    grip.widget_info(|| WidgetInfo::labeled(Role::Button, true, tr!("grip-label")));
     focus_ring(ui, &grip, 4);
     icons::paint(ui.painter(), rect.center(), icon, palette::MUTED);
     let grip = grip.on_hover_cursor(CursorIcon::Grab);
-    show_tooltip(&grip, "Drag to move. Double-click to dock");
+    show_tooltip(&grip, &tr!("grip-tip"));
     if grip.drag_started() {
         out.start_drag = true;
     }
@@ -416,7 +426,7 @@ pub fn pill(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                     ui,
                     &[first, second, Piece::Badge(&count, badge)],
                     &ChipStyle::new(Color32::TRANSPARENT, TEXT),
-                    "Expand the bar",
+                    &tr!("pill-expand"),
                 )
                 .clicked()
                 {
@@ -463,9 +473,9 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                 let capture_key = shortcut("S");
                 if chip(
                     ui,
-                    &[Piece::Icon(Icon::Camera), Piece::Text("Capture")],
+                    &[Piece::Icon(Icon::Camera), Piece::Text(&tr!("bar-capture"))],
                     &ChipStyle::new(PRIMARY, PRIMARY_TEXT),
-                    &format!("Capture with the current mode ({capture_key})"),
+                    &tr!("bar-capture-tip", key = capture_key.as_str()),
                 )
                 .clicked()
                 {
@@ -476,7 +486,7 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                         ui,
                         &[Piece::Icon(Icon::Repeat)],
                         &ChipStyle::new(CHIP, TEXT),
-                        &format!("Capture the same region again ({})", shortcut("A")),
+                        &tr!("bar-repeat-tip", key = shortcut("A")),
                     );
                     if again.clicked() {
                         out.commands.push(Command::RepeatLastRegion);
@@ -502,10 +512,10 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                         &[
                             Piece::Icon(Icon::Stop),
                             Piece::Text(&time),
-                            Piece::Text("Stop"),
+                            Piece::Text(&tr!("bar-stop")),
                         ],
                         &ChipStyle::new(RECORD_BG, RECORD),
-                        &format!("Stop recording ({record_key})"),
+                        &tr!("bar-stop-tip", key = record_key.as_str()),
                     )
                     .clicked()
                     {
@@ -513,9 +523,9 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                     }
                     if chip(
                         ui,
-                        &[Piece::Icon(Icon::Pause), Piece::Text("Pause")],
+                        &[Piece::Icon(Icon::Pause), Piece::Text(&tr!("bar-pause"))],
                         &ChipStyle::new(CHIP, TEXT),
-                        &format!("Pause recording ({})", shortcut("P")),
+                        &tr!("bar-pause-tip", key = shortcut("P")),
                     )
                     .clicked()
                     {
@@ -525,10 +535,10 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                     ui,
                     &[
                         Piece::Tinted(Icon::RecordDot, RECORD),
-                        Piece::Text("Record"),
+                        Piece::Text(&tr!("bar-record")),
                     ],
                     &ChipStyle::new(CHIP, TEXT),
-                    &format!("Start recording ({record_key})"),
+                    &tr!("bar-record-tip", key = record_key.as_str()),
                 )
                 .clicked()
                 {
@@ -548,12 +558,12 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                     ui,
                     &[
                         Piece::Icon(Icon::Layers),
-                        Piece::Text("Buffer"),
+                        Piece::Text(&tr!("bar-buffer")),
                         Piece::Badge(&count, badge),
                         Piece::Icon(arrow),
                     ],
                     &ChipStyle::new(CHIP, TEXT),
-                    &format!("Show or hide the buffer ({})", shortcut("B")),
+                    &tr!("bar-buffer-tip", key = shortcut("B")),
                 );
                 if vertical && !buffer.is_empty() {
                     // The count stays visible as a corner badge on the icon-only chip.
@@ -586,9 +596,9 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                         ui,
                         &[Piece::Icon(Icon::Mic)],
                         &toggle(state.mic_on),
-                        "Microphone on or off",
+                        &tr!("bar-mic-tip"),
                     )
-                    .on_state(state.mic_on, "Microphone")
+                    .on_state(state.mic_on, &tr!("bar-mic"))
                     .clicked()
                     {
                         out.toggle_mic = true;
@@ -597,17 +607,31 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                         ui,
                         &[Piece::Icon(Icon::Video)],
                         &toggle(state.cam_on),
-                        "Webcam on or off",
+                        &tr!("bar-cam-tip"),
                     )
-                    .on_state(state.cam_on, "Webcam")
+                    .on_state(state.cam_on, &tr!("bar-cam"))
                     .clicked()
                     {
                         out.toggle_cam = true;
                     }
-                    if chip(ui, &[Piece::Icon(Icon::Sliders)], &quiet, "Settings").clicked() {
+                    if chip(
+                        ui,
+                        &[Piece::Icon(Icon::Sliders)],
+                        &quiet,
+                        &tr!("bar-settings"),
+                    )
+                    .clicked()
+                    {
                         out.commands.push(Command::OpenSettings);
                     }
-                    if chip(ui, &[Piece::Icon(Icon::Minus)], &quiet, "Collapse").clicked() {
+                    if chip(
+                        ui,
+                        &[Piece::Icon(Icon::Minus)],
+                        &quiet,
+                        &tr!("bar-collapse"),
+                    )
+                    .clicked()
+                    {
                         out.collapse = true;
                     }
                 }
@@ -669,7 +693,7 @@ fn mode_switch(ui: &mut Ui, current: CaptureMode, out: &mut BarOutput) {
     for (i, (mode, icon, key)) in MODES.into_iter().enumerate() {
         let rect = cell_at(i as f32);
         let response = ui.interact(rect, ui.make_persistent_id(("mode", key)), Sense::click());
-        let tip = format!("{}: {} captures now", mode.label(), shortcut(key));
+        let tip = tr!("mode-tip", mode = mode_name(mode), key = shortcut(key));
         response
             .widget_info(|| WidgetInfo::selected(Role::RadioButton, true, mode == current, &tip));
         focus_ring(ui, &response, 6);
@@ -717,11 +741,13 @@ pub fn toast(ui: &mut Ui, message: &str, capture: bool) -> Option<ToastAction> {
                         color: TEXT,
                         height: H_IN_GROUP,
                     };
-                    let annotate = [Piece::Icon(Icon::Pen), Piece::Text("Annotate")];
-                    if chip(ui, &annotate, &style, "Draw on this capture").clicked() {
+                    let label = tr!("toast-annotate");
+                    let annotate = [Piece::Icon(Icon::Pen), Piece::Text(&label)];
+                    if chip(ui, &annotate, &style, &tr!("toast-annotate-tip")).clicked() {
                         action = Some(ToastAction::Annotate);
                     }
-                    if chip(ui, &[Piece::Text("Undo")], &style, "Remove this capture").clicked() {
+                    let undo = tr!("toast-undo");
+                    if chip(ui, &[Piece::Text(&undo)], &style, &tr!("toast-undo-tip")).clicked() {
                         action = Some(ToastAction::Undo);
                     }
                 }
@@ -762,7 +788,7 @@ fn destination_line(ui: &mut Ui, destination: &mut Destination, out: &mut TrayOu
             egui::TextEdit::singleline(destination.prefix)
                 .char_limit(40)
                 .desired_width(120.0)
-                .hint_text("no prefix")
+                .hint_text(tr!("prefix-hint"))
                 .text_color(TEXT)
                 .background_color(CHIP)
                 .margin(Margin::symmetric(8, 5)),
@@ -773,10 +799,7 @@ fn destination_line(ui: &mut Ui, destination: &mut Destination, out: &mut TrayOu
         if edit.lost_focus() {
             out.prefix_done = true;
         }
-        show_tooltip(
-            &edit,
-            &format!("Prefix of new file names. Next: {}", destination.next_file),
-        );
+        show_tooltip(&edit, &tr!("prefix-tip", next = destination.next_file));
         let name = destination.folder.file_name().map_or_else(
             || destination.folder.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
@@ -786,10 +809,10 @@ fn destination_line(ui: &mut Ui, destination: &mut Destination, out: &mut TrayOu
             color: TEXT,
             height: 28.0,
         };
-        let tip = format!(
-            "New captures go to {}. Click to choose another folder ({})",
-            destination.folder.display(),
-            shortcut("L")
+        let tip = tr!(
+            "folder-tip",
+            folder = destination.folder.display().to_string(),
+            key = shortcut("L"),
         );
         let label = shorten(&name, 18);
         if chip(
@@ -809,36 +832,38 @@ fn destination_line(ui: &mut Ui, destination: &mut Destination, out: &mut TrayOu
 fn rename_offer(ui: &mut Ui, count: usize, prefix: &str, out: &mut TrayOutput) {
     use palette::*;
     let to = match prefix.trim() {
-        "" => "the timestamp alone".to_string(),
+        "" => tr!("rename-to-timestamp"),
         p => format!("{}_…", shorten(p, 24)),
     };
-    let captures = if count == 1 { "capture" } else { "captures" };
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
         ui.label(
-            RichText::new(format!(
-                "Rename the {count} {captures} in the buffer to {to}?"
-            ))
-            .color(TEXT),
+            RichText::new(tr!("rename-question", count = count, to = to.as_str())).color(TEXT),
         );
         let style = |fill, color| ChipStyle {
             fill,
             color,
             height: 26.0,
         };
-        let renamed = "Rename the files; captures still being written keep their name";
         if chip(
             ui,
-            &[Piece::Text("Rename")],
+            &[Piece::Text(&tr!("rename-yes"))],
             &style(PRIMARY, PRIMARY_TEXT),
-            renamed,
+            &tr!("rename-yes-tip"),
         )
         .clicked()
         {
             out.rename = Some(true);
         }
-        let kept = "Leave their names as they are";
-        if chip(ui, &[Piece::Text("Keep names")], &style(CHIP, TEXT), kept).clicked() {
+        let kept = tr!("rename-no");
+        if chip(
+            ui,
+            &[Piece::Text(&kept)],
+            &style(CHIP, TEXT),
+            &tr!("rename-no-tip"),
+        )
+        .clicked()
+        {
             out.rename = Some(false);
         }
     });
@@ -912,15 +937,15 @@ fn tray_card(
         ItemKind::Video { duration_ms } => format!("MP4 {}s", duration_ms / 1000),
     };
     let time = DateTime::<Local>::from(item.created_at).format("%H:%M:%S");
-    let details = format!("{kind} · {} · {time}", item.mode.label());
+    let details = format!("{kind} · {} · {time}", mode_name(item.mode));
     let name = item.path.as_deref().and_then(Path::file_name).map_or_else(
         || format!("#{}", item.id.0),
         |name| name.to_string_lossy().into_owned(),
     );
     let (status, status_color) = match &item.state {
-        ItemState::Ready => ("", MUTED),
-        ItemState::Encoding { .. } => ("Saving…", MUTED),
-        ItemState::Failed(_) => ("Failed", RECORD),
+        ItemState::Ready => (String::new(), MUTED),
+        ItemState::Encoding { .. } => (tr!("card-saving"), MUTED),
+        ItemState::Failed(_) => (tr!("card-failed"), RECORD),
     };
     let hover = match &item.state {
         ItemState::Failed(error) => error.clone(),
@@ -994,7 +1019,7 @@ fn tray_card(
                     Sense::click(),
                 );
                 pin.widget_info(|| {
-                    WidgetInfo::selected(Role::CheckBox, has_file, item.pinned, "Pin")
+                    WidgetInfo::selected(Role::CheckBox, has_file, item.pinned, tr!("card-pin"))
                 });
                 let pin_seen = response.hovered() || pin.hovered() || pin.has_focus();
                 if has_file && (item.pinned || pin_seen) {
@@ -1003,9 +1028,9 @@ fn tray_card(
                     ui.painter().circle_filled(pin_rect.center(), 11.0, BAR);
                     icons::paint(ui.painter(), pin_rect.center(), Icon::Pin, color);
                     let tip = if item.pinned {
-                        "Pinned: kept past the retention period. Click to unpin"
+                        tr!("card-unpin-tip")
                     } else {
-                        "Pin: keep it past the retention period"
+                        tr!("card-pin-tip")
                     };
                     if pin.on_hover_text(tip).clicked() {
                         action = Some(ItemAction::TogglePin);
@@ -1015,20 +1040,17 @@ fn tray_card(
                     ui.painter().text(
                         slot.center(),
                         Align2::CENTER_CENTER,
-                        status,
+                        &status,
                         FontId::new(12.0, FontFamily::Proportional),
                         status_color,
                     );
                 }
                 let hover = if has_file {
-                    format!("{hover}\nDrag into another app to share the file")
+                    format!("{hover}\n{}", tr!("card-drag-tip"))
                 } else {
                     hover
                 };
-                let hover = format!(
-                    "{hover}\nClick to select, Shift or {} to add",
-                    command_key()
-                );
+                let hover = format!("{hover}\n{}", tr!("card-select-tip", key = command_key()));
                 response.on_hover_text(hover);
                 ui.add(Label::new(RichText::new(name).color(TEXT).size(12.0)).truncate());
                 ui.add(Label::new(RichText::new(details).color(MUTED).size(11.0)).truncate());
@@ -1041,20 +1063,20 @@ fn tray_card(
                         height: 26.0,
                     };
                     let buttons = [
-                        (Icon::Copy, "Copy the image", ItemAction::Copy, has_file),
-                        (Icon::Save, "Save a copy as…", ItemAction::Save, has_file),
-                        (Icon::Pen, "Annotate", ItemAction::Annotate, has_file),
+                        (Icon::Copy, tr!("card-copy"), ItemAction::Copy, has_file),
+                        (Icon::Save, tr!("card-save"), ItemAction::Save, has_file),
                         (
-                            Icon::Trash,
-                            "Delete the capture and its file",
-                            ItemAction::Delete,
-                            true,
+                            Icon::Pen,
+                            tr!("card-annotate"),
+                            ItemAction::Annotate,
+                            has_file,
                         ),
+                        (Icon::Trash, tr!("card-delete"), ItemAction::Delete, true),
                     ];
                     for (icon, tooltip, what, enabled) in buttons {
                         let clicked = ui
                             .add_enabled_ui(enabled, |ui| {
-                                chip(ui, &[Piece::Icon(icon)], &style, tooltip).clicked()
+                                chip(ui, &[Piece::Icon(icon)], &style, &tooltip).clicked()
                             })
                             .inner;
                         if clicked {
@@ -1085,41 +1107,38 @@ fn batch_row(ui: &mut Ui, selected: usize) -> Option<BatchAction> {
         color: TEXT,
         height: 28.0,
     };
-    let (what, whose) = match selected {
-        0 => ("all".to_string(), "every capture".to_string()),
-        n => (n.to_string(), format!("the {n} selected")),
-    };
+    let count = selected;
     let mut buttons = vec![
         (
-            format!("Copy {what}"),
-            format!("Copy {whose}"),
+            tr!("batch-copy", count = count),
+            tr!("batch-copy-tip", count = count),
             BatchAction::CopyAll,
         ),
         (
-            format!("Save {what}…"),
-            format!("Save copies of {whose} into a folder"),
+            tr!("batch-save", count = count),
+            tr!("batch-save-tip", count = count),
             BatchAction::SaveAll,
         ),
         (
             "PDF…".to_string(),
-            format!("Export {whose} as one PDF, a page per image"),
+            tr!("batch-pdf-tip", count = count),
             BatchAction::ExportPdf,
         ),
         (
-            format!("Clear {what}"),
-            format!("Take {whose} out of the buffer; the files stay"),
+            tr!("batch-clear", count = count),
+            tr!("batch-clear-tip", count = count),
             BatchAction::Clear,
         ),
     ];
     if selected > 0 {
         buttons.push((
-            format!("Delete {what}"),
-            format!("Delete {whose}; the files go to the Recycle Bin"),
+            tr!("batch-delete", count = count),
+            tr!("batch-delete-tip", count = count),
             BatchAction::Delete,
         ));
         buttons.push((
-            "Deselect".to_string(),
-            "Act on every capture again".to_string(),
+            tr!("batch-deselect"),
+            tr!("batch-deselect-tip"),
             BatchAction::Deselect,
         ));
     }
@@ -1133,6 +1152,7 @@ fn batch_row(ui: &mut Ui, selected: usize) -> Option<BatchAction> {
         .filter(|&(_, at): &(BatchAction, f64)| now - at < CONFIRM_SECS);
     let mut arm = armed;
     let mut action = None;
+    let confirm = tr!("batch-confirm");
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
         for (label, tooltip, what) in &buttons {
@@ -1144,7 +1164,11 @@ fn batch_row(ui: &mut Ui, selected: usize) -> Option<BatchAction> {
                     color: RECORD,
                     height: style.height,
                 };
-                (format!("{label}?"), "Click again to confirm", red)
+                (
+                    tr!("batch-ask", label = label.as_str()),
+                    confirm.as_str(),
+                    red,
+                )
             } else {
                 (label.clone(), tooltip.as_str(), ChipStyle { ..style })
             };
@@ -1188,8 +1212,8 @@ pub fn tray(
             // Less the margin and the border on both sides.
             ui.set_width((width - 26.0).max(1.0));
             let title = match selection.len() {
-                0 => format!("Buffer · {} captures", buffer.len()),
-                n => format!("Buffer · {} captures · {n} selected", buffer.len()),
+                0 => tr!("tray-title", count = buffer.len()),
+                n => tr!("tray-title-selected", count = buffer.len(), selected = n),
             };
             ui.horizontal(|ui| {
                 ui.label(RichText::new(title).color(TEXT).strong());
@@ -1203,10 +1227,10 @@ pub fn tray(
             }
             if buffer.is_empty() {
                 ui.label(
-                    RichText::new(format!(
-                        "Empty — press {} or {}. Captures stack up here instantly.",
-                        shortcut("S"),
-                        shortcut("R")
+                    RichText::new(tr!(
+                        "tray-empty",
+                        capture = shortcut("S"),
+                        record = shortcut("R"),
                     ))
                     .color(MUTED),
                 );

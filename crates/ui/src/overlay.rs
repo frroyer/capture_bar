@@ -7,7 +7,7 @@ use egui::{
     ViewportBuilder, ViewportCommand, ViewportId,
 };
 
-use crate::palette;
+use crate::{palette, tr};
 
 const DIM: Color32 = Color32::from_black_alpha(120);
 /// How close to a handle the pointer has to be, in points.
@@ -267,7 +267,7 @@ impl Overlay {
     pub fn show(&mut self, ctx: &Context) -> Option<OverlayResult> {
         let ppp = ctx.pixels_per_point();
         let builder = ViewportBuilder::default()
-            .with_title("Capture Bar selection")
+            .with_title(tr!("overlay-title"))
             .with_position(pos2(self.origin.0 as f32, self.origin.1 as f32) / ppp)
             .with_inner_size(vec2(self.desktop.width as f32, self.desktop.height as f32) / ppp)
             .with_decorations(false)
@@ -340,7 +340,11 @@ impl Overlay {
             let at = rect.left_top() + vec2(8.0, 8.0);
             paint_label(painter, screen, at, Align2::LEFT_TOP, &window.title);
         }
-        paint_hints(painter, screen, &["Click a window", "Esc cancel"]);
+        paint_hints(
+            painter,
+            screen,
+            &[tr!("hint-click-window"), tr!("hint-cancel")],
+        );
 
         if ui.input(|i| i.key_pressed(Key::Escape)) || response.secondary_clicked() {
             return Some(OverlayResult::Cancelled);
@@ -496,13 +500,13 @@ impl Overlay {
             painter,
             screen,
             &[
-                "Drag for a new region",
-                "Click a window",
-                "Enter or double-click capture",
-                "R record",
-                "Space last region",
-                "Shift lock ratio",
-                "Esc cancel",
+                tr!("hint-drag-region"),
+                tr!("hint-click-window"),
+                tr!("hint-capture"),
+                tr!("hint-record"),
+                tr!("hint-last-region"),
+                tr!("hint-lock-ratio"),
+                tr!("hint-cancel"),
             ],
         );
 
@@ -529,10 +533,7 @@ impl Overlay {
 /// Where the Capture and Record buttons go for a selection at `selection`: under its
 /// right end, or inside it when the screen ends there. Each with its label and whether
 /// it records.
-fn action_buttons(
-    selection: egui::Rect,
-    screen: egui::Rect,
-) -> [(egui::Rect, &'static str, bool); 2] {
+fn action_buttons(selection: egui::Rect, screen: egui::Rect) -> [(egui::Rect, String, bool); 2] {
     const SIZE: egui::Vec2 = vec2(96.0, 30.0);
     const GAP: f32 = 6.0;
     let below = selection.bottom() + 10.0;
@@ -546,7 +547,10 @@ fn action_buttons(
         .clamp(screen.left() + 2.0 * SIZE.x + GAP, screen.right());
     let capture = egui::Rect::from_min_size(pos2(right - SIZE.x, top), SIZE);
     let record = capture.translate(vec2(-(SIZE.x + GAP), 0.0));
-    [(record, "Record  R", true), (capture, "Capture  ⏎", false)]
+    [
+        (record, tr!("overlay-record"), true),
+        (capture, tr!("overlay-capture"), false),
+    ]
 }
 
 fn resize_cursor(edges: Edges) -> CursorIcon {
@@ -559,11 +563,11 @@ fn resize_cursor(edges: Edges) -> CursorIcon {
 }
 
 /// The key hints, as a row of chips along the top of the screen.
-fn paint_hints(painter: &Painter, screen: egui::Rect, hints: &[&str]) {
+fn paint_hints(painter: &Painter, screen: egui::Rect, hints: &[String]) {
     let font = FontId::new(13.0, FontFamily::Proportional);
     let galleys: Vec<_> = hints
         .iter()
-        .map(|hint| painter.layout_no_wrap((*hint).to_owned(), font.clone(), palette::TEXT))
+        .map(|hint| painter.layout_no_wrap(hint.clone(), font.clone(), palette::TEXT))
         .collect();
     let (pad, gap) = (vec2(16.0, 8.0), 6.0);
     let total: f32 = galleys

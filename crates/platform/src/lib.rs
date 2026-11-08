@@ -24,6 +24,11 @@ pub use tray::Tray;
 #[cfg(target_os = "linux")]
 pub struct Tray;
 
+#[cfg(target_os = "linux")]
+impl Tray {
+    pub fn set_labels(&self, _labels: [&str; 2]) {}
+}
+
 /// What the user picked on the tray icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
@@ -34,16 +39,18 @@ pub enum TrayAction {
 /// Add the tray / menu-bar icon. Call on the thread of the event loop, once it runs.
 ///
 /// Not on Linux yet: the `tray-icon` crate links GTK, which NFR-1 rules out.
+/// `labels` name the menu's items: show or hide the bar, and quit.
 pub fn create_tray(
+    labels: [&str; 2],
     on_action: impl Fn(TrayAction) + Send + Sync + 'static,
 ) -> cb_core::CaptureResult<Tray> {
     #[cfg(not(target_os = "linux"))]
     {
-        tray::create(on_action)
+        tray::create(labels, on_action)
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = on_action;
+        let _ = (labels, on_action);
         Err(cb_core::CaptureError::NotImplemented("tray icon"))
     }
 }

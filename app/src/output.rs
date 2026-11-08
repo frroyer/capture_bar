@@ -10,6 +10,7 @@ use std::time::SystemTime;
 
 use cb_buffer::ItemId;
 use cb_core::Frame;
+use cb_ui::tr;
 use chrono::{DateTime, Local};
 
 /// Twice the tray's card size in points, to stay sharp on HiDPI screens.
@@ -360,13 +361,13 @@ fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
                 })
                 .and_then(|frame| copy(clipboard, &frame));
             match copied {
-                Ok(()) => "Copied".into(),
-                Err(e) => format!("Could not copy: {e}"),
+                Ok(()) => tr!("toast-copied"),
+                Err(e) => tr!("toast-copy-failed", error = e.to_string()),
             }
         }
         Job::SaveAs { from, to } => match std::fs::copy(&from, &to) {
-            Ok(_) => format!("Saved a copy as {}", file_name(&to)),
-            Err(e) => format!("Could not save a copy: {e}"),
+            Ok(_) => tr!("toast-saved-copy", file = file_name(&to)),
+            Err(e) => tr!("toast-save-copy-failed", error = e.to_string()),
         },
         Job::Trash(paths) => {
             let mut failed = None;
@@ -377,14 +378,14 @@ fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
                 }
             }
             match (failed, paths.as_slice()) {
-                (None, [one]) => format!("Deleted · {} is in the Recycle Bin", file_name(one)),
-                (None, _) => format!("Deleted {} · the files are in the Recycle Bin", paths.len()),
-                (Some(e), _) => format!("Removed from the buffer · some files stay: {e}"),
+                (None, [one]) => tr!("toast-trashed-one", file = file_name(one)),
+                (None, _) => tr!("toast-trashed", count = paths.len()),
+                (Some(e), _) => tr!("toast-trash-failed", error = e.to_string()),
             }
         }
         Job::ExportPdf { files, to } => match export_pdf(&files, &to) {
-            Ok(pages) => format!("Exported {pages} pages to {}", file_name(&to)),
-            Err(e) => format!("Could not export the PDF: {e}"),
+            Ok(pages) => tr!("toast-exported", count = pages, file = file_name(&to)),
+            Err(e) => tr!("toast-export-failed", error = e.to_string()),
         },
         Job::CopyFiles(files) => {
             let copied = match clipboard {
@@ -396,8 +397,8 @@ fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
                 }),
             };
             match copied {
-                Ok(()) => format!("Copied {} files", files.len()),
-                Err(e) => format!("Could not copy: {e}"),
+                Ok(()) => tr!("toast-copied-files", count = files.len()),
+                Err(e) => tr!("toast-copy-failed", error = e.to_string()),
             }
         }
         Job::SaveAllTo { files, dir } => {
@@ -406,10 +407,12 @@ fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
                 .filter(|from| save_into(from, &dir).is_ok())
                 .count();
             match files.len() - saved {
-                0 => format!("Saved {saved} copies in {}", file_name(&dir)),
-                failed => format!(
-                    "Saved {saved} copies in {}; {failed} failed",
-                    file_name(&dir)
+                0 => tr!("toast-saved-all", count = saved, folder = file_name(&dir)),
+                failed => tr!(
+                    "toast-saved-some",
+                    count = saved,
+                    folder = file_name(&dir),
+                    failed = failed,
                 ),
             }
         }
@@ -455,8 +458,8 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> (mpsc::Sender<Job>, mpsc::Rece
                             }
                         }
                         let message = match failed {
-                            0 => "Renamed".to_string(),
-                            n => format!("Renamed, but {n} files could not be"),
+                            0 => tr!("toast-renamed"),
+                            n => tr!("toast-renamed-some", count = n),
                         };
                         let _ = done_tx.send(Done::Message(message));
                         wake();

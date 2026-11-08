@@ -643,6 +643,19 @@ pub struct Settings {
     pub system_audio: bool,
     /// Record the microphone. The bar's mic toggle is the same setting.
     pub microphone: bool,
+    /// The language of the interface (NFR-14).
+    pub language: Language,
+}
+
+/// The language of the interface (NFR-14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Language {
+    /// The system's language when there is a translation for it, else English.
+    #[default]
+    Auto,
+    En,
+    Fr,
 }
 
 impl Settings {
@@ -685,6 +698,7 @@ impl Default for Settings {
             frame_rate: 30,
             system_audio: true,
             microphone: true,
+            language: Language::Auto,
         }
     }
 }

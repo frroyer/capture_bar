@@ -14,6 +14,16 @@ const ICON_SIZE: u32 = 32;
 /// Dropping this removes the icon.
 pub struct Tray {
     _icon: TrayIcon,
+    toggle: MenuItem,
+    quit: MenuItem,
+}
+
+impl Tray {
+    /// Rename the menu's two items: show or hide the bar, and quit.
+    pub fn set_labels(&self, [toggle, quit]: [&str; 2]) {
+        self.toggle.set_text(toggle);
+        self.quit.set_text(quit);
+    }
 }
 
 fn platform_error(e: impl std::fmt::Display) -> CaptureError {
@@ -21,9 +31,12 @@ fn platform_error(e: impl std::fmt::Display) -> CaptureError {
 }
 
 /// Must run on the thread of the event loop. `on_action` runs on that thread too.
-pub fn create(on_action: impl Fn(TrayAction) + Send + Sync + 'static) -> CaptureResult<Tray> {
-    let toggle = MenuItem::new("Show or hide the bar", true, None);
-    let quit = MenuItem::new("Quit Capture Bar", true, None);
+pub fn create(
+    [toggle, quit]: [&str; 2],
+    on_action: impl Fn(TrayAction) + Send + Sync + 'static,
+) -> CaptureResult<Tray> {
+    let toggle = MenuItem::new(toggle, true, None);
+    let quit = MenuItem::new(quit, true, None);
     let menu = Menu::new();
     menu.append(&toggle).map_err(platform_error)?;
     menu.append(&quit).map_err(platform_error)?;
@@ -58,7 +71,11 @@ pub fn create(on_action: impl Fn(TrayAction) + Send + Sync + 'static) -> Capture
         .with_menu_on_left_click(false)
         .build()
         .map_err(platform_error)?;
-    Ok(Tray { _icon: icon })
+    Ok(Tray {
+        _icon: icon,
+        toggle,
+        quit,
+    })
 }
 
 /// A white shutter ring on a blue disc: readable on light and dark taskbars.

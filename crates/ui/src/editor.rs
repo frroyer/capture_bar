@@ -15,6 +15,7 @@ use egui::{
 
 use crate::icons::Icon;
 use crate::{chip, palette, ChipStyle, Piece, H_IN_GROUP, SEMIBOLD};
+use crate::{i18n, tr};
 
 /// What the user decided, which ends the editor.
 #[derive(Debug, Clone, PartialEq)]
@@ -36,24 +37,25 @@ enum Tool {
     Crop,
 }
 
-/// Each tool with its icon, its name and the key that picks it.
+/// Each tool with its icon, the message id of its name and the key that picks it.
 const TOOLS: [(Tool, Icon, &str, Key); 7] = [
-    (Tool::Arrow, Icon::ArrowTool, "Arrow", Key::A),
-    (Tool::Rect, Icon::BoxTool, "Box", Key::R),
-    (Tool::Pen, Icon::Pencil, "Pen", Key::P),
-    (Tool::Text, Icon::TextTool, "Text", Key::T),
-    (Tool::Highlight, Icon::Highlighter, "Highlight", Key::H),
-    (Tool::Pixelate, Icon::Mosaic, "Pixelate", Key::B),
-    (Tool::Crop, Icon::Crop, "Crop", Key::C),
+    (Tool::Arrow, Icon::ArrowTool, "tool-arrow", Key::A),
+    (Tool::Rect, Icon::BoxTool, "tool-box", Key::R),
+    (Tool::Pen, Icon::Pencil, "tool-pen", Key::P),
+    (Tool::Text, Icon::TextTool, "tool-text", Key::T),
+    (Tool::Highlight, Icon::Highlighter, "tool-highlight", Key::H),
+    (Tool::Pixelate, Icon::Mosaic, "tool-pixelate", Key::B),
+    (Tool::Crop, Icon::Crop, "tool-crop", Key::C),
 ];
 
+/// Each colour with the message id of its name.
 const COLORS: [(Rgba, &str); 6] = [
-    (Rgba([0xFF, 0x3B, 0x30, 0xFF]), "Red"),
-    (Rgba([0xFF, 0xCC, 0x00, 0xFF]), "Yellow"),
-    (Rgba([0x34, 0xC7, 0x59, 0xFF]), "Green"),
-    (Rgba([0x3B, 0x82, 0xF6, 0xFF]), "Blue"),
-    (Rgba([0x11, 0x11, 0x11, 0xFF]), "Black"),
-    (Rgba([0xFF, 0xFF, 0xFF, 0xFF]), "White"),
+    (Rgba([0xFF, 0x3B, 0x30, 0xFF]), "color-red"),
+    (Rgba([0xFF, 0xCC, 0x00, 0xFF]), "color-yellow"),
+    (Rgba([0x34, 0xC7, 0x59, 0xFF]), "color-green"),
+    (Rgba([0x3B, 0x82, 0xF6, 0xFF]), "color-blue"),
+    (Rgba([0x11, 0x11, 0x11, 0xFF]), "color-black"),
+    (Rgba([0xFF, 0xFF, 0xFF, 0xFF]), "color-white"),
 ];
 
 /// A highlight lets what is under it show through.
@@ -325,12 +327,12 @@ impl Editor {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
             if self.confirm_discard {
-                ui.label(egui::RichText::new("Discard your changes?").color(TEXT));
+                ui.label(egui::RichText::new(tr!("editor-discard-question")).color(TEXT));
                 if chip(
                     ui,
-                    &[Piece::Text("Discard")],
+                    &[Piece::Text(&tr!("editor-discard"))],
                     &style(false),
-                    "Close without saving",
+                    &tr!("editor-discard-tip"),
                 )
                 .clicked()
                 {
@@ -338,9 +340,9 @@ impl Editor {
                 }
                 if chip(
                     ui,
-                    &[Piece::Text("Keep editing")],
+                    &[Piece::Text(&tr!("editor-keep"))],
                     &style(true),
-                    "Back to the annotations",
+                    &tr!("editor-keep-tip"),
                 )
                 .clicked()
                 {
@@ -350,7 +352,7 @@ impl Editor {
             }
             let left = ui.min_rect().left();
             for (tool, icon, name, key) in TOOLS {
-                let tip = format!("{name} ({})", key.name());
+                let tip = format!("{} ({})", i18n::text(name, None), key.name());
                 if chip(ui, &[Piece::Icon(icon)], &style(self.tool == tool), &tip).clicked() {
                     self.commit_text();
                     self.tool = tool;
@@ -358,7 +360,7 @@ impl Editor {
             }
             ui.add_space(8.0);
             for (color, name) in COLORS {
-                if swatch(ui, color, self.color == color, name).clicked() {
+                if swatch(ui, color, self.color == color, &i18n::text(name, None)).clicked() {
                     self.color = color;
                 }
             }
@@ -368,7 +370,7 @@ impl Editor {
                     ui,
                     &[Piece::Icon(Icon::Undo)],
                     &style(false),
-                    "Undo (Ctrl+Z)",
+                    &tr!("editor-undo-tip"),
                 )
                 .clicked()
             });
@@ -380,7 +382,7 @@ impl Editor {
                     ui,
                     &[Piece::Icon(Icon::Redo)],
                     &style(false),
-                    "Redo (Ctrl+Y)",
+                    &tr!("editor-redo-tip"),
                 )
                 .clicked()
             });
@@ -388,8 +390,9 @@ impl Editor {
                 self.history.redo();
             }
             let original = ui.add_enabled_ui(self.history.can_undo(), |ui| {
-                let tip = "Back to the capture as taken; Redo brings the annotations back";
-                chip(ui, &[Piece::Text("Original")], &style(false), tip).clicked()
+                let tip = tr!("editor-original-tip");
+                let label = tr!("editor-original");
+                chip(ui, &[Piece::Text(&label)], &style(false), &tip).clicked()
             });
             if original.inner {
                 self.commit_text();
@@ -404,9 +407,9 @@ impl Editor {
                 };
                 if chip(
                     ui,
-                    &[Piece::Text("Save")],
+                    &[Piece::Text(&tr!("editor-save"))],
                     &primary,
-                    "Save into the capture (Ctrl+S)",
+                    &tr!("editor-save-tip"),
                 )
                 .clicked()
                 {
@@ -414,9 +417,9 @@ impl Editor {
                 }
                 if chip(
                     ui,
-                    &[Piece::Text("Cancel")],
+                    &[Piece::Text(&tr!("editor-cancel"))],
                     &style(false),
-                    "Close without saving (Esc)",
+                    &tr!("editor-cancel-tip"),
                 )
                 .clicked()
                 {
@@ -805,6 +808,14 @@ fn paint(painter: &egui::Painter, view: View, shape: &Shape) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_tool_and_colour_has_a_name() {
+        let ids = TOOLS.iter().map(|t| t.2).chain(COLORS.iter().map(|c| c.1));
+        for id in ids {
+            assert_ne!(i18n::text(id, None), id, "no message {id}");
+        }
+    }
 
     fn editor() -> Editor {
         let base = cb_core::Frame {
