@@ -265,7 +265,46 @@ struct ActiveRecording {
     handle: Box<dyn StreamHandle>,
     /// Its place in the buffer, there from the start.
     item: ItemId,
-    started: Instant,
+    clock: Stopwatch,
+}
+
+/// Recorded time: runs from the start, stands still while paused (US-5.2). The video
+/// leaves no gap for a pause either, so the two agree.
+#[derive(Debug, Clone, Copy)]
+struct Stopwatch {
+    /// Time banked before the current run.
+    banked: Duration,
+    /// When the current run began; none while paused.
+    running_since: Option<Instant>,
+}
+
+impl Stopwatch {
+    fn start(now: Instant) -> Self {
+        Self {
+            banked: Duration::ZERO,
+            running_since: Some(now),
+        }
+    }
+
+    fn paused(&self) -> bool {
+        self.running_since.is_none()
+    }
+
+    fn elapsed(&self, now: Instant) -> Duration {
+        self.banked
+            + self
+                .running_since
+                .map_or(Duration::ZERO, |since| now - since)
+    }
+
+    fn pause(&mut self, now: Instant) {
+        self.banked = self.elapsed(now);
+        self.running_since = None;
+    }
+
+    fn resume(&mut self, now: Instant) {
+        self.running_since.get_or_insert(now);
+    }
 }
 
 struct App {
@@ -715,7 +754,8 @@ impl App {
                 self.begin_capture(mode);
             }
             Command::ToggleRecording => self.toggle_recording(),
-            Command::TogglePause => self.flash(tr!("toast-pause-todo")),
+            Command::TogglePause => self.toggle_pause(),
+            Command::DiscardRecording => self.discard_recording(),
             Command::ToggleBuffer => self.bar.tray_open = !self.bar.tray_open,
             Command::ToggleBar if self.taskbar != Taskbar::Off => {
                 // Minimized: the shortcut brings the bar back, as its taskbar button does.
@@ -1449,6 +1489,7 @@ impl App {
     fn toggle_recording(&mut self) {
         if let Some(recording) = self.recording.take() {
             self.bar.recording = false;
+            self.bar.paused = false;
             // Stopping returns at once; `poll_recordings` gets the file.
             recording.handle.stop();
             return;
@@ -1460,6 +1501,35 @@ impl App {
                 self.overlay_records = self.overlay_request.is_some();
             }
         }
+    }
+
+    /// Pause or resume the recording (FR-15); nothing to do without one.
+    fn toggle_pause(&mut self) {
+        let Some(recording) = &mut self.recording else {
+            return;
+        };
+        let now = Instant::now();
+        if recording.clock.paused() {
+            recording.clock.resume(now);
+            recording.handle.resume();
+        } else {
+            recording.clock.pause(now);
+            recording.handle.pause();
+        }
+        self.bar.paused = recording.clock.paused();
+    }
+
+    /// Stop the recording and drop it from the buffer (FR-19): `poll_recordings` sends
+    /// the finished file to the Recycle Bin, as for a card deleted while recording.
+    fn discard_recording(&mut self) {
+        let Some(recording) = self.recording.take() else {
+            return;
+        };
+        self.bar.recording = false;
+        self.bar.paused = false;
+        self.buffer.remove(recording.item);
+        recording.handle.stop();
+        self.flash(tr!("toast-record-discarded"));
     }
 
     /// The recording shows in the buffer at once, as "saving" until its file is complete.
@@ -1484,7 +1554,7 @@ impl App {
                 self.recording = Some(ActiveRecording {
                     handle,
                     item,
-                    started: Instant::now(),
+                    clock: Stopwatch::start(Instant::now()),
                 });
                 self.bar.recording = true;
             }
@@ -1501,6 +1571,7 @@ impl App {
             if self.recording.as_ref().is_some_and(|r| r.item == item) {
                 self.recording = None;
                 self.bar.recording = false;
+                self.bar.paused = false;
             }
             let Some(found) = self.buffer.get_mut(item) else {
                 // Deleted while it was recording.
@@ -1968,7 +2039,7 @@ impl eframe::App for App {
         self.track_position(ctx);
 
         if let Some(recording) = &self.recording {
-            self.bar.elapsed_secs = recording.started.elapsed().as_secs();
+            self.bar.elapsed_secs = recording.clock.elapsed(Instant::now()).as_secs();
         }
 
         if std::mem::take(&mut self.focus_bar) {
@@ -2036,6 +2107,21 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// US-5.2: the timer counts recorded time only, so pauses do not add to it.
+    #[test]
+    fn the_recording_timer_stands_still_while_paused() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let mut clock = Stopwatch::start(t0);
+        assert_eq!(clock.elapsed(t0 + s(10)), s(10));
+        clock.pause(t0 + s(10));
+        assert!(clock.paused());
+        assert_eq!(clock.elapsed(t0 + s(25)), s(10));
+        clock.resume(t0 + s(25));
+        clock.resume(t0 + s(26)); // a second resume changes nothing
+        assert_eq!(clock.elapsed(t0 + s(30)), s(15));
+    }
 
     #[test]
     fn the_tray_folds_after_the_cursor_has_been_away_a_while() {

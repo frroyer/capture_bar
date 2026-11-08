@@ -51,6 +51,8 @@ const PREVIEW_FRAME: f32 = 0.25;
 pub struct BarState {
     pub mode: CaptureMode,
     pub recording: bool,
+    /// The recording is paused: the timer stands still and Pause reads Resume.
+    pub paused: bool,
     pub elapsed_secs: u64,
     pub tray_open: bool,
     pub mic_on: bool,
@@ -401,6 +403,50 @@ fn grip(ui: &mut Ui, vertical: bool, out: &mut BarOutput) {
     }
 }
 
+/// Discard the recording (FR-19): the chip or Esc asks first, turning the chip red;
+/// a second press within CONFIRM_SECS discards.
+fn discard_chip(ui: &mut Ui, out: &mut BarOutput) {
+    use palette::*;
+    let armed_id = ui.make_persistent_id("discard confirm");
+    let now = ui.input(|i| i.time);
+    let armed = ui
+        .data(|d| d.get_temp::<f64>(armed_id))
+        .is_some_and(|at| now - at < CONFIRM_SECS);
+    let style = if armed {
+        ChipStyle::new(RECORD_BG, RECORD)
+    } else {
+        ChipStyle::new(CHIP, TEXT)
+    };
+    let label = tr!("bar-discard");
+    let ask = tr!("batch-ask", label = label.as_str());
+    let pieces = if armed {
+        [Piece::Icon(Icon::Trash), Piece::Text(&ask)]
+    } else {
+        [Piece::Icon(Icon::Trash), Piece::Text(&label)]
+    };
+    let tip = if armed {
+        tr!("bar-discard-confirm")
+    } else {
+        tr!("bar-discard-tip")
+    };
+    let pressed = chip(ui, &pieces, &style, &tip).clicked()
+        || ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    if !pressed {
+        return;
+    }
+    if armed {
+        ui.data_mut(|d| d.remove::<f64>(armed_id));
+        out.commands.push(Command::DiscardRecording);
+    } else {
+        ui.data_mut(|d| d.insert_temp(armed_id, now));
+        ui.ctx().request_repaint_after_secs(CONFIRM_SECS as f32);
+    }
+}
+
+/// Destructive buttons ask once: the first press turns them red with a question mark,
+/// a second press within this many seconds does it. Otherwise they turn back.
+const CONFIRM_SECS: f64 = 3.0;
+
 /// Draw the collapsed pill (M2.3): the count, and the time while recording.
 pub fn pill(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
     use palette::*;
@@ -523,16 +569,31 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                     {
                         out.commands.push(Command::ToggleRecording);
                     }
+                    let pause_key = shortcut("P");
+                    let (icon, label, tip) = if state.paused {
+                        (
+                            Icon::Play,
+                            tr!("bar-resume"),
+                            tr!("bar-resume-tip", key = pause_key.as_str()),
+                        )
+                    } else {
+                        (
+                            Icon::Pause,
+                            tr!("bar-pause"),
+                            tr!("bar-pause-tip", key = pause_key.as_str()),
+                        )
+                    };
                     if chip(
                         ui,
-                        &[Piece::Icon(Icon::Pause), Piece::Text(&tr!("bar-pause"))],
+                        &[Piece::Icon(icon), Piece::Text(&label)],
                         &ChipStyle::new(CHIP, TEXT),
-                        &tr!("bar-pause-tip", key = shortcut("P")),
+                        &tip,
                     )
                     .clicked()
                     {
                         out.commands.push(Command::TogglePause);
                     }
+                    discard_chip(ui, &mut out);
                 } else if chip(
                     ui,
                     &[
@@ -1165,9 +1226,7 @@ fn batch_row(ui: &mut Ui, selected: usize) -> Option<BatchAction> {
             BatchAction::Deselect,
         ));
     }
-    // Clear and Delete ask once: the first click turns the button red with a question
-    // mark, a second click within CONFIRM_SECS does it. Otherwise it turns back.
-    const CONFIRM_SECS: f64 = 3.0;
+    // Clear and Delete ask once (CONFIRM_SECS).
     let armed_id = ui.make_persistent_id("batch confirm");
     let now = ui.input(|i| i.time);
     let armed: Option<(BatchAction, f64)> = ui
@@ -1490,6 +1549,64 @@ mod tests {
 
     /// Runs the tray with the keyboard in the prefix, types `typed`, then presses `key`.
     /// Returns the prefix, whether it was reported done, and the texts drawn.
+    /// The recording bar's commands for one frame per `(time, esc pressed)`.
+    fn recording_bar_frames(frames: &[(f64, bool)]) -> Vec<Vec<Command>> {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx, None);
+        let state = BarState {
+            recording: true,
+            ..Default::default()
+        };
+        let esc = |pressed| egui::Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frames
+            .iter()
+            .map(|&(time, pressed)| {
+                let input = egui::RawInput {
+                    time: Some(time),
+                    events: if pressed {
+                        vec![esc(true), esc(false)]
+                    } else {
+                        vec![]
+                    },
+                    ..Default::default()
+                };
+                let mut commands = Vec::new();
+                let mut output = ctx.run_ui(input, |ui| {
+                    commands = bar(ui, &state, &Buffer::new()).commands;
+                });
+                output.textures_delta.clear();
+                commands
+            })
+            .collect()
+    }
+
+    /// FR-19 / US-5.2 AC: Esc asks before discarding; a second Esc discards.
+    #[test]
+    fn esc_asks_before_discarding_a_recording() {
+        let discarded = |frames: &[(f64, bool)]| {
+            recording_bar_frames(frames)
+                .iter()
+                .position(|c| c.contains(&Command::DiscardRecording))
+        };
+        assert_eq!(discarded(&[(0.0, true), (0.1, false)]), None, "one Esc");
+        assert_eq!(
+            discarded(&[(0.0, true), (0.5, false), (1.0, true)]),
+            Some(2),
+            "second Esc"
+        );
+        assert_eq!(
+            discarded(&[(0.0, true), (5.0, false), (5.1, true)]),
+            None,
+            "the question expired, so the late Esc only asks again"
+        );
+    }
+
     fn type_in_tray(
         prefix: &str,
         typed: &str,
