@@ -48,6 +48,11 @@ pub enum Job {
         files: Vec<PathBuf>,
         dir: PathBuf,
     },
+    /// Rename captures' files to a new prefix, keeping their timestamps (FR-30).
+    Rename {
+        files: Vec<(ItemId, PathBuf)>,
+        prefix: String,
+    },
     /// Make the thumbnail of a capture restored from the last run (FR-25).
     Thumbnail {
         item: ItemId,
@@ -69,6 +74,11 @@ pub enum Done {
     ClipboardFailed(String),
     /// How a one-off job went, for a toast.
     Message(String),
+    /// A capture's file has a new name.
+    Renamed {
+        item: ItemId,
+        path: PathBuf,
+    },
 }
 
 /// The prefix new captures get until the user picks one (FR-30).
@@ -80,6 +90,66 @@ pub fn clean_prefix(prefix: &str) -> String {
         .chars()
         .filter(|c| !c.is_control() && !r#"<>:"/\|?*"#.contains(*c))
         .collect()
+}
+
+/// Whether `s` is a timestamp as [`file_name`] writes it: `YYYY-MM-DD_HH-MM-SS`.
+fn is_stamp(s: &str) -> bool {
+    s.len() == 19
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 | 13 | 16 => b == b'-',
+            10 => b == b'_',
+            _ => b.is_ascii_digit(),
+        })
+}
+
+/// The timestamp at the end of `s`, if it ends with one.
+fn stamp_of(s: &str) -> Option<&str> {
+    s.get(s.len().checked_sub(19)?..).filter(|t| is_stamp(t))
+}
+
+/// The name `file` would have with `prefix`, keeping its timestamp: `old_<stamp>-2.png`
+/// becomes `new_<stamp>.png` (a clash is resolved when renaming). `None` when the name
+/// holds no timestamp of ours, or would not change.
+pub fn renamed(file: &str, prefix: &str) -> Option<String> {
+    let (stem, extension) = file.rsplit_once('.')?;
+    // A `-N` added to avoid overwriting belongs to the old name only.
+    let stamp = stem
+        .rsplit_once('-')
+        .filter(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|(core, _)| stamp_of(core))
+        .or_else(|| stamp_of(stem))?;
+    let name = match clean_prefix(prefix).trim() {
+        "" => format!("{stamp}.{extension}"),
+        prefix => format!("{prefix}_{stamp}.{extension}"),
+    };
+    (name != file).then_some(name)
+}
+
+/// Move `from` to `name` in the same folder, or `-2`, `-3`… when that is taken: a file is
+/// never overwritten. Returns where it went.
+fn rename_unique(from: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let target = from.with_file_name(name);
+    let stem = target
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let extension = target
+        .extension()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    for n in 1u32.. {
+        let candidate = match n {
+            1 => target.clone(),
+            n => target.with_file_name(format!("{stem}-{n}.{extension}")),
+        };
+        if !candidate.exists() {
+            std::fs::rename(from, &candidate)?;
+            return Ok(candidate);
+        }
+    }
+    unreachable!("every name from -2 to -{} exists", u32::MAX)
 }
 
 /// `<prefix>_<local date and time>.png`, or the timestamp alone without a prefix (FR-30).
@@ -248,7 +318,7 @@ fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
                 ),
             }
         }
-        Job::Store { .. } | Job::Copy(_) | Job::Thumbnail { .. } => {
+        Job::Store { .. } | Job::Copy(_) | Job::Thumbnail { .. } | Job::Rename { .. } => {
             unreachable!("not a one-off job")
         }
     }
@@ -266,6 +336,31 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> (mpsc::Sender<Job>, mpsc::Rece
             for job in jobs {
                 let frame = match &job {
                     Job::Store { frame, .. } | Job::Copy(frame) => frame,
+                    Job::Rename { files, prefix } => {
+                        let mut failed = 0;
+                        for (item, path) in files {
+                            let name = path
+                                .file_name()
+                                .and_then(|n| renamed(&n.to_string_lossy(), prefix));
+                            let Some(name) = name else { continue };
+                            match rename_unique(path, &name) {
+                                Ok(path) => {
+                                    let _ = done_tx.send(Done::Renamed { item: *item, path });
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, ?path, "not renamed");
+                                    failed += 1;
+                                }
+                            }
+                        }
+                        let message = match failed {
+                            0 => "Renamed".to_string(),
+                            n => format!("Renamed, but {n} files could not be"),
+                        };
+                        let _ = done_tx.send(Done::Message(message));
+                        wake();
+                        continue;
+                    }
                     Job::Thumbnail { item, path } => {
                         match read_thumbnail(path) {
                             Ok(thumbnail) => {
@@ -341,6 +436,70 @@ mod tests {
     }
 
     #[test]
+    fn renaming_keeps_the_timestamp_and_drops_the_old_clash_number() {
+        let stamp = "2026-11-08_10-12-03";
+        assert_eq!(
+            renamed(&format!("old_{stamp}.png"), "new"),
+            Some(format!("new_{stamp}.png"))
+        );
+        assert_eq!(
+            renamed(&format!("old_{stamp}-2.png"), "new"),
+            Some(format!("new_{stamp}.png"))
+        );
+        assert_eq!(
+            renamed(&format!("{stamp}.png"), "new"),
+            Some(format!("new_{stamp}.png"))
+        );
+        assert_eq!(
+            renamed(&format!("old_{stamp}.png"), " "),
+            Some(format!("{stamp}.png"))
+        );
+        assert_eq!(
+            renamed(&format!("a-b_{stamp}.png"), "été"),
+            Some(format!("été_{stamp}.png"))
+        );
+        assert_eq!(
+            renamed(&format!("new_{stamp}.png"), "new"),
+            None,
+            "already named so"
+        );
+        assert_eq!(renamed("holiday.png", "new"), None, "not one of ours");
+        assert_eq!(renamed("é.png", "new"), None);
+    }
+
+    #[test]
+    fn a_rename_never_overwrites() {
+        let dir = std::env::temp_dir().join(format!("cb-rename-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stamp = "2026-11-08_10-12-03";
+        let (a, taken) = (
+            dir.join(format!("old_{stamp}.png")),
+            dir.join(format!("new_{stamp}.png")),
+        );
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&taken, "keep me").unwrap();
+
+        let (jobs, done) = spawn(|| {});
+        jobs.send(Job::Rename {
+            files: vec![(ItemId(1), a.clone())],
+            prefix: "new".into(),
+        })
+        .unwrap();
+        let moved = done
+            .iter()
+            .find_map(|d| match d {
+                Done::Renamed { item, path } => Some((item, path)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(moved, (ItemId(1), dir.join(format!("new_{stamp}-2.png"))));
+        assert!(!a.exists());
+        assert_eq!(std::fs::read_to_string(&taken).unwrap(), "keep me");
+        assert_eq!(std::fs::read_to_string(&moved.1).unwrap(), "a");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn prefixes_cannot_leave_the_folder_or_break_the_name() {
         assert_eq!(clean_prefix(r#"../a\b:c*d?"e<f>g|h/"#), "..abcdefgh");
         assert_eq!(clean_prefix("tab\there\n"), "tabhere");
@@ -365,7 +524,7 @@ mod tests {
                     thumbnail_seen = Some((item, thumbnail.width));
                     None
                 }
-                Done::ClipboardFailed(_) | Done::Message(_) => None,
+                Done::ClipboardFailed(_) | Done::Message(_) | Done::Renamed { .. } => None,
             })
             .unwrap();
         assert_eq!(stored.0, ItemId(item));

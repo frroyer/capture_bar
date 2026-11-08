@@ -383,7 +383,7 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 - AC: an existing file is never overwritten: a second capture in the same second gets `-2`.
 - AC: prefix and folder are remembered between launches.
 
-- [x] Prefix and folder panel, opened from a bar chip and a shortcut
+- [x] Prefix and folder panel, opened from a bar chip and a shortcut — moved to the tray's title line (folder chip + prefix field) to keep the bar simple; ⌥⇧L opens the tray there. A new prefix offers to rename the captures in the buffer, keeping their timestamps and never overwriting
 - [x] Native folder picker on a worker thread — rfd, parented to the bar so it opens in front; Windows verified
 - [x] Naming and no-overwrite in the output worker
 
