@@ -401,7 +401,7 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: the blur is irreversible in the exported PNG.
 
-- [ ] Pixelate/blur tool; crop tool
+- [x] Pixelate/blur tool; crop tool — Pixelate (B) averages blocks four line-widths wide (at least 12 px), over the capture and any annotation drawn before it; Crop (C) shades what it leaves out and cuts the saved image after everything is drawn, the last crop counting. Both are layers like the others: undo, Original and reopening work on them; the capture as taken stays in `.buffer/originals`
 
 ### E8 · Settings, permissions & onboarding
 

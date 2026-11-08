@@ -75,6 +75,13 @@ pub enum Shape {
         color: Rgba,
         size: f32,
     },
+    /// Squares of `block` pixels, each one flat colour: the average of what it covers,
+    /// annotations drawn before it included (US-7.2). What was under it cannot be read
+    /// back from the saved image.
+    Pixelate { min: Point, max: Point, block: f32 },
+    /// Keep only this part of the image. The last crop counts, applied after everything
+    /// else is drawn.
+    Crop { min: Point, max: Point },
 }
 
 /// The opposite corners of a drag, as top-left and bottom-right.
@@ -205,19 +212,150 @@ pub fn flatten(frame: &Frame, shapes: &[Shape], font: &[u8]) -> Result<Frame, Fl
         return Ok(Frame { rgba, ..*frame });
     }
 
+    // Vector shapes are drawn in runs: a pixelate works on the pixels below it so far.
+    let mut run = Vec::new();
+    let mut crop = None;
+    for shape in shapes {
+        match shape {
+            Shape::Pixelate { min, max, block } => {
+                render(&mut rgba, width, height, &run, font)?;
+                run.clear();
+                let m = mosaic(&rgba, frame.width, frame.height, *min, *max, *block);
+                m.fill(&mut rgba, frame.width);
+            }
+            Shape::Crop { min, max } => crop = Some((*min, *max)),
+            shape => run.push(shape),
+        }
+    }
+    render(&mut rgba, width, height, &run, font)?;
+    let out = Frame { rgba, ..*frame };
+    Ok(match crop {
+        Some((min, max)) => cropped(&out, min, max),
+        None => out,
+    })
+}
+
+fn render(
+    rgba: &mut [u8],
+    width: u16,
+    height: u16,
+    shapes: &[&Shape],
+    font: &[u8],
+) -> Result<(), FlattenError> {
+    if shapes.is_empty() {
+        return Ok(());
+    }
     let mut ctx = RenderContext::new(width, height);
     for shape in shapes {
         draw(&mut ctx, shape, font)?;
     }
-    premultiply(&mut rgba);
-    let target = PixmapMut::new(width, height, &mut rgba).ok_or(FlattenError::BadFrame)?;
+    premultiply(rgba);
+    let target = PixmapMut::new(width, height, rgba).ok_or(FlattenError::BadFrame)?;
     let settings = RasterizerSettings {
         composite_mode: CompositeMode::SrcOver,
         ..Default::default()
     };
     ctx.render_with(target, &mut Resources::new(), settings);
-    unpremultiply(&mut rgba);
-    Ok(Frame { rgba, ..*frame })
+    unpremultiply(rgba);
+    Ok(())
+}
+
+/// The whole image pixels a rectangle covers, kept inside a `width`×`height` image:
+/// `(x0, y0, x1, y1)`, ends excluded.
+pub fn pixel_rect(min: Point, max: Point, width: u32, height: u32) -> (u32, u32, u32, u32) {
+    let clamp = |v: f32, limit: u32| v.clamp(0.0, limit as f32) as u32;
+    (
+        clamp(min.x.floor(), width),
+        clamp(min.y.floor(), height),
+        clamp(max.x.ceil(), width),
+        clamp(max.y.ceil(), height),
+    )
+}
+
+/// The block colours of a [`Shape::Pixelate`], so the editor shows what will be saved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mosaic {
+    /// Top-left pixel of the first block.
+    pub x0: u32,
+    pub y0: u32,
+    /// The covered area ends here (excluded); the last blocks may be cut short.
+    pub x1: u32,
+    pub y1: u32,
+    /// Side of a block, in image pixels.
+    pub block: u32,
+    pub cols: u32,
+    pub rows: u32,
+    /// Row by row, straight alpha.
+    pub colors: Vec<[u8; 4]>,
+}
+
+impl Mosaic {
+    /// Paint each block's colour over the pixels it covers.
+    fn fill(&self, rgba: &mut [u8], width: u32) {
+        for y in self.y0..self.y1 {
+            let row = (y - self.y0) / self.block;
+            for x in self.x0..self.x1 {
+                let color = self.colors[(row * self.cols + (x - self.x0) / self.block) as usize];
+                let i = ((y * width + x) * 4) as usize;
+                rgba[i..i + 4].copy_from_slice(&color);
+            }
+        }
+    }
+}
+
+/// The average colour of each `block`-sized square over `min`..`max` of an RGBA image.
+pub fn mosaic(rgba: &[u8], width: u32, height: u32, min: Point, max: Point, block: f32) -> Mosaic {
+    let (x0, y0, x1, y1) = pixel_rect(min, max, width, height);
+    let block = block.round().max(2.0) as u32;
+    let cols = (x1 - x0).div_ceil(block);
+    let rows = (y1 - y0).div_ceil(block);
+    let mut sums = vec![[0u64; 5]; (cols * rows) as usize];
+    for y in y0..y1 {
+        let row = (y - y0) / block;
+        for x in x0..x1 {
+            let sum = &mut sums[(row * cols + (x - x0) / block) as usize];
+            let i = ((y * width + x) * 4) as usize;
+            for (s, &c) in sum.iter_mut().zip(&rgba[i..i + 4]) {
+                *s += u64::from(c);
+            }
+            sum[4] += 1;
+        }
+    }
+    let colors = sums
+        .iter()
+        .map(|s| {
+            let n = s[4].max(1);
+            [0, 1, 2, 3].map(|c| ((s[c] + n / 2) / n) as u8)
+        })
+        .collect();
+    Mosaic {
+        x0,
+        y0,
+        x1,
+        y1,
+        block,
+        cols,
+        rows,
+        colors,
+    }
+}
+
+/// `frame` cut down to `min`..`max`; unchanged if that holds no pixel.
+fn cropped(frame: &Frame, min: Point, max: Point) -> Frame {
+    let (x0, y0, x1, y1) = pixel_rect(min, max, frame.width, frame.height);
+    if x1 <= x0 || y1 <= y0 {
+        return frame.clone();
+    }
+    let row = |y: u32| {
+        let start = ((y * frame.width + x0) * 4) as usize;
+        &frame.rgba[start..start + ((x1 - x0) * 4) as usize]
+    };
+    Frame {
+        width: x1 - x0,
+        height: y1 - y0,
+        rgba: (y0..y1).flat_map(row).copied().collect(),
+        captured_at: frame.captured_at,
+    }
 }
 
 fn draw(ctx: &mut RenderContext, shape: &Shape, font: &[u8]) -> Result<(), FlattenError> {
@@ -282,6 +420,8 @@ fn draw(ctx: &mut RenderContext, shape: &Shape, font: &[u8]) -> Result<(), Flatt
             ctx.set_paint(color.vello());
             ctx.fill_path(&path);
         }
+        // Pixel operations, done by `flatten` between runs of vector shapes.
+        Shape::Pixelate { .. } | Shape::Crop { .. } => {}
     }
     Ok(())
 }
@@ -565,5 +705,109 @@ mod tests {
             flatten(&grey(4, 4), &[text], b"not a font"),
             Err(FlattenError::BadFont)
         ));
+    }
+
+    /// Light and dark stripes one pixel wide: what a pixelate must not keep.
+    fn stripes(width: u32, height: u32) -> Frame {
+        let mut frame = grey(width, height);
+        for (i, px) in frame.rgba.chunks_mut(4).enumerate() {
+            let v = if i % 2 == 0 { 0 } else { 255 };
+            px[..3].fill(v);
+        }
+        frame
+    }
+
+    #[test]
+    fn a_pixelate_flattens_each_block_to_its_average() {
+        let pixelate = Shape::Pixelate {
+            min: Point::new(0.0, 0.0),
+            max: Point::new(10.0, 10.0),
+            block: 5.0,
+        };
+        let out = flatten(&stripes(20, 10), &[pixelate], fallback_font()).unwrap();
+        for (x, y) in [(0, 0), (1, 0), (4, 4), (5, 9), (9, 9)] {
+            let [r, g, b, a] = pixel(&out, x, y);
+            assert!(
+                r.abs_diff(128) <= 26 && r == g && g == b && a == 255,
+                "{x},{y}: {r}"
+            );
+        }
+        assert_eq!(pixel(&out, 10, 0), [0, 0, 0, 255], "outside is untouched");
+        assert_eq!(pixel(&out, 11, 0), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn a_pixelate_cannot_be_undone_from_the_saved_pixels() {
+        // Two different images with the same block averages save the same pixels:
+        // nothing in the result tells which one was under the pixelate (US-7.2 AC).
+        let pixelate = Shape::Pixelate {
+            min: Point::new(0.0, 0.0),
+            max: Point::new(8.0, 8.0),
+            block: 4.0,
+        };
+        let mut swapped = stripes(8, 8);
+        for px in swapped.rgba.chunks_mut(4) {
+            px[..3].iter_mut().for_each(|c| *c = 255 - *c);
+        }
+        let a = flatten(
+            &stripes(8, 8),
+            std::slice::from_ref(&pixelate),
+            fallback_font(),
+        )
+        .unwrap();
+        let b = flatten(&swapped, &[pixelate], fallback_font()).unwrap();
+        assert_ne!(stripes(8, 8).rgba, swapped.rgba);
+        assert_eq!(a.rgba, b.rgba);
+    }
+
+    #[test]
+    fn a_pixelate_covers_what_was_drawn_before_it_and_not_after() {
+        let line = |y: f32| Shape::Rect {
+            min: Point::new(20.0, y),
+            max: Point::new(180.0, y + 20.0),
+            color: RED,
+            width: 4.0,
+        };
+        let out = flat(&[
+            line(10.0),
+            Shape::Pixelate {
+                min: Point::new(0.0, 0.0),
+                max: Point::new(200.0, 100.0),
+                block: 50.0,
+            },
+            line(60.0),
+        ]);
+        assert_ne!(pixel(&out, 100, 10), RED.0, "under the pixelate");
+        assert_eq!(pixel(&out, 100, 60), RED.0, "drawn after it");
+    }
+
+    #[test]
+    fn the_last_crop_cuts_the_image_after_drawing() {
+        let crop = |x: f32| Shape::Crop {
+            min: Point::new(x, 10.0),
+            max: Point::new(x + 50.5, 40.0),
+        };
+        let out = flat(&[
+            crop(0.0),
+            Shape::Highlight {
+                min: Point::new(20.0, 10.0),
+                max: Point::new(21.0, 11.0),
+                color: RED,
+            },
+            crop(10.0),
+        ]);
+        assert_eq!((out.width, out.height), (51, 30), "a part pixel is kept");
+        assert_eq!(out.rgba.len(), 51 * 30 * 4);
+        assert_eq!(pixel(&out, 10, 0), RED.0, "moved with the crop");
+        assert_eq!(pixel(&out, 0, 0), GREY);
+    }
+
+    #[test]
+    fn a_crop_with_no_pixel_keeps_the_whole_image() {
+        let out = flat(&[Shape::Crop {
+            min: Point::new(300.0, 0.0),
+            max: Point::new(400.0, 50.0),
+        }]);
+        assert_eq!((out.width, out.height), (200, 100));
     }
 }
