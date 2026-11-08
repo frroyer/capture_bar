@@ -40,6 +40,10 @@ pub enum Icon {
     Highlighter,
     /// Freehand: a wavy line.
     Pencil,
+    /// Pixelate (US-7.2): a checker in a frame.
+    Mosaic,
+    /// Two crop corners.
+    Crop,
     Undo,
     Redo,
 }
@@ -258,6 +262,15 @@ pub fn paint(p: &Painter, center: Pos2, icon: Icon, color: Color32) {
                 })
                 .collect();
             p.line(wave, s);
+        }
+        Icon::Mosaic => {
+            frame(-6.5, -6.5, 6.5, 6.5, 1);
+            block(-6.5, -6.5, 0.0, 0.0, 0);
+            block(0.0, 0.0, 6.5, 6.5, 0);
+        }
+        Icon::Crop => {
+            p.line(vec![at(-4.0, -7.5), at(-4.0, 4.0), at(7.5, 4.0)], s);
+            p.line(vec![at(-7.5, -4.0), at(4.0, -4.0), at(4.0, 7.5)], s);
         }
         Icon::Undo => p_turn(p, center, -1.0, s),
         Icon::Redo => p_turn(p, center, 1.0, s),

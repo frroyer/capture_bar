@@ -1,9 +1,11 @@
-//! The annotation editor (US-7.1, FR-27): a window over one capture, with arrows, boxes,
-//! text and highlights kept as layers until saved.
+//! The annotation editor (US-7.1, US-7.2, FR-27): a window over one capture, with arrows,
+//! boxes, text, highlights, pixelates and a crop kept as layers until saved.
 
 use std::sync::Arc;
 
-use cb_annotate::{arrow_parts, corners, default_sizes, History, Point, Rgba, Shape};
+use cb_annotate::{
+    arrow_parts, corners, default_sizes, mosaic, History, Mosaic, Point, Rgba, Shape,
+};
 use cb_buffer::ItemId;
 use egui::{
     pos2, vec2, Align2, CentralPanel, Color32, Context, CursorIcon, FontFamily, FontId, Frame, Key,
@@ -30,15 +32,19 @@ enum Tool {
     Pen,
     Text,
     Highlight,
+    Pixelate,
+    Crop,
 }
 
 /// Each tool with its icon, its name and the key that picks it.
-const TOOLS: [(Tool, Icon, &str, Key); 5] = [
+const TOOLS: [(Tool, Icon, &str, Key); 7] = [
     (Tool::Arrow, Icon::ArrowTool, "Arrow", Key::A),
     (Tool::Rect, Icon::BoxTool, "Box", Key::R),
     (Tool::Pen, Icon::Pencil, "Pen", Key::P),
     (Tool::Text, Icon::TextTool, "Text", Key::T),
     (Tool::Highlight, Icon::Highlighter, "Highlight", Key::H),
+    (Tool::Pixelate, Icon::Mosaic, "Pixelate", Key::B),
+    (Tool::Crop, Icon::Crop, "Crop", Key::C),
 ];
 
 const COLORS: [(Rgba, &str); 6] = [
@@ -107,6 +113,10 @@ pub struct Editor {
     color: Rgba,
     stroke: f32,
     text_size: f32,
+    /// Side of a pixelate block, in image pixels.
+    block: f32,
+    /// What each pixelate looks like, made from the capture once.
+    mosaics: Vec<(Shape, TextureHandle, Mosaic)>,
     drag_from: Option<Point>,
     /// The freehand line being drawn.
     pen: Vec<Point>,
@@ -140,6 +150,8 @@ impl Editor {
             color: COLORS[0].0,
             stroke,
             text_size,
+            block: stroke * 4.0,
+            mosaics: Vec::new(),
             drag_from: None,
             pen: Vec::new(),
             typing: None,
@@ -438,8 +450,20 @@ impl Editor {
             Sense::click_and_drag(),
         );
         let painter = ui.painter_at(rect);
-        for shape in self.history.shapes() {
-            paint(&painter, view, shape);
+        let shapes = self.history.shapes().to_vec();
+        self.mosaics.retain(|(s, ..)| shapes.contains(s));
+        for shape in &shapes {
+            self.paint_layer(ui.ctx(), &painter, view, shape);
+        }
+        // The crop being dragged replaces the one saved, on screen.
+        let new_crop =
+            self.tool == Tool::Crop && (self.drag_from.is_some() || response.drag_started());
+        let crop = shapes
+            .iter()
+            .rev()
+            .find(|s| matches!(s, Shape::Crop { .. }));
+        if let (false, Some(Shape::Crop { min, max })) = (new_crop, crop) {
+            paint_crop(&painter, view, *min, *max);
         }
 
         if self.tool == Tool::Pen {
@@ -485,8 +509,10 @@ impl Editor {
             return;
         };
         let shape = self.shape(from, to);
-        if let Some(shape) = &shape {
-            paint(&painter, view, shape);
+        match &shape {
+            Some(Shape::Crop { min, max }) => paint_crop(&painter, view, *min, *max),
+            Some(shape) => self.paint_layer(ui.ctx(), &painter, view, shape),
+            None => {}
         }
         if response.drag_stopped() {
             self.drag_from = None;
@@ -546,8 +572,46 @@ impl Editor {
                 max,
                 color: color.with_alpha(HIGHLIGHT_ALPHA),
             }),
+            Tool::Pixelate if w >= MIN_DRAG && h >= MIN_DRAG => Some(Shape::Pixelate {
+                min,
+                max,
+                block: self.block,
+            }),
+            Tool::Crop if w >= MIN_DRAG && h >= MIN_DRAG => Some(Shape::Crop { min, max }),
             _ => None,
         }
+    }
+
+    /// Draw one layer; a pixelate shows the blocks it will save, made from the capture.
+    fn paint_layer(&mut self, ctx: &Context, painter: &egui::Painter, view: View, shape: &Shape) {
+        let Shape::Pixelate { min, max, block } = shape else {
+            return paint(painter, view, shape);
+        };
+        let cached = self.mosaics.iter().position(|(s, ..)| s == shape);
+        let i = cached.unwrap_or_else(|| {
+            let b = &self.base;
+            let m = mosaic(&b.rgba, b.width, b.height, *min, *max, *block);
+            let size = [m.cols as usize, m.rows as usize];
+            let image = egui::ColorImage::from_rgba_unmultiplied(size, m.colors.as_flattened());
+            let texture = ctx.load_texture("pixelate", image, TextureOptions::NEAREST);
+            self.mosaics.push((shape.clone(), texture, m));
+            self.mosaics.len() - 1
+        });
+        let (_, texture, m) = &self.mosaics[i];
+        if m.cols == 0 || m.rows == 0 {
+            return;
+        }
+        // chisle: shapes under a pixelate are hidden here and blended in when saved.
+        let at = |x: u32, y: u32| view.to_screen(Point::new(x as f32, y as f32));
+        let covered = Rect::from_min_max(at(m.x0, m.y0), at(m.x1, m.y1));
+        let grid = Rect::from_min_max(
+            at(m.x0, m.y0),
+            at(m.x0 + m.cols * m.block, m.y0 + m.rows * m.block),
+        );
+        let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        painter
+            .with_clip_rect(covered.intersect(painter.clip_rect()))
+            .image(texture.id(), grid, whole, Color32::WHITE);
     }
 
     /// The field text is typed into, where it will be drawn. Enter or a click away keeps
@@ -639,7 +703,28 @@ fn swatch(ui: &mut Ui, color: Rgba, chosen: bool, name: &str) -> egui::Response 
     response.on_hover_text(name)
 }
 
-/// Draw `shape` the way [`cb_annotate::flatten`] will.
+/// Shade what a crop leaves out.
+fn paint_crop(painter: &egui::Painter, view: View, min: Point, max: Point) {
+    let full = Rect::from_min_max(
+        view.to_screen(Point::default()),
+        view.to_screen(Point::new(view.size.0, view.size.1)),
+    );
+    let keep = Rect::from_min_max(view.to_screen(min), view.to_screen(max));
+    let shade = Color32::from_black_alpha(160);
+    for (a, b) in [
+        (full.min, pos2(full.max.x, keep.min.y)),
+        (pos2(full.min.x, keep.max.y), full.max),
+        (pos2(full.min.x, keep.min.y), keep.left_bottom()),
+        (keep.right_top(), pos2(full.max.x, keep.max.y)),
+    ] {
+        painter.rect_filled(Rect::from_min_max(a, b), 0.0, shade);
+    }
+    let edge = Stroke::new(1.0, Color32::WHITE);
+    painter.rect_stroke(keep, 0.0, edge, StrokeKind::Outside);
+}
+
+/// Draw `shape` the way [`cb_annotate::flatten`] will. Pixelates and crops are drawn by
+/// the editor, which knows the capture.
 fn paint(painter: &egui::Painter, view: View, shape: &Shape) {
     match shape {
         Shape::Arrow {
@@ -703,6 +788,7 @@ fn paint(painter: &egui::Painter, view: View, shape: &Shape) {
                 color32(*color),
             );
         }
+        Shape::Pixelate { .. } | Shape::Crop { .. } => {}
     }
 }
 
@@ -934,6 +1020,30 @@ mod tests {
             Some(EditorResult::Cancel),
             "as it was"
         );
+    }
+
+    #[test]
+    fn b_pixelates_and_c_crops_what_is_dragged_over() {
+        let mut editor = editor();
+        run(&mut editor, vec![vec![key(Key::B, Modifiers::NONE)]]);
+        assert_eq!(editor.tool, Tool::Pixelate);
+        drag(&mut editor, Point::new(10.0, 10.0), Point::new(110.0, 60.0));
+        run(&mut editor, vec![vec![key(Key::C, Modifiers::NONE)]]);
+        assert_eq!(editor.tool, Tool::Crop);
+        drag(
+            &mut editor,
+            Point::new(390.0, 190.0),
+            Point::new(50.0, 20.0),
+        );
+        let [Shape::Pixelate { min, max, block }, Shape::Crop { min: c0, max: c1 }] =
+            editor.history.shapes()
+        else {
+            panic!("a pixelate, then a crop: {:?}", editor.history.shapes());
+        };
+        assert!(close(*min, Point::new(10.0, 10.0)) && close(*max, Point::new(110.0, 60.0)));
+        assert!(*block >= 12.0, "blocks big enough to hide text: {block}");
+        assert!(close(*c0, Point::new(50.0, 20.0)) && close(*c1, Point::new(390.0, 190.0)));
+        assert_eq!(editor.mosaics.len(), 1, "only the layers kept are cached");
     }
 
     #[test]
