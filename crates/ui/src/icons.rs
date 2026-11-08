@@ -31,6 +31,8 @@ pub enum Icon {
     Pen,
     Trash,
     Pin,
+    /// Again: a circling arrow.
+    Repeat,
 }
 
 /// Draw `icon` centred on `center`. Coordinates below run from -8 to 8.
@@ -187,6 +189,17 @@ pub fn paint(p: &Painter, center: Pos2, icon: Icon, color: Color32) {
                 s,
             ));
             seg(1.0, -4.0, 4.0, -1.0);
+        }
+        Icon::Repeat => {
+            let arc = (0..=12)
+                .map(|i| {
+                    let a = -0.6 + 4.4 * i as f32 / 12.0;
+                    at(6.0 * a.cos(), 6.0 * a.sin())
+                })
+                .collect::<Vec<_>>();
+            let tip = *arc.last().expect("arc has points");
+            p.line(arc, s);
+            p.line(vec![tip + vec2(-1.0, -4.0), tip, tip + vec2(4.0, -1.5)], s);
         }
         Icon::Pin => {
             p.circle_stroke(at(0.0, -3.0), 3.5, s);

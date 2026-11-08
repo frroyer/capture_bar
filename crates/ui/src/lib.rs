@@ -59,6 +59,8 @@ pub struct BarState {
     pub prefix: String,
     /// The prefix and folder panel is open.
     pub destination_open: bool,
+    /// A region was captured before: the bar offers to capture it again.
+    pub has_last_region: bool,
 }
 
 /// Which side of the bar has room for tooltips, reserved by the host.
@@ -429,6 +431,17 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                 {
                     out.commands.push(Command::Capture);
                 }
+                if !state.recording && state.mode == CaptureMode::Region && state.has_last_region {
+                    let again = chip(
+                        ui,
+                        &[Piece::Icon(Icon::Repeat)],
+                        &ChipStyle::new(CHIP, TEXT),
+                        &format!("Capture the same region again ({})", shortcut("A")),
+                    );
+                    if again.clicked() {
+                        out.commands.push(Command::RepeatLastRegion);
+                    }
+                }
 
                 let record_key = shortcut("R");
                 if state.recording {
@@ -594,43 +607,64 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
     out
 }
 
-/// Region / Window / Screen, as one segmented control.
+const MODES: [(CaptureMode, Icon, &str); 3] = [
+    (CaptureMode::Region, Icon::Region, "1"),
+    (CaptureMode::Window, Icon::Window, "2"),
+    (CaptureMode::Screen, Icon::Screen, "3"),
+];
+
+/// Region / Window / Screen: three icons in a track, with a highlight that slides to the
+/// chosen one. The tooltips name them; the icons are enough once known.
 fn mode_switch(ui: &mut Ui, current: CaptureMode, out: &mut BarOutput) {
     use palette::*;
-    Frame::new()
-        .fill(CHIP)
-        .corner_radius(CornerRadius::same(12))
-        .inner_margin(Margin::same(2))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing = vec2(2.0, 2.0);
-            for (mode, icon, key) in [
-                (CaptureMode::Region, Icon::Region, "1"),
-                (CaptureMode::Window, Icon::Window, "2"),
-                (CaptureMode::Screen, Icon::Screen, "3"),
-            ] {
-                let (fill, color) = if current == mode {
-                    (SELECTED, Color32::WHITE)
-                } else {
-                    (Color32::TRANSPARENT, MUTED)
-                };
-                let style = ChipStyle {
-                    fill,
-                    color,
-                    height: H_IN_GROUP,
-                };
-                let tip = format!("{}: {} captures now", mode.label(), shortcut(key));
-                if chip(
-                    ui,
-                    &[Piece::Icon(icon), Piece::Text(mode.label())],
-                    &style,
-                    &tip,
-                )
-                .clicked()
-                {
-                    out.commands.push(Command::SetMode(mode));
-                }
-            }
-        });
+    const CELL: f32 = H_IN_GROUP;
+    const INSET: f32 = 2.0;
+    let vertical = ui.layout().is_vertical();
+    let along = move |i: f32| {
+        if vertical {
+            vec2(0.0, i * CELL)
+        } else {
+            vec2(i * CELL, 0.0)
+        }
+    };
+    let track_size = along(MODES.len() as f32) + along(1.0).yx() + Vec2::splat(INSET * 2.0);
+    let (track, _) = ui.allocate_exact_size(track_size, Sense::hover());
+    ui.painter()
+        .rect_filled(track, CornerRadius::same(12), CHIP);
+
+    let chosen = MODES.iter().position(|(m, ..)| *m == current).unwrap_or(0) as f32;
+    let slide =
+        ui.ctx()
+            .animate_value_with_time(ui.make_persistent_id("mode highlight"), chosen, 0.14);
+    let cell_at = |i: f32| {
+        egui::Rect::from_min_size(track.min + Vec2::splat(INSET) + along(i), Vec2::splat(CELL))
+    };
+    ui.painter()
+        .rect_filled(cell_at(slide), CornerRadius::same(10), SELECTED);
+
+    for (i, (mode, icon, key)) in MODES.into_iter().enumerate() {
+        let rect = cell_at(i as f32);
+        let response = ui.interact(rect, ui.make_persistent_id(("mode", key)), Sense::click());
+        let tip = format!("{}: {} captures now", mode.label(), shortcut(key));
+        response
+            .widget_info(|| WidgetInfo::selected(Role::RadioButton, true, mode == current, &tip));
+        let color = if mode == current {
+            Color32::WHITE
+        } else if response.hovered() {
+            TEXT
+        } else {
+            MUTED
+        };
+        if response.hovered() && mode != current {
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(10), state_overlay(CHIP, false));
+        }
+        icons::paint(ui.painter(), rect.center(), icon, color);
+        show_tooltip(&response, &tip);
+        if response.clicked() {
+            out.commands.push(Command::SetMode(mode));
+        }
+    }
 }
 
 /// A confirmation beside the bar (M2.6). Returns true when Undo was clicked.
@@ -1027,14 +1061,47 @@ fn batch_row(ui: &mut Ui, selected: usize) -> Option<BatchAction> {
             BatchAction::Deselect,
         ));
     }
+    // Clear and Delete ask once: the first click turns the button red with a question
+    // mark, a second click within CONFIRM_SECS does it. Otherwise it turns back.
+    const CONFIRM_SECS: f64 = 3.0;
+    let armed_id = ui.make_persistent_id("batch confirm");
+    let now = ui.input(|i| i.time);
+    let armed: Option<(BatchAction, f64)> = ui
+        .data(|d| d.get_temp(armed_id))
+        .filter(|&(_, at): &(BatchAction, f64)| now - at < CONFIRM_SECS);
+    let mut arm = armed;
     let mut action = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
         for (label, tooltip, what) in &buttons {
-            if chip(ui, &[Piece::Text(label)], &style, tooltip).clicked() {
-                action = Some(*what);
+            let asks = matches!(what, BatchAction::Clear | BatchAction::Delete);
+            let asking = armed.is_some_and(|(a, _)| a == *what);
+            let (label, tooltip, style) = if asking {
+                let red = ChipStyle {
+                    fill: RECORD_BG,
+                    color: RECORD,
+                    height: style.height,
+                };
+                (format!("{label}?"), "Click again to confirm", red)
+            } else {
+                (label.clone(), tooltip.as_str(), ChipStyle { ..style })
+            };
+            if chip(ui, &[Piece::Text(&label)], &style, tooltip).clicked() {
+                if asks && !asking {
+                    arm = Some((*what, now));
+                    ui.ctx().request_repaint_after_secs(CONFIRM_SECS as f32);
+                } else {
+                    arm = None;
+                    action = Some(*what);
+                }
             }
         }
+    });
+    ui.data_mut(|d| match arm {
+        Some(armed) => {
+            d.insert_temp(armed_id, armed);
+        }
+        None => d.remove::<(BatchAction, f64)>(armed_id),
     });
     action
 }
@@ -1434,13 +1501,25 @@ mod tests {
         offset: egui::Vec2,
         modifiers: egui::Modifiers,
     ) -> (TrayOutput, Vec<String>) {
+        click_in_tray_times(buffer, selection, text, offset, modifiers, 1)
+    }
+
+    /// [`click_in_tray`], clicking `clicks` times, a frame apart.
+    fn click_in_tray_times(
+        buffer: &Buffer,
+        selection: &Selection,
+        text: &str,
+        offset: egui::Vec2,
+        modifiers: egui::Modifiers,
+        clicks: usize,
+    ) -> (TrayOutput, Vec<String>) {
         let ctx = egui::Context::default();
         install_fonts(&ctx, None);
         let thumbnails = HashMap::new();
         let mut target = egui::Rect::NOTHING;
         let mut out = TrayOutput::default();
         let mut texts = Vec::new();
-        for frame in 0..6 {
+        for frame in 0..5 + 2 * clicks {
             let pos = target.center() + offset;
             let button = |pressed| egui::Event::PointerButton {
                 pos,
@@ -1453,7 +1532,9 @@ mod tests {
                     egui::Event::ModifiersChanged(modifiers),
                     egui::Event::PointerMoved(pos),
                 ],
-                4 => vec![button(true), button(false)],
+                n if n >= 4 && n % 2 == 0 && n < 4 + 2 * clicks => {
+                    vec![button(true), button(false)]
+                }
                 _ => Vec::new(),
             };
             let input = egui::RawInput {
@@ -1478,6 +1559,34 @@ mod tests {
             }
         }
         (out, texts)
+    }
+
+    #[test]
+    fn clear_and_delete_ask_once_before_acting() {
+        let mut buffer = Buffer::new();
+        let a = buffer.push(ItemKind::Image, CaptureMode::Region);
+        let none = Selection::default();
+        let no_key = egui::Modifiers::NONE;
+        let (once, texts) =
+            click_in_tray_times(&buffer, &none, "Clear all", vec2(0.0, 0.0), no_key, 1);
+        assert_eq!(once.batch, None, "one click only asks");
+        assert!(texts.iter().any(|t| t == "Clear all?"), "{texts:?}");
+        let (twice, _) =
+            click_in_tray_times(&buffer, &none, "Clear all", vec2(0.0, 0.0), no_key, 2);
+        assert_eq!(twice.batch, Some(BatchAction::Clear));
+
+        let mut one = Selection::default();
+        one.click(a);
+        let (once, _) = click_in_tray_times(&buffer, &one, "Delete 1", vec2(0.0, 0.0), no_key, 1);
+        assert_eq!(once.batch, None);
+        let (twice, _) = click_in_tray_times(&buffer, &one, "Delete 1", vec2(0.0, 0.0), no_key, 2);
+        assert_eq!(twice.batch, Some(BatchAction::Delete));
+        let (copy, _) = click_in_tray_times(&buffer, &none, "Copy all", vec2(0.0, 0.0), no_key, 1);
+        assert_eq!(
+            copy.batch,
+            Some(BatchAction::CopyAll),
+            "the others act at once"
+        );
     }
 
     #[test]
@@ -1707,6 +1816,100 @@ mod tests {
             bar_size(&flashing, 2000.0),
             bar_size(&BarState::default(), 2000.0)
         );
+    }
+
+    /// Clicks the bar at `pos` and returns its commands.
+    fn click_bar(state: &BarState, pos: egui::Pos2) -> Vec<Command> {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx, None);
+        let buffer = Buffer::new();
+        let mut commands = Vec::new();
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        for events in [
+            vec![],
+            vec![egui::Event::PointerMoved(pos)],
+            vec![button(true)],
+            vec![button(false)],
+        ] {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                commands.extend(bar(ui, state, &buffer).commands);
+            });
+            output.textures_delta.clear();
+        }
+        commands
+    }
+
+    #[test]
+    fn mode_icons_switch_mode_without_labels() {
+        let state = BarState::default();
+        // Margin 8, grip 22, spacing 4, track inset 2, then 32-point cells; centred on the row.
+        let cell = |i: f32| egui::pos2(8.0 + 22.0 + 4.0 + 2.0 + 16.0 + 32.0 * i, 8.0 + 18.0);
+        for (i, mode) in [
+            CaptureMode::Region,
+            CaptureMode::Window,
+            CaptureMode::Screen,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                click_bar(&state, cell(i as f32)),
+                vec![Command::SetMode(mode)]
+            );
+        }
+        let shapes = texts_of(|ui| {
+            bar(ui, &state, &Buffer::new());
+        });
+        for label in ["Region", "Window", "Screen"] {
+            assert!(
+                !shapes.iter().any(|s| s == label),
+                "{label} is drawn: {shapes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_same_region_button_needs_region_mode_and_a_region() {
+        let with = |mode, has_last_region| {
+            let state = BarState {
+                mode,
+                has_last_region,
+                ..Default::default()
+            };
+            bar_size(&state, 2000.0).x
+        };
+        let plain = with(CaptureMode::Region, false);
+        assert!(with(CaptureMode::Region, true) > plain + 30.0);
+        assert_eq!(with(CaptureMode::Window, true), plain);
+    }
+
+    /// The texts and textures `draw` paints, once its layout has settled.
+    fn texts_of(mut draw: impl FnMut(&mut Ui)) -> Vec<String> {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx, None);
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), &mut draw);
+            output.textures_delta.clear();
+            seen = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect();
+        }
+        seen
     }
 
     /// The window is sized to the bar, so the bar must not size itself to the window.

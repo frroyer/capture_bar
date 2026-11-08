@@ -33,6 +33,18 @@ const DOCK_GAP: f32 = 8.0;
 const TRAY_WIDTH_BESIDE_BAR: f32 = 640.0;
 /// How often captures past the retention period are looked for (FR-25).
 const SWEEP_EVERY: Duration = Duration::from_secs(60 * 60);
+/// The tray folds away once the cursor has been off the bar's window this long.
+const TRAY_IDLE: Duration = Duration::from_secs(5);
+
+/// Whether an open tray should fold now. `seen` is when the cursor was last on the window,
+/// or when the tray was closed: the wait starts again each time it opens.
+fn tray_idle(open: bool, cursor_in: bool, seen: &mut Instant, now: Instant) -> bool {
+    if !open || cursor_in {
+        *seen = now;
+        return false;
+    }
+    now.duration_since(*seen) >= TRAY_IDLE
+}
 
 /// The buffer the last run left (FR-25), and whether its index was damaged. A damaged
 /// index is kept beside as `.bad`, never overwritten, so nothing in it is lost for good.
@@ -228,6 +240,8 @@ struct App {
     indexed: u64,
     /// When expired captures were last taken out of the buffer.
     swept_at: Option<Instant>,
+    /// When the cursor was last on the window while the tray was open (see `tray_idle`).
+    tray_seen: Instant,
     /// What Copy all, Save all and Clear act on; none means all (FR-24).
     selection: Selection,
     /// What the tray shows for each capture (FR-22).
@@ -412,6 +426,7 @@ impl App {
             buffer,
             index,
             swept_at: None,
+            tray_seen: Instant::now(),
             selection: Selection::default(),
             thumbnails: HashMap::new(),
             capture,
@@ -1361,10 +1376,17 @@ impl eframe::App for App {
         if flashing {
             ctx.request_repaint();
         }
-        let cursor_near = flashing
-            || self.dragging
-            || self.bar_hovered
-            || ctx.input(|i| i.pointer.hover_pos().is_some());
+        let cursor_in = self.dragging || ctx.input(|i| i.pointer.hover_pos().is_some());
+        let cursor_near = flashing || self.bar_hovered || cursor_in;
+        if tray_idle(
+            self.bar.tray_open,
+            cursor_in,
+            &mut self.tray_seen,
+            Instant::now(),
+        ) {
+            self.bar.tray_open = false;
+        }
+        self.bar.has_last_region = self.last_region.is_some();
         let (shown, fade) = animated_opacity(ctx, self.hidden, cursor_near);
         self.bar_fade = fade;
 
@@ -1400,6 +1422,32 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tray_folds_after_the_cursor_has_been_away_a_while() {
+        let start = Instant::now();
+        let mut seen = start;
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        assert!(!tray_idle(true, false, &mut seen, at(4)));
+        assert!(tray_idle(true, false, &mut seen, at(5)));
+        assert!(
+            !tray_idle(true, true, &mut seen, at(6)),
+            "the cursor came back"
+        );
+        assert!(
+            !tray_idle(true, false, &mut seen, at(10)),
+            "and the wait started again"
+        );
+        assert!(tray_idle(true, false, &mut seen, at(11)));
+        assert!(
+            !tray_idle(false, false, &mut seen, at(30)),
+            "a closed tray resets the wait"
+        );
+        assert!(
+            !tray_idle(true, false, &mut seen, at(31)),
+            "so a reopened one gets its 5 s"
+        );
+    }
 
     #[derive(Default)]
     struct MemoryStorage(HashMap<String, String>);
