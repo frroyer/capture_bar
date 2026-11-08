@@ -92,6 +92,17 @@ pub struct BarOutput {
     pub size: Vec2,
 }
 
+impl BarOutput {
+    /// A bar button other than Buffer was pressed: the tray gets out of the way. Buffer
+    /// toggles the tray itself, and moving the bar is not a button.
+    pub fn closes_tray(&self) -> bool {
+        self.toggle_mic
+            || self.toggle_cam
+            || self.grip_double_clicked
+            || self.commands.iter().any(|c| *c != Command::ToggleBuffer)
+    }
+}
+
 /// Extra window height a tooltip needs above or below the bar: tooltips cannot leave
 /// the window.
 pub const TOOLTIP_ROOM: f32 = 44.0;
@@ -1846,6 +1857,28 @@ mod tests {
             output.textures_delta.clear();
         }
         commands
+    }
+
+    #[test]
+    fn bar_buttons_but_buffer_close_the_tray() {
+        let with = |commands: Vec<Command>| BarOutput {
+            commands,
+            ..Default::default()
+        };
+        assert!(with(vec![Command::Capture]).closes_tray());
+        assert!(with(vec![Command::SetMode(CaptureMode::Screen)]).closes_tray());
+        assert!(!with(vec![Command::ToggleBuffer]).closes_tray());
+        assert!(!with(Vec::new()).closes_tray());
+        let mic = BarOutput {
+            toggle_mic: true,
+            ..Default::default()
+        };
+        assert!(mic.closes_tray());
+        let drag = BarOutput {
+            start_drag: true,
+            ..Default::default()
+        };
+        assert!(!drag.closes_tray(), "moving the bar keeps the tray");
     }
 
     #[test]
