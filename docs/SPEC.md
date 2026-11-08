@@ -429,8 +429,8 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: Tab order covers the whole bar; VoiceOver, Narrator and Orca read the labels; FR and EN strings ship.
 
-- [ ] AccessKit integration (egui)
-- [ ] i18n with Fluent
+- [x] AccessKit integration (egui)
+- [x] i18n with Fluent
 
 ### E9 · Packaging, signing & distribution
 

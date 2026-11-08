@@ -9,7 +9,8 @@ use egui::{
     ViewportCommand, ViewportId,
 };
 
-use crate::{palette, shortcut};
+use crate::{palette, shortcut, tr};
+use cb_core::Language;
 
 /// What the window asked for this frame.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -42,8 +43,8 @@ impl SettingsWindow {
         autostart: &mut bool,
     ) -> SettingsOutput {
         let builder = ViewportBuilder::default()
-            .with_title("Capture Bar settings")
-            .with_inner_size(vec2(460.0, 380.0))
+            .with_title(tr!("settings-title"))
+            .with_inner_size(vec2(480.0, 410.0))
             .with_resizable(false)
             .with_active(true);
         ctx.show_viewport_immediate(
@@ -79,85 +80,97 @@ impl SettingsWindow {
             .show(ui, |ui| {
                 ui.style_mut().visuals = egui::Visuals::dark();
                 ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
-                section(ui, "Output");
+                section(ui, &tr!("settings-output"));
                 Grid::new("output")
                     .num_columns(2)
                     .spacing([16.0, 10.0])
                     .show(ui, |ui| {
-                        ui.label("Folder");
+                        ui.label(tr!("settings-folder"));
                         ui.horizontal(|ui| {
                             let shown = settings.folder.display().to_string();
                             ui.add(egui::Label::new(shown).truncate())
                                 .on_hover_text(settings.folder.display().to_string());
                             if ui
-                                .button("Choose…")
-                                .on_hover_text(format!(
-                                    "Also from the bar's tray ({})",
-                                    shortcut("L")
-                                ))
+                                .button(tr!("settings-choose"))
+                                .on_hover_text(tr!("settings-choose-tip", key = shortcut("L")))
                                 .clicked()
                             {
                                 out.choose_folder = true;
                             }
                         });
                         ui.end_row();
-                        ui.label("File name prefix");
+                        ui.label(tr!("settings-prefix"));
                         ui.add(
                             egui::TextEdit::singleline(&mut settings.prefix)
                                 .char_limit(40)
                                 .desired_width(160.0)
-                                .hint_text("no prefix"),
+                                .hint_text(tr!("prefix-hint")),
                         );
                         ui.end_row();
                     });
 
-                section(ui, "Recording");
+                section(ui, &tr!("settings-recording"));
                 Grid::new("recording")
                     .num_columns(2)
                     .spacing([16.0, 10.0])
                     .show(ui, |ui| {
-                        ui.label("Frame rate");
+                        ui.label(tr!("settings-frame-rate"));
                         ui.horizontal(|ui| {
                             for rate in Settings::FRAME_RATES {
                                 ui.selectable_value(
                                     &mut settings.frame_rate,
                                     rate,
-                                    format!("{rate} fps"),
+                                    tr!("settings-fps", rate = rate),
                                 );
                             }
                         });
                         ui.end_row();
-                        ui.label("Audio");
+                        ui.label(tr!("settings-audio"));
                         ui.horizontal(|ui| {
-                            ui.checkbox(&mut settings.system_audio, "System sound");
-                            ui.checkbox(&mut settings.microphone, "Microphone");
+                            ui.checkbox(&mut settings.system_audio, tr!("settings-system-audio"));
+                            ui.checkbox(&mut settings.microphone, tr!("settings-microphone"));
                         });
                         ui.end_row();
                     });
 
-                section(ui, "General");
-                ui.checkbox(autostart, "Start Capture Bar when I log in");
-
-                section(ui, "Buffer");
+                section(ui, &tr!("settings-general"));
+                ui.checkbox(autostart, tr!("settings-autostart"));
                 ui.horizontal(|ui| {
-                    ui.label("Keep unpinned captures for");
+                    ui.label(tr!("settings-language"));
+                    let name = |language| match language {
+                        Language::Auto => tr!("settings-language-auto"),
+                        Language::En => "English".to_owned(),
+                        Language::Fr => "Français".to_owned(),
+                    };
+                    egui::ComboBox::from_id_salt("language")
+                        .selected_text(name(settings.language))
+                        .show_ui(ui, |ui| {
+                            for language in [Language::Auto, Language::En, Language::Fr] {
+                                ui.selectable_value(
+                                    &mut settings.language,
+                                    language,
+                                    name(language),
+                                );
+                            }
+                        });
+                });
+
+                section(ui, &tr!("settings-buffer"));
+                ui.horizontal(|ui| {
+                    ui.label(tr!("settings-keep"));
                     ui.add(
                         egui::DragValue::new(&mut settings.retention_days)
                             .range(Settings::RETENTION_DAYS)
                             .speed(0.2),
                     );
-                    ui.label(if settings.retention_days == 1 {
-                        "day"
-                    } else {
-                        "days"
-                    });
+                    ui.label(tr!("settings-days", count = settings.retention_days));
                 })
                 .response
-                .on_hover_text("Their files stay in the folder");
+                .on_hover_text(tr!("settings-keep-tip"));
 
                 ui.add_space(4.0);
                 ui.label(
-                    RichText::new(format!("Saved in {}", file.display()))
+                    RichText::new(tr!("settings-file", file = file.display().to_string()))
                         .small()
                         .color(palette::MUTED),
                 );

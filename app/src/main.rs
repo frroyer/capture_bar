@@ -16,7 +16,7 @@ use cb_capture::{CaptureEvent, CaptureService};
 use cb_core::{CaptureMode, CaptureTarget, Command, DisplayId, Edge, Frame, Rect, Settings};
 use cb_platform::TrayAction;
 use cb_ui::{
-    BarState, BatchAction, Editor, EditorResult, ItemAction, Overlay, OverlayResult, SelectHow,
+    tr, BarState, BatchAction, Editor, EditorResult, ItemAction, Overlay, OverlayResult, SelectHow,
     SettingsWindow, ToastAction, TooltipSide,
 };
 use eframe::egui;
@@ -110,6 +110,11 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
+}
+
+/// The tray menu's items in the interface's language.
+fn tray_labels() -> [String; 2] {
+    [tr!("tray-menu-toggle"), tr!("tray-menu-quit")]
 }
 
 /// The size of what `add` draws. A panel's own UI always reports the whole panel,
@@ -280,6 +285,8 @@ struct App {
     settings_file: PathBuf,
     settings_writer: mpsc::Sender<Settings>,
     settings_window: Option<SettingsWindow>,
+    /// Give the bar's window the keyboard on the next frame.
+    focus_bar: bool,
     /// Whether the bar starts at login, as the OS had it when Settings opened (US-8.3).
     autostart: bool,
     /// The answer of the thread changing it.
@@ -337,6 +344,20 @@ struct App {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let settings_file = config::path();
+        let loaded = config::load(&settings_file, |settings| {
+            let Some(storage) = cc.storage else {
+                return;
+            };
+            if let Some(folder) = eframe::get_value(storage, FOLDER_STORAGE_KEY) {
+                settings.folder = folder;
+            }
+            if let Some(prefix) = eframe::get_value(storage, PREFIX_STORAGE_KEY) {
+                settings.prefix = prefix;
+            }
+        });
+        tracing::info!(file = %settings_file.display(), "settings");
+        cb_ui::i18n::set_language(loaded.settings().language);
         let system_fonts = cb_platform::system_ui_fonts();
         let annotation_font: Arc<[u8]> = match &system_fonts {
             Some((_, semibold)) => semibold.as_slice().into(),
@@ -378,18 +399,14 @@ impl App {
             }
         };
 
-        let toast = shortcut_map.is_empty().then(|| {
-            Toast::new(
-                "Global shortcuts unavailable: use the bar or the tray icon",
-                None,
-            )
-        });
-
         // With a handler set, the crate no longer fills `GlobalHotKeyEvent::receiver()`.
         // Waking the UI here makes shortcuts work even if it is idle.
         let (commands_tx, commands) = mpsc::channel();
         let ctx = cc.egui_ctx.clone();
         let tx = commands_tx.clone();
+        let toast = shortcut_map
+            .is_empty()
+            .then(|| Toast::new(tr!("toast-no-shortcuts"), None));
         GlobalHotKeyEvent::set_event_handler(Some(move |ev: GlobalHotKeyEvent| {
             if let Some(cmd) = shortcut_command(&shortcut_map, &ev) {
                 tracing::debug!(?cmd, "shortcut");
@@ -399,7 +416,8 @@ impl App {
         }));
 
         let ctx = cc.egui_ctx.clone();
-        let tray = cb_platform::create_tray(move |action| {
+        let labels = tray_labels();
+        let tray = cb_platform::create_tray(labels.each_ref().map(String::as_str), move |action| {
             match action {
                 TrayAction::ToggleBar => {
                     let _ = commands_tx.send(Command::ToggleBar);
@@ -411,26 +429,10 @@ impl App {
         .inspect_err(|e| tracing::warn!(error = %e, "no tray icon"))
         .ok();
 
-        let settings_file = config::path();
-        let loaded = config::load(&settings_file, |settings| {
-            let Some(storage) = cc.storage else {
-                return;
-            };
-            if let Some(folder) = eframe::get_value(storage, FOLDER_STORAGE_KEY) {
-                settings.folder = folder;
-            }
-            if let Some(prefix) = eframe::get_value(storage, PREFIX_STORAGE_KEY) {
-                settings.prefix = prefix;
-            }
-        });
-        tracing::info!(file = %settings_file.display(), "settings");
         let toast = toast.or_else(|| match &loaded {
             config::Loaded::Damaged(_, error) => {
                 tracing::warn!(%error, "settings file not read");
-                Some(Toast::new(
-                    "The settings file was damaged: defaults used",
-                    None,
-                ))
+                Some(Toast::new(tr!("toast-settings-damaged"), None))
             }
             _ => None,
         });
@@ -452,9 +454,7 @@ impl App {
         let index_path = default_dir.join(".buffer").join(index::INDEX_FILE);
         let originals_dir = default_dir.join(".buffer").join("originals");
         let (buffer, damaged) = load_buffer(&index_path);
-        let toast = toast.or_else(|| {
-            damaged.then(|| Toast::new("The buffer index was damaged: started empty", None))
-        });
+        let toast = toast.or_else(|| damaged.then(|| Toast::new(tr!("toast-index-damaged"), None)));
         let index = index::spawn_writer(index_path, |error| {
             tracing::warn!(%error, "buffer index not written");
         });
@@ -511,6 +511,7 @@ impl App {
             settings_file,
             settings_writer,
             settings_window: None,
+            focus_bar: false,
             autostart: false,
             autostart_done: None,
             focus_prefix: false,
@@ -614,12 +615,12 @@ impl App {
                 self.overlay = None;
                 self.last_region = Some(rect);
                 match frame {
-                    _ if record => self.flash("Recording a region: not implemented yet (US-5.1)"),
+                    _ if record => self.flash(tr!("toast-record-region-todo")),
                     Some(frame) => {
                         let item = self.add_capture(mode);
                         self.store(item, frame);
                     }
-                    None => self.flash("Capture failed: the region is off screen"),
+                    None => self.flash(tr!("toast-region-off-screen")),
                 }
             }
         }
@@ -634,9 +635,14 @@ impl App {
                 self.begin_capture(mode);
             }
             Command::ToggleRecording => self.toggle_recording(),
-            Command::TogglePause => self.flash("Pause: not implemented yet (US-5.2)"),
+            Command::TogglePause => self.flash(tr!("toast-pause-todo")),
             Command::ToggleBuffer => self.bar.tray_open = !self.bar.tray_open,
-            Command::ToggleBar => self.hidden = !self.hidden,
+            Command::ToggleBar => {
+                self.hidden = !self.hidden;
+                // Shown from a shortcut, the bar takes the keyboard, so Tab reaches its
+                // controls (NFR-13).
+                self.focus_bar = !self.hidden;
+            }
             Command::RepeatLastRegion => match self.last_region {
                 Some(rect) if self.overlay.is_none() => {
                     self.capture_still(CaptureMode::Region, CaptureTarget::Region(rect));
@@ -676,7 +682,7 @@ impl App {
         if let Some(i) = self.buffer.get_mut(item) {
             i.state = ItemState::Encoding { progress_pct: 0 };
         }
-        let message = format!("Added to buffer · {}", self.buffer.len());
+        let message = tr!("toast-added", count = self.buffer.len());
         self.toast = Some(Toast::new(message, Some(item)));
         item
     }
@@ -690,13 +696,13 @@ impl App {
         match &self.newest_frame {
             Some((_, frame)) => {
                 let _ = self.output.send(output::Job::Copy(frame.clone()));
-                self.flash("Copied");
+                self.flash(tr!("toast-copied"));
             }
             None => match newest_file() {
                 Some(path) => {
                     let _ = self.output.send(output::Job::CopyFile(path));
                 }
-                None => self.flash("Nothing to copy yet"),
+                None => self.flash(tr!("toast-nothing-to-copy")),
             },
         }
     }
@@ -781,7 +787,7 @@ impl App {
                 let _ = self.output.send(output::Job::Trash(vec![path]));
             }
             // Not written yet: `poll_output` removes the file when it lands.
-            None => self.flash("Deleted"),
+            None => self.flash(tr!("toast-deleted")),
         }
     }
 
@@ -815,7 +821,7 @@ impl App {
                 // Blocks this thread until the drop, as every OS drag loop does.
                 if let Err(e) = cb_platform::drag_file_out(&path) {
                     tracing::warn!(error = %e, ?path, "drag out");
-                    self.flash(format!("Drag out: {e}"));
+                    self.flash(tr!("toast-drag-failed", error = e.to_string()));
                 }
                 self.release_pointer = true;
             }
@@ -846,7 +852,7 @@ impl App {
                     .collect();
                 self.selection.clear();
                 if paths.is_empty() {
-                    self.flash(format!("Deleted {count}"));
+                    self.flash(tr!("toast-deleted-count", count = count));
                 } else {
                     let _ = self.output.send(output::Job::Trash(paths));
                 }
@@ -863,11 +869,9 @@ impl App {
                     cleared += 1;
                 }
                 self.selection.clear();
-                self.flash(format!(
-                    "Cleared {cleared} from the buffer · the files stay"
-                ));
+                self.flash(tr!("toast-cleared", count = cleared));
             }
-            _ if files.is_empty() => self.flash("Nothing saved to copy yet"),
+            _ if files.is_empty() => self.flash(tr!("toast-nothing-saved")),
             BatchAction::CopyAll => {
                 // One image pastes as an image anywhere; several go as files.
                 let job = match <[PathBuf; 1]>::try_from(files) {
@@ -893,7 +897,7 @@ impl App {
     /// Ask for a folder on the dialog's own thread; the output worker copies `files` there.
     fn save_all(&mut self, frame: &eframe::Frame, files: Vec<PathBuf>) {
         let dialog = rfd::FileDialog::new()
-            .set_title(format!("Save {} captures into…", files.len()))
+            .set_title(tr!("dialog-save-all", count = files.len()))
             .set_directory(&self.captures_dir)
             .set_parent(frame);
         let output = self.output.clone();
@@ -910,12 +914,12 @@ impl App {
     /// Ask where to write the PDF, on the dialog's own thread; the output worker writes it.
     fn export_pdf(&mut self, frame: &eframe::Frame, files: Vec<PathBuf>) {
         if files.is_empty() {
-            return self.flash("No saved image to export yet");
+            return self.flash(tr!("toast-nothing-to-export"));
         }
         let name = output::file_name(&self.bar.prefix, SystemTime::now());
         let dialog = rfd::FileDialog::new()
-            .set_title(format!("Export {} images as one PDF", files.len()))
-            .add_filter("PDF document", &["pdf"])
+            .set_title(tr!("dialog-export-pdf", count = files.len()))
+            .add_filter(tr!("dialog-pdf-filter"), &["pdf"])
             .set_directory(&self.captures_dir)
             .set_file_name(Path::new(&name).with_extension("pdf").to_string_lossy())
             .set_parent(frame);
@@ -933,8 +937,8 @@ impl App {
     /// Ask where to save a copy of `from`, on the dialog's own thread; the output worker copies.
     fn save_copy(&mut self, frame: &eframe::Frame, from: PathBuf) {
         let mut dialog = rfd::FileDialog::new()
-            .set_title("Save a copy of the capture")
-            .add_filter("PNG image", &["png"])
+            .set_title(tr!("dialog-save-copy"))
+            .add_filter(tr!("dialog-png-filter"), &["png"])
             .set_parent(frame);
         if let Some(name) = from.file_name() {
             dialog = dialog.set_file_name(name.to_string_lossy());
@@ -956,7 +960,7 @@ impl App {
         if let Some(editor) = &mut self.editor {
             editor.focus();
             if editor.item() != item {
-                self.flash("Save or close the open annotation first");
+                self.flash(tr!("toast-editor-busy"));
             }
             return;
         }
@@ -964,7 +968,7 @@ impl App {
             return;
         };
         if found.kind != ItemKind::Image {
-            return self.flash("Only images can be annotated");
+            return self.flash(tr!("toast-annotate-images-only"));
         }
         // The editor works on the capture as taken, with its annotations as layers.
         let ready_file = (found.state == ItemState::Ready)
@@ -981,7 +985,7 @@ impl App {
                 self.editor_loading = Some(item);
                 let _ = self.output.send(output::Job::Load { item, path });
             }
-            (None, None) => self.flash("This capture is not ready yet"),
+            (None, None) => self.flash(tr!("toast-not-ready")),
         }
     }
 
@@ -1002,8 +1006,8 @@ impl App {
             .and_then(|i| i.path.as_ref()?.file_name())
             .map(|n| n.to_string_lossy().into_owned());
         match name {
-            Some(name) => format!("Annotate · {name}"),
-            None => "Annotate".into(),
+            Some(name) => tr!("editor-title-file", name = name),
+            None => tr!("editor-title"),
         }
     }
 
@@ -1021,6 +1025,12 @@ impl App {
     fn apply_settings(&mut self, settings: Settings) {
         if settings.retention_days != self.prefs.retention_days {
             self.swept_at = None;
+        }
+        if settings.language != self.prefs.language {
+            cb_ui::i18n::set_language(settings.language);
+            if let Some(tray) = &self._tray {
+                tray.set_labels(tray_labels().each_ref().map(String::as_str));
+            }
         }
         self.captures_dir = settings.folder.clone();
         self.bar.prefix = output::clean_prefix(&settings.prefix);
@@ -1075,7 +1085,7 @@ impl App {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 tracing::warn!(%error, "start at login not changed");
-                self.flash(format!("Start at login not changed: {error}"));
+                self.flash(tr!("toast-autostart-failed", error = error.to_string()));
             }
             Err(mpsc::TryRecvError::Disconnected) => {}
         }
@@ -1109,7 +1119,7 @@ impl App {
     /// buffer item stays the same, with the new picture (US-7.1).
     fn save_annotation(&mut self, item: ItemId, base: Arc<Frame>, shapes: Vec<cb_annotate::Shape>) {
         let Some(found) = self.buffer.get(item) else {
-            return self.flash("The capture was removed: the annotations were not saved");
+            return self.flash(tr!("toast-annotate-removed"));
         };
         match (&found.state, found.path.clone()) {
             (ItemState::Ready, Some(path)) => {
@@ -1125,7 +1135,7 @@ impl App {
                 let _ = self.output.send(job);
             }
             (ItemState::Failed(_), _) => {
-                self.flash("The capture was not saved, so its annotations cannot be");
+                self.flash(tr!("toast-annotate-unsaved"));
             }
             _ => self.annotation_waiting = Some((item, base, shapes)),
         }
@@ -1168,7 +1178,9 @@ impl App {
                             self.open_editor(item, Arc::new(frame));
                         }
                         Ok(_) => {}
-                        Err(error) => self.flash(format!("Could not open the capture: {error}")),
+                        Err(error) => {
+                            self.flash(tr!("toast-open-failed", error = error.to_string()))
+                        }
                     }
                 }
                 output::Done::Annotated {
@@ -1196,12 +1208,14 @@ impl App {
                             }
                         }
                         self.flash(if reverted {
-                            "Back to the original · copied"
+                            tr!("toast-reverted")
                         } else {
-                            "Annotations saved · copied"
+                            tr!("toast-annotations-saved")
                         });
                     }
-                    Err(error) => self.flash(format!("Could not save the annotations: {error}")),
+                    Err(error) => {
+                        self.flash(tr!("toast-annotate-failed", error = error.to_string()))
+                    }
                 },
                 output::Done::Renamed { item, path } => {
                     if let Some(found) = self.buffer.get_mut(item) {
@@ -1210,7 +1224,7 @@ impl App {
                 }
                 output::Done::ClipboardFailed(error) => {
                     tracing::warn!(%error, "clipboard");
-                    self.flash("Saved, but not copied to the clipboard");
+                    self.flash(tr!("toast-saved-not-copied"));
                 }
                 output::Done::Stored { item, result } => {
                     let Some(i) = self.buffer.get_mut(item) else {
@@ -1227,7 +1241,7 @@ impl App {
                         }
                         Err(error) => {
                             i.state = ItemState::Failed(error.clone());
-                            self.flash(format!("Could not save the capture: {error}"));
+                            self.flash(tr!("toast-save-failed", error = error.to_string()));
                         }
                     }
                     if let Some((item, base, shapes)) =
@@ -1248,7 +1262,7 @@ impl App {
         }
         let (tx, rx) = mpsc::channel();
         let dialog = rfd::FileDialog::new()
-            .set_title("Folder for new captures")
+            .set_title(tr!("dialog-folder"))
             .set_directory(&self.captures_dir)
             .set_parent(frame);
         let ctx = ctx.clone();
@@ -1293,8 +1307,7 @@ impl App {
                     .buffer
                     .push(ItemKind::Video { duration_ms: ms }, self.bar.mode);
                 if let Some(i) = self.buffer.get_mut(id) {
-                    i.state =
-                        ItemState::Failed("recording backend not implemented (US-5.1)".into());
+                    i.state = ItemState::Failed(tr!("record-todo"));
                 }
             }
         }
@@ -1320,11 +1333,11 @@ impl App {
                         .take_if(|(request, _)| *request == request_id)
                         .is_some()
                     {
-                        self.flash(format!("Capture failed: {error}"));
+                        self.flash(tr!("toast-capture-failed", error = error.to_string()));
                     } else if let Some(item) = self.pending.remove(&request_id) {
                         if let Some(i) = self.buffer.get_mut(item) {
                             i.state = ItemState::Failed(error.to_string());
-                            self.flash(format!("Capture failed: {error}"));
+                            self.flash(tr!("toast-capture-failed", error = error.to_string()));
                         }
                     }
                 }
@@ -1718,6 +1731,9 @@ impl eframe::App for App {
             self.bar.elapsed_secs = start.elapsed().as_secs();
         }
 
+        if std::mem::take(&mut self.focus_bar) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
         if self.click_through != self.hidden {
             self.click_through = self.hidden;
             ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(self.hidden));

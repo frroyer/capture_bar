@@ -11,3 +11,5 @@ cb-buffer.workspace = true
 cb-annotate.workspace = true
 egui.workspace = true
 chrono.workspace = true
+fluent-bundle.workspace = true
+sys-locale.workspace = true
