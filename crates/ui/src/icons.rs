@@ -213,15 +213,31 @@ pub fn paint(p: &Painter, center: Pos2, icon: Icon, color: Color32) {
             seg(1.0, -4.0, 4.0, -1.0);
         }
         Icon::Repeat => {
-            let arc = (0..=12)
+            // The Region icon's corners, with a circling arrow inside: this region again.
+            for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                p.line(
+                    vec![
+                        at(sx * 7.5, sy * 5.0),
+                        at(sx * 7.5, sy * 7.5),
+                        at(sx * 5.0, sy * 7.5),
+                    ],
+                    s,
+                );
+            }
+            let (start, end) = (-0.2_f32, 4.4_f32);
+            let arc = (0..=14)
                 .map(|i| {
-                    let a = -0.6 + 4.4 * i as f32 / 12.0;
-                    at(6.0 * a.cos(), 6.0 * a.sin())
+                    let a = start + (end - start) * i as f32 / 14.0;
+                    at(4.3 * a.cos(), 4.3 * a.sin())
                 })
                 .collect::<Vec<_>>();
             let tip = *arc.last().expect("arc has points");
             p.line(arc, s);
-            p.line(vec![tip + vec2(-1.0, -4.0), tip, tip + vec2(4.0, -1.5)], s);
+            // Two barbs pointing back along the arc from its end.
+            let back = vec2(end.sin(), -end.cos()) * 3.2;
+            for turn in [0.75, -0.75] {
+                p.line_segment([tip, tip + egui::emath::Rot2::from_angle(turn) * back], s);
+            }
         }
         Icon::Pin => {
             p.circle_stroke(at(0.0, -3.0), 3.5, s);
