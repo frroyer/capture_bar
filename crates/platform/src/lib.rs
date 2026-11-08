@@ -109,6 +109,63 @@ pub fn warm_up_recording() {
     windows_record::warm_up();
 }
 
+/// The app's icon, the tray's disc: square RGBA pixels and their side. None on Linux,
+/// which has no tray icon yet.
+pub fn app_icon() -> Option<(Vec<u8>, u32)> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        Some((tray::icon_pixels(), tray::ICON_SIZE))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        None
+    }
+}
+
+/// Give a window a taskbar button, or take it away. The bar has none while it floats,
+/// and gets one while minimized, as the way back. Windows only for now: elsewhere the
+/// bar collapses to its pill instead. Call from the thread that owns the window.
+pub fn show_in_taskbar(
+    window: &impl raw_window_handle::HasWindowHandle,
+    show: bool,
+) -> cb_core::CaptureResult<()> {
+    #[cfg(windows)]
+    {
+        windows::show_in_taskbar(window, show)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (window, show);
+        Err(cb_core::CaptureError::NotImplemented("show_in_taskbar"))
+    }
+}
+
+/// Brings a minimized window back from any thread. eframe runs no frames while its
+/// window is minimized, so shortcuts and the tray icon restore the bar first; their
+/// command runs once it is back. Windows only, the one place the bar minimizes.
+#[derive(Debug, Clone, Copy)]
+pub struct Restorer(#[cfg_attr(not(windows), allow(dead_code))] isize);
+
+impl Restorer {
+    /// None where the bar never minimizes.
+    pub fn new(window: &impl raw_window_handle::HasWindowHandle) -> Option<Self> {
+        #[cfg(windows)]
+        {
+            windows::window_id(window).map(Self)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = window;
+            None
+        }
+    }
+
+    pub fn restore_if_minimized(self) {
+        #[cfg(windows)]
+        windows::restore_if_minimized(self.0);
+    }
+}
+
 /// Keep a window out of every screenshot and recording (FR-6).
 ///
 /// Windows only for now. macOS excludes the bar through the ScreenCaptureKit

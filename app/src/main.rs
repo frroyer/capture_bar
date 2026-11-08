@@ -93,8 +93,17 @@ fn main() -> eframe::Result<()> {
         "starting Capture Bar"
     );
 
+    let mut viewport = egui::ViewportBuilder::default();
+    // Shown on the taskbar button while the bar is minimized.
+    if let Some((rgba, side)) = cb_platform::app_icon() {
+        viewport = viewport.with_icon(egui::IconData {
+            rgba,
+            width: side,
+            height: side,
+        });
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+        viewport: viewport
             .with_title("Capture Bar")
             .with_inner_size(INITIAL_SIZE)
             .with_decorations(false)
@@ -238,6 +247,20 @@ impl Toast {
 /// A recording's place in the buffer and how it ended.
 type Recorded = (ItemId, CaptureResult<Recording>);
 
+/// Where the bar is on its way to or from the taskbar (Windows). It has a taskbar
+/// button only while minimized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Taskbar {
+    /// Floating, with no taskbar button.
+    #[default]
+    Off,
+    /// The collapse button was pressed: minimize on the next frame.
+    Asked,
+    /// Minimized, with a taskbar button to click. eframe runs no frames meanwhile, so
+    /// the next frame means the bar is back.
+    In,
+}
+
 struct ActiveRecording {
     handle: Box<dyn StreamHandle>,
     /// Its place in the buffer, there from the start.
@@ -248,6 +271,7 @@ struct ActiveRecording {
 struct App {
     bar: BarState,
     collapsed: bool,
+    taskbar: Taskbar,
     /// FR-4: nothing is drawn and clicks go through. The window stays open, because
     /// eframe stops running a hidden window and it would never hear the shortcut again.
     hidden: bool,
@@ -424,6 +448,13 @@ impl App {
         // With a handler set, the crate no longer fills `GlobalHotKeyEvent::receiver()`.
         // Waking the UI here makes shortcuts work even if it is idle.
         let (commands_tx, commands) = mpsc::channel();
+        // Minimized to the taskbar, the bar runs no frames: bring it back first.
+        let restorer = cb_platform::Restorer::new(cc);
+        let restore = move || {
+            if let Some(restorer) = restorer {
+                restorer.restore_if_minimized();
+            }
+        };
         let ctx = cc.egui_ctx.clone();
         let tx = commands_tx.clone();
         let toast = shortcut_map
@@ -432,6 +463,7 @@ impl App {
         GlobalHotKeyEvent::set_event_handler(Some(move |ev: GlobalHotKeyEvent| {
             if let Some(cmd) = shortcut_command(&shortcut_map, &ev) {
                 tracing::debug!(?cmd, "shortcut");
+                restore();
                 let _ = tx.send(cmd);
                 ctx.request_repaint();
             }
@@ -440,6 +472,7 @@ impl App {
         let ctx = cc.egui_ctx.clone();
         let labels = tray_labels();
         let tray = cb_platform::create_tray(labels.each_ref().map(String::as_str), move |action| {
+            restore();
             match action {
                 TrayAction::ToggleBar => {
                     let _ = commands_tx.send(Command::ToggleBar);
@@ -515,6 +548,7 @@ impl App {
                 ..Default::default()
             },
             collapsed: false,
+            taskbar: Taskbar::Off,
             hidden: false,
             click_through: false,
             bar_fade: 1.0,
@@ -683,6 +717,13 @@ impl App {
             Command::ToggleRecording => self.toggle_recording(),
             Command::TogglePause => self.flash(tr!("toast-pause-todo")),
             Command::ToggleBuffer => self.bar.tray_open = !self.bar.tray_open,
+            Command::ToggleBar if self.taskbar != Taskbar::Off => {
+                // Minimized: the shortcut brings the bar back, as its taskbar button does.
+                self.repaint
+                    .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                self.hidden = false;
+                self.focus_bar = true;
+            }
             Command::ToggleBar => {
                 self.hidden = !self.hidden;
                 // Shown from a shortcut, the bar takes the keyboard, so Tab reaches its
@@ -1373,6 +1414,36 @@ impl App {
         }
     }
 
+    /// Minimize to the taskbar when asked, and take the taskbar button away again once
+    /// the bar is back, however it came back: the button, the shortcut or the tray icon.
+    fn follow_taskbar(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let minimized = ctx.input(|i| i.viewport().minimized).unwrap_or(false);
+        let before = self.taskbar;
+        self.taskbar = match self.taskbar {
+            Taskbar::Asked => match cb_platform::show_in_taskbar(frame, true) {
+                Ok(()) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    Taskbar::In
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "no taskbar button: collapsing instead");
+                    self.collapsed = true;
+                    Taskbar::Off
+                }
+            },
+            Taskbar::In if !minimized => {
+                if let Err(e) = cb_platform::show_in_taskbar(frame, false) {
+                    tracing::warn!(error = %e, "taskbar button stays");
+                }
+                Taskbar::Off
+            }
+            state => state,
+        };
+        if self.taskbar != before {
+            tracing::debug!(state = ?self.taskbar, minimized, "taskbar");
+        }
+    }
+
     /// Stop the recording, or start one in the current mode (FR-14). Window and Region
     /// open the overlay first, to pick what to record.
     fn toggle_recording(&mut self) {
@@ -1587,7 +1658,12 @@ impl App {
             self.bar.cam_on = !self.bar.cam_on;
         }
         if out.collapse {
-            self.collapsed = true;
+            // Windows minimizes to the taskbar; elsewhere the bar shrinks to its pill (M2.3).
+            if cfg!(windows) {
+                self.taskbar = Taskbar::Asked;
+            } else {
+                self.collapsed = true;
+            }
             self.bar.tray_open = false;
         }
         if out.expand {
@@ -1887,6 +1963,7 @@ impl eframe::App for App {
         self.poll_output(ctx);
         self.poll_folder_choice();
         self.poll_autostart();
+        self.follow_taskbar(ctx, frame);
         self.sweep();
         self.track_position(ctx);
 

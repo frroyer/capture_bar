@@ -74,6 +74,47 @@ pub(crate) fn exclude_from_capture(
     unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) }.map_err(platform_err)
 }
 
+/// The window's handle as a number, which can cross threads: see [`crate::Restorer`].
+pub(crate) fn window_id(window: &impl raw_window_handle::HasWindowHandle) -> Option<isize> {
+    hwnd_of(window).ok().map(|hwnd| hwnd.0 as isize)
+}
+
+/// See [`crate::Restorer`].
+pub(crate) fn restore_if_minimized(id: isize) {
+    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, ShowWindowAsync, SW_RESTORE};
+    let hwnd = HWND(id as *mut _);
+    // SAFETY: both calls accept any value; a stale handle only makes them fail.
+    // Async: the window's thread does the work, so this never blocks the caller.
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindowAsync(hwnd, SW_RESTORE);
+        }
+    }
+}
+
+/// See [`crate::show_in_taskbar`].
+pub(crate) fn show_in_taskbar(
+    window: &impl raw_window_handle::HasWindowHandle,
+    show: bool,
+) -> CaptureResult<()> {
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
+    let hwnd = hwnd_of(window)?;
+    // SAFETY: plain COM calls on the window's thread, where winit initialised COM;
+    // `hwnd` comes from a live window borrowed for this call.
+    unsafe {
+        let list: ITaskbarList =
+            CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER).map_err(platform_err)?;
+        list.HrInit().map_err(platform_err)?;
+        if show {
+            list.AddTab(hwnd)
+        } else {
+            list.DeleteTab(hwnd)
+        }
+        .map_err(platform_err)
+    }
+}
+
 /// winit keeps a 1 px strip above the client area of borderless windows, which
 /// shows wherever the bar's rounded corners leave the window transparent. Answering
 /// the message here makes the client area cover the whole window.
