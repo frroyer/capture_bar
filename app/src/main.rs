@@ -200,7 +200,7 @@ fn default_shortcuts() -> Vec<(HotKey, Command)> {
         (HotKey::new(m, Code::KeyA), Command::RepeatLastRegion),
         (HotKey::new(m, Code::KeyB), Command::ToggleBuffer),
         (HotKey::new(m, Code::KeyC), Command::CopyNewest),
-        (HotKey::new(m, Code::KeyL), Command::ToggleDestination),
+        (HotKey::new(m, Code::KeyL), Command::EditPrefix),
     ]
 }
 
@@ -258,7 +258,10 @@ struct App {
     captures_dir: PathBuf,
     /// Put the keyboard in the prefix field on the next frame.
     focus_prefix: bool,
-    destination_size: egui::Vec2,
+    /// The prefix the captures in the buffer were last offered to be renamed to.
+    named_prefix: String,
+    /// Ask whether to rename the buffer's captures to the current prefix (FR-30).
+    rename_offer: bool,
     /// The answer of the folder dialog, which runs on its own thread: `None` if cancelled.
     folder_choice: Option<mpsc::Receiver<Option<PathBuf>>>,
     /// "Choose…" was clicked: the dialog opens once the frame's window handle is at hand.
@@ -414,7 +417,7 @@ impl App {
             bar: BarState {
                 mic_on: true,
                 mode: saved_mode(cc.storage),
-                prefix,
+                prefix: prefix.clone(),
                 ..Default::default()
             },
             collapsed: false,
@@ -440,7 +443,8 @@ impl App {
             toast,
             captures_dir,
             focus_prefix: false,
-            destination_size: egui::Vec2::ZERO,
+            named_prefix: prefix,
+            rename_offer: false,
             folder_choice: None,
             folder_requested: false,
             item_action: None,
@@ -570,13 +574,12 @@ impl App {
             },
             Command::CopyNewest => self.copy_newest(),
             Command::OpenSettings => self.flash("Settings: not implemented yet (US-8.2)"),
-            Command::ToggleDestination => {
-                self.bar.destination_open = !self.bar.destination_open;
-                if self.bar.destination_open {
-                    // From a shortcut, the bar may be hidden and another app has the keyboard.
-                    self.hidden = false;
-                    self.focus_prefix = true;
-                }
+            Command::EditPrefix => {
+                // From a shortcut, the bar may be hidden and another app has the keyboard.
+                self.hidden = false;
+                self.collapsed = false;
+                self.bar.tray_open = true;
+                self.focus_prefix = true;
             }
             Command::Cancel => {}
         }
@@ -636,6 +639,21 @@ impl App {
         for item in expired {
             self.forget(item);
         }
+    }
+
+    /// The captures whose file would take another name with the current prefix (FR-30).
+    /// Captures still being written keep the name they were given.
+    fn to_rename(&self) -> Vec<(ItemId, PathBuf)> {
+        self.buffer
+            .newest_first()
+            .filter(|i| i.state == ItemState::Ready)
+            .filter_map(|i| Some((i.id, i.path.clone()?)))
+            .filter(|(_, path)| {
+                path.file_name()
+                    .and_then(|n| output::renamed(&n.to_string_lossy(), &self.bar.prefix))
+                    .is_some()
+            })
+            .collect()
     }
 
     /// Send the buffer to the index writer if it changed since the last time.
@@ -875,6 +893,11 @@ impl App {
                     }
                 }
                 output::Done::Message(message) => self.flash(message),
+                output::Done::Renamed { item, path } => {
+                    if let Some(found) = self.buffer.get_mut(item) {
+                        found.path = Some(path);
+                    }
+                }
                 output::Done::ClipboardFailed(error) => {
                     tracing::warn!(%error, "clipboard");
                     self.flash("Saved, but not copied to the clipboard");
@@ -997,7 +1020,7 @@ impl App {
     fn draw(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         // Frozen during a drag: changing the band would move the bar under the pointer.
         if !self.dragging {
-            self.band = self.bar_hovered && !self.bar.tray_open && !self.bar.destination_open;
+            self.band = self.bar_hovered && !self.bar.tray_open;
         }
         if self
             .toast
@@ -1007,7 +1030,7 @@ impl App {
             self.toast = None;
         }
         let toast_on = self.toast.is_some();
-        let has_extras = self.band || self.bar.tray_open || self.bar.destination_open || toast_on;
+        let has_extras = self.band || self.bar.tray_open || toast_on;
 
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
         match self.bar.tooltip_side {
@@ -1100,25 +1123,20 @@ impl App {
             self.bar.tooltip_side,
             TooltipSide::Left | TooltipSide::Right
         );
-        if self.bar.destination_open {
+        if self.bar.tray_open {
             let focus = std::mem::take(&mut self.focus_prefix);
             if focus {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
             }
-            let folder = self.captures_dir.display().to_string();
-            let next = output::file_name(&self.bar.prefix, std::time::SystemTime::now());
-            let prefix = &mut self.bar.prefix;
-            let mut out = cb_ui::DestinationOutput::default();
-            self.destination_size = content_size(ui, |ui| {
-                out = cb_ui::destination_panel(ui, prefix, &folder, &next, focus);
-            });
-            *prefix = output::clean_prefix(prefix);
-            self.folder_requested |= out.choose_folder;
-            if out.close {
-                self.bar.destination_open = false;
-            }
-        }
-        if self.bar.tray_open {
+            let next = output::file_name(&self.bar.prefix, SystemTime::now());
+            let to_rename = self.to_rename().len();
+            let destination = cb_ui::Destination {
+                prefix: &mut self.bar.prefix,
+                folder: &self.captures_dir,
+                next_file: &next,
+                focus,
+                rename_offer: (self.rename_offer && to_rename > 0).then_some(to_rename),
+            };
             let width = if beside || self.collapsed {
                 TRAY_WIDTH_BESIDE_BAR
             } else {
@@ -1127,10 +1145,26 @@ impl App {
             let (buffer, selection, thumbnails) = (&self.buffer, &self.selection, &self.thumbnails);
             let mut asked = cb_ui::TrayOutput::default();
             self.tray_size = content_size(ui, |ui| {
-                asked = cb_ui::tray(ui, buffer, selection, thumbnails, width);
+                asked = cb_ui::tray(ui, buffer, selection, thumbnails, destination, width);
             });
+            self.bar.prefix = output::clean_prefix(&self.bar.prefix);
             self.item_action = self.item_action.or(asked.item);
             self.batch_action = self.batch_action.or(asked.batch);
+            self.folder_requested |= asked.choose_folder;
+            if asked.prefix_done && self.bar.prefix != self.named_prefix {
+                self.named_prefix = self.bar.prefix.clone();
+                self.rename_offer = true;
+            }
+            match asked.rename {
+                Some(true) => {
+                    let files = self.to_rename();
+                    let prefix = self.bar.prefix.clone();
+                    let _ = self.output.send(output::Job::Rename { files, prefix });
+                    self.rename_offer = false;
+                }
+                Some(false) => self.rename_offer = false,
+                None => {}
+            }
         }
         if let Some(toast) = &self.toast {
             let undo = toast.undo;
@@ -1162,9 +1196,6 @@ impl App {
                 let mut extra = 0.0;
                 if self.bar.tray_open {
                     extra += self.tray_size.y + 6.0;
-                }
-                if self.bar.destination_open {
-                    extra += self.destination_size.y + 6.0;
                 }
                 if extra == 0.0 {
                     extra = cb_ui::TOOLTIP_ROOM;
@@ -1379,7 +1410,10 @@ impl eframe::App for App {
         if flashing {
             ctx.request_repaint();
         }
-        let cursor_in = self.dragging || ctx.input(|i| i.pointer.hover_pos().is_some());
+        // Typing the prefix counts as being there, wherever the cursor went.
+        let cursor_in = self.dragging
+            || ctx.input(|i| i.pointer.hover_pos().is_some())
+            || ctx.memory(|m| m.focused().is_some());
         let cursor_near = flashing || self.bar_hovered || cursor_in;
         if tray_idle(
             self.bar.tray_open,
@@ -1529,7 +1563,7 @@ mod tests {
             (Code::Digit2, Command::CaptureWith(CaptureMode::Window)),
             (Code::Digit3, Command::CaptureWith(CaptureMode::Screen)),
             (Code::KeyB, Command::ToggleBuffer),
-            (Code::KeyL, Command::ToggleDestination),
+            (Code::KeyL, Command::EditPrefix),
         ] {
             assert_eq!(keys(code), Some((mods, cmd)));
         }

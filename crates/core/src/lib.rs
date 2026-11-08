@@ -37,8 +37,8 @@ pub enum Command {
     ToggleBuffer,
     CopyNewest,
     OpenSettings,
-    /// Open or close the prefix and folder of new captures (FR-30).
-    ToggleDestination,
+    /// Open the tray with the keyboard in the prefix of new captures (FR-30).
+    EditPrefix,
     Cancel,
 }
 

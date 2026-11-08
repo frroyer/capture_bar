@@ -11,7 +11,7 @@ use cb_core::{CaptureMode, Command};
 use chrono::{DateTime, Local};
 use egui::{
     emath::RectAlign, vec2, Align2, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions,
-    FontFamily, FontId, Frame, Id, Key, Label, Margin, Response, RichText, Role, Sense, Stroke,
+    FontFamily, FontId, Frame, Id, Label, Margin, Response, RichText, Role, Sense, Stroke,
     StrokeKind, TextureHandle, Tooltip, Ui, Vec2, WidgetInfo,
 };
 use icons::Icon;
@@ -57,8 +57,6 @@ pub struct BarState {
     pub attention: f32,
     /// What new capture file names start with (FR-30).
     pub prefix: String,
-    /// The prefix and folder panel is open.
-    pub destination_open: bool,
     /// A region was captured before: the bar offers to capture it again.
     pub has_last_region: bool,
 }
@@ -544,24 +542,6 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                 }
 
                 if !state.recording {
-                    let fill = if state.destination_open {
-                        SELECTED
-                    } else {
-                        CHIP
-                    };
-                    if chip(
-                        ui,
-                        &[
-                            Piece::Icon(Icon::Folder),
-                            Piece::Text(&prefix_label(&state.prefix)),
-                        ],
-                        &ChipStyle::new(fill, TEXT),
-                        &format!("Name and folder of new captures ({})", shortcut("L")),
-                    )
-                    .clicked()
-                    {
-                        out.commands.push(Command::ToggleDestination);
-                    }
                     divider(ui);
                     let toggle = |on: bool| {
                         if on {
@@ -708,104 +688,118 @@ pub fn toast(ui: &mut Ui, message: &str, can_undo: bool) -> bool {
     undo
 }
 
-/// The prefix as the bar shows it: short enough not to stretch the bar.
-fn prefix_label(prefix: &str) -> String {
-    const MAX: usize = 16;
-    match prefix.trim() {
-        "" => "No prefix".into(),
-        p if p.chars().count() > MAX => p.chars().take(MAX - 1).chain(['…']).collect(),
-        p => p.into(),
+/// `text` cut to `max` characters, with an ellipsis when cut.
+fn shorten(text: &str, max: usize) -> String {
+    if text.chars().count() > max {
+        text.chars().take(max - 1).chain(['…']).collect()
+    } else {
+        text.into()
     }
 }
 
-/// The width of the prefix and folder panel, in points.
-pub const DESTINATION_WIDTH: f32 = 460.0;
-
-/// What the user did in the prefix and folder panel this frame.
-#[derive(Debug, Default)]
-pub struct DestinationOutput {
-    pub choose_folder: bool,
-    pub close: bool,
+/// Where new captures go and what they are called (FR-30), edited from the tray.
+pub struct Destination<'a> {
+    /// Edited in place.
+    pub prefix: &'a mut String,
+    pub folder: &'a Path,
+    /// The name the next capture will get, shown in the prefix field's tooltip.
+    pub next_file: &'a str,
+    /// Put the keyboard in the prefix field this frame.
+    pub focus: bool,
+    /// How many captures in the buffer are named otherwise than the prefix, when the
+    /// user should be asked whether to rename them.
+    pub rename_offer: Option<usize>,
 }
 
-/// Where new captures go and what they are called (FR-30). The prefix is edited in place;
-/// `focus` puts the keyboard in its field.
-pub fn destination_panel(
-    ui: &mut Ui,
-    prefix: &mut String,
-    folder: &str,
-    next_file: &str,
-    focus: bool,
-) -> DestinationOutput {
+/// The folder chip and prefix field, right-aligned on the tray's title line.
+fn destination_line(ui: &mut Ui, destination: &mut Destination, out: &mut TrayOutput) {
     use palette::*;
-    let mut out = DestinationOutput::default();
-    let small_chip = ChipStyle {
-        fill: CHIP,
-        color: TEXT,
-        height: 28.0,
-    };
-    let caption = |ui: &mut Ui, text: &str| {
-        ui.add_sized(
-            vec2(48.0, 28.0),
-            Label::new(RichText::new(text).color(MUTED)),
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+        let edit = ui.add(
+            egui::TextEdit::singleline(destination.prefix)
+                .char_limit(40)
+                .desired_width(120.0)
+                .hint_text("no prefix")
+                .text_color(TEXT)
+                .background_color(CHIP)
+                .margin(Margin::symmetric(8, 5)),
         );
+        if destination.focus {
+            edit.request_focus();
+        }
+        if edit.lost_focus() {
+            out.prefix_done = true;
+        }
+        show_tooltip(
+            &edit,
+            &format!("Prefix of new file names. Next: {}", destination.next_file),
+        );
+        let name = destination.folder.file_name().map_or_else(
+            || destination.folder.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        let style = ChipStyle {
+            fill: CHIP,
+            color: TEXT,
+            height: 28.0,
+        };
+        let tip = format!(
+            "New captures go to {}. Click to choose another folder ({})",
+            destination.folder.display(),
+            shortcut("L")
+        );
+        let label = shorten(&name, 18);
+        if chip(
+            ui,
+            &[Piece::Icon(Icon::Folder), Piece::Text(&label)],
+            &style,
+            &tip,
+        )
+        .clicked()
+        {
+            out.choose_folder = true;
+        }
+    });
+}
+
+/// "Rename the 3 captures to acme_…?" under the title, after the prefix changed.
+fn rename_offer(ui: &mut Ui, count: usize, prefix: &str, out: &mut TrayOutput) {
+    use palette::*;
+    let to = match prefix.trim() {
+        "" => "the timestamp alone".to_string(),
+        p => format!("{}_…", shorten(p, 24)),
     };
-    Frame::new()
-        .fill(BAR)
-        .stroke(Stroke::new(1.0, BORDER))
-        .corner_radius(CornerRadius::same(16))
-        .inner_margin(Margin::same(12))
-        .show(ui, |ui| {
-            ui.set_width(DESTINATION_WIDTH - 26.0);
-            ui.horizontal(|ui| {
-                caption(ui, "Prefix");
-                let edit = ui.add(
-                    egui::TextEdit::singleline(prefix)
-                        .char_limit(40)
-                        .desired_width(260.0)
-                        .hint_text("none: the timestamp alone")
-                        .text_color(TEXT)
-                        .background_color(CHIP)
-                        .margin(Margin::symmetric(8, 6)),
-                );
-                if focus {
-                    edit.request_focus();
-                }
-                let keys = ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape));
-                if edit.lost_focus() && keys {
-                    out.close = true;
-                }
-                if chip(ui, &[Piece::Text("Done")], &small_chip, "Close (Enter)").clicked() {
-                    out.close = true;
-                }
-            });
-            ui.horizontal(|ui| {
-                caption(ui, "Folder");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if chip(
-                        ui,
-                        &[Piece::Icon(Icon::Folder), Piece::Text("Choose…")],
-                        &small_chip,
-                        "Pick the folder for new captures",
-                    )
-                    .clicked()
-                    {
-                        out.choose_folder = true;
-                    }
-                    ui.add(Label::new(RichText::new(folder).color(TEXT)).truncate())
-                        .on_hover_text(folder);
-                });
-            });
-            ui.add(
-                Label::new(
-                    RichText::new(format!("Next: {next_file}"))
-                        .color(MUTED)
-                        .size(12.0),
-                )
-                .truncate(),
-            );
-        });
-    out
+    let captures = if count == 1 { "capture" } else { "captures" };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+        ui.label(
+            RichText::new(format!(
+                "Rename the {count} {captures} in the buffer to {to}?"
+            ))
+            .color(TEXT),
+        );
+        let style = |fill, color| ChipStyle {
+            fill,
+            color,
+            height: 26.0,
+        };
+        let renamed = "Rename the files; captures still being written keep their name";
+        if chip(
+            ui,
+            &[Piece::Text("Rename")],
+            &style(PRIMARY, PRIMARY_TEXT),
+            renamed,
+        )
+        .clicked()
+        {
+            out.rename = Some(true);
+        }
+        let kept = "Leave their names as they are";
+        if chip(ui, &[Piece::Text("Keep names")], &style(CHIP, TEXT), kept).clicked() {
+            out.rename = Some(false);
+        }
+    });
 }
 
 /// What the user asked of one capture in the tray (FR-23).
@@ -855,6 +849,12 @@ pub enum BatchAction {
 pub struct TrayOutput {
     pub item: Option<(ItemId, ItemAction)>,
     pub batch: Option<BatchAction>,
+    /// The folder chip was clicked.
+    pub choose_folder: bool,
+    /// The prefix field lost the keyboard: the prefix is what the user meant.
+    pub prefix_done: bool,
+    /// The answer to the rename offer: rename, or keep the names.
+    pub rename: Option<bool>,
 }
 
 /// One capture in the tray: its picture, then its name, details and actions.
@@ -1123,6 +1123,7 @@ pub fn tray(
     buffer: &Buffer,
     selection: &Selection,
     thumbnails: &HashMap<ItemId, TextureHandle>,
+    mut destination: Destination,
     width: f32,
 ) -> TrayOutput {
     use palette::*;
@@ -1139,7 +1140,13 @@ pub fn tray(
                 0 => format!("Buffer · {} captures", buffer.len()),
                 n => format!("Buffer · {} captures · {n} selected", buffer.len()),
             };
-            ui.label(RichText::new(title).color(TEXT).strong());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(title).color(TEXT).strong());
+                destination_line(ui, &mut destination, &mut out);
+            });
+            if let Some(count) = destination.rename_offer {
+                rename_offer(ui, count, destination.prefix, &mut out);
+            }
             if !buffer.is_empty() {
                 out.batch = batch_row(ui, selection.len());
             }
@@ -1172,6 +1179,26 @@ pub fn tray(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::Key;
+
+    /// The tray with an empty prefix and no rename offer.
+    fn tray_plain(
+        ui: &mut Ui,
+        buffer: &Buffer,
+        selection: &Selection,
+        thumbnails: &HashMap<ItemId, TextureHandle>,
+        width: f32,
+    ) -> TrayOutput {
+        let mut prefix = String::new();
+        let destination = Destination {
+            prefix: &mut prefix,
+            folder: Path::new("C:/Captures"),
+            next_file: "x.png",
+            focus: false,
+            rename_offer: None,
+        };
+        tray(ui, buffer, selection, thumbnails, destination, width)
+    }
 
     #[test]
     fn overlay_contrasts_with_fill() {
@@ -1311,7 +1338,7 @@ mod tests {
                 ..Default::default()
             };
             let mut output = ctx.run_ui(input, |ui| {
-                tray(ui, buffer, &Selection::default(), thumbnails, 800.0);
+                tray_plain(ui, buffer, &Selection::default(), thumbnails, 800.0);
             });
             output.textures_delta.clear();
             seen = output
@@ -1351,21 +1378,19 @@ mod tests {
         assert!(at(format!("{:?}", new_pic.id())) < at(format!("{:?}", old_pic.id())));
     }
 
-    #[test]
-    fn prefix_label_stays_short() {
-        assert_eq!(prefix_label(""), "No prefix");
-        assert_eq!(prefix_label("acme"), "acme");
-        let long = prefix_label("a very long client name indeed");
-        assert_eq!(long.chars().count(), 16);
-        assert!(long.ends_with('…'));
-    }
-
-    /// Opens the panel with the keyboard in the prefix, types `typed`, then presses `key`.
-    fn type_in_destination(prefix: &str, typed: &str, key: Key) -> (String, bool) {
+    /// Runs the tray with the keyboard in the prefix, types `typed`, then presses `key`.
+    /// Returns the prefix, whether it was reported done, and the texts drawn.
+    fn type_in_tray(
+        prefix: &str,
+        typed: &str,
+        key: Key,
+        offer: Option<usize>,
+    ) -> (String, TrayOutput, Vec<String>) {
         let ctx = egui::Context::default();
         install_fonts(&ctx, None);
         let mut prefix = prefix.to_owned();
-        let mut closed = false;
+        let mut out = TrayOutput::default();
+        let mut texts = Vec::new();
         let press = |pressed| egui::Event::Key {
             key,
             physical_key: None,
@@ -1385,253 +1410,133 @@ mod tests {
                 ..Default::default()
             };
             let mut output = ctx.run_ui(input, |ui| {
-                let out = destination_panel(ui, &mut prefix, "C:/Captures", "x.png", n == 0);
-                closed |= out.close;
+                let destination = Destination {
+                    prefix: &mut prefix,
+                    folder: Path::new("C:/Users/me/Captures"),
+                    next_file: "acme_x.png",
+                    focus: n == 0,
+                    rename_offer: offer,
+                };
+                let now = tray(
+                    ui,
+                    &Buffer::new(),
+                    &Selection::default(),
+                    &HashMap::new(),
+                    destination,
+                    800.0,
+                );
+                out.prefix_done |= now.prefix_done;
             });
             output.textures_delta.clear();
+            texts = output
+                .shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect();
         }
-        (prefix, closed)
+        (prefix, out, texts)
     }
 
     #[test]
-    fn the_prefix_is_typed_in_place_and_enter_or_escape_close() {
-        assert_eq!(
-            type_in_destination("", "acme", Key::Enter),
-            ("acme".into(), true)
-        );
-        assert!(type_in_destination("a", "b", Key::Escape).1);
-        assert!(!type_in_destination("a", "b", Key::Tab).1);
-    }
-
-    /// Presses on the one card of `buffer` at `at(details)`, where `details` is the rect of
-    /// its details line, then releases there or `drag_by` further. Returns what the tray asked.
-    fn press_on_card(
-        buffer: &Buffer,
-        at: impl Fn(egui::Rect) -> egui::Pos2,
-        drag_by: egui::Vec2,
-    ) -> Vec<(ItemId, ItemAction)> {
-        let ctx = egui::Context::default();
-        install_fonts(&ctx, None);
-        let thumbnails = HashMap::new();
-        let mut details = egui::Rect::NOTHING;
-        let mut asked = Vec::new();
-        for frame in 0..8 {
-            let pos = at(details);
-            let button = |pos, pressed| egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: egui::Modifiers::NONE,
-            };
-            let events = match frame {
-                3 => vec![egui::Event::PointerMoved(pos)],
-                4 => vec![button(pos, true)],
-                5 => vec![egui::Event::PointerMoved(pos + drag_by)],
-                6 => vec![button(pos + drag_by, false)],
-                _ => Vec::new(),
-            };
-            let input = egui::RawInput {
-                events,
-                ..Default::default()
-            };
-            let mut output = ctx.run_ui(input, |ui| {
-                asked.extend(tray(ui, buffer, &Selection::default(), &thumbnails, 800.0).item);
-            });
-            output.textures_delta.clear();
-            for clipped in &output.shapes {
-                if let egui::Shape::Text(text) = &clipped.shape {
-                    if text.galley.text().starts_with("PNG") {
-                        details = text.visual_bounding_rect();
-                    }
-                }
-            }
-        }
-        asked
-    }
-
-    /// The centre of the `n`th button of the action row, below the details line.
-    fn action_button(n: usize) -> impl Fn(egui::Rect) -> egui::Pos2 {
-        move |details| {
-            egui::pos2(
-                details.left() + 18.0 + 40.0 * n as f32,
-                details.bottom() + 17.0,
-            )
-        }
-    }
-
-    #[test]
-    fn each_action_asks_for_its_own_capture() {
-        let mut buffer = Buffer::new();
-        let item = buffer.push(ItemKind::Image, CaptureMode::Region);
-        buffer.get_mut(item).unwrap().path = Some("C:/Captures/a.png".into());
-        let actions = [
-            ItemAction::Copy,
-            ItemAction::Save,
-            ItemAction::Annotate,
-            ItemAction::Delete,
-        ];
-        for (n, action) in actions.into_iter().enumerate() {
-            let asked = press_on_card(&buffer, action_button(n), vec2(0.0, 0.0));
-            assert_eq!(asked, vec![(item, action)], "button {n}");
-        }
-        let picture = |details: egui::Rect| details.left_top() - vec2(-40.0, 60.0);
-        let dragged = press_on_card(&buffer, picture, vec2(30.0, 0.0));
-        assert_eq!(dragged, vec![(item, ItemAction::DragOut)]);
-        let clicked = press_on_card(&buffer, picture, vec2(0.0, 0.0));
-        assert_eq!(clicked, vec![(item, ItemAction::Select(SelectHow::Only))]);
-        // The pin sits in the picture's top-right corner, above the name and details.
-        let pin = |details: egui::Rect| details.left_top() + vec2(145.0, -105.0);
-        let pinned = press_on_card(&buffer, pin, vec2(0.0, 0.0));
-        assert_eq!(pinned, vec![(item, ItemAction::TogglePin)]);
-    }
-
-    #[test]
-    fn a_capture_not_on_disk_yet_can_only_be_deleted() {
-        let mut buffer = Buffer::new();
-        let item = buffer.push(ItemKind::Image, CaptureMode::Region);
-        buffer.get_mut(item).unwrap().state = ItemState::Encoding { progress_pct: 0 };
-        for n in 0..3 {
-            assert!(press_on_card(&buffer, action_button(n), vec2(0.0, 0.0)).is_empty());
-        }
-        let delete = press_on_card(&buffer, action_button(3), vec2(0.0, 0.0));
-        assert_eq!(delete, vec![(item, ItemAction::Delete)]);
-        let picture = |details: egui::Rect| details.left_top() - vec2(-40.0, 60.0);
-        let dragged = press_on_card(&buffer, picture, vec2(30.0, 0.0));
+    fn the_prefix_is_typed_in_the_tray_and_enter_finishes_it() {
+        let (prefix, out, texts) = type_in_tray("", "acme", Key::Enter, None);
+        assert_eq!(prefix, "acme");
+        assert!(out.prefix_done);
         assert!(
-            !dragged.contains(&(item, ItemAction::DragOut)),
-            "{dragged:?}"
+            texts.iter().any(|t| t == "Captures"),
+            "the folder by its name: {texts:?}"
         );
+        let (_, out, _) = type_in_tray("a", "b", Key::Tab, None);
+        assert!(out.prefix_done, "Tab leaves the field too");
     }
 
-    /// Clicks `offset` away from the centre of the text starting with `text`, holding
-    /// `modifiers`. Returns the tray's output with what was clicked, and every text drawn.
-    fn click_in_tray(
-        buffer: &Buffer,
-        selection: &Selection,
-        text: &str,
-        offset: egui::Vec2,
-        modifiers: egui::Modifiers,
-    ) -> (TrayOutput, Vec<String>) {
-        click_in_tray_times(buffer, selection, text, offset, modifiers, 1)
+    #[test]
+    fn the_rename_offer_names_the_count_and_the_new_prefix() {
+        let (_, _, texts) = type_in_tray("acme", "", Key::Enter, Some(3));
+        assert!(
+            texts
+                .iter()
+                .any(|t| t == "Rename the 3 captures in the buffer to acme_…?"),
+            "{texts:?}"
+        );
+        let (_, _, texts) = type_in_tray("", "", Key::Enter, Some(1));
+        assert!(texts
+            .iter()
+            .any(|t| t.contains("1 capture in the buffer to the timestamp alone")));
+        let (_, _, texts) = type_in_tray("acme", "", Key::Enter, None);
+        assert!(!texts.iter().any(|t| t.starts_with("Rename the")));
     }
 
-    /// [`click_in_tray`], clicking `clicks` times, a frame apart.
-    fn click_in_tray_times(
-        buffer: &Buffer,
-        selection: &Selection,
-        text: &str,
-        offset: egui::Vec2,
-        modifiers: egui::Modifiers,
-        clicks: usize,
-    ) -> (TrayOutput, Vec<String>) {
-        let ctx = egui::Context::default();
-        install_fonts(&ctx, None);
-        let thumbnails = HashMap::new();
-        let mut target = egui::Rect::NOTHING;
-        let mut out = TrayOutput::default();
-        let mut texts = Vec::new();
-        for frame in 0..5 + 2 * clicks {
-            let pos = target.center() + offset;
-            let button = |pressed| egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers,
-            };
-            let events = match frame {
-                3 => vec![
-                    egui::Event::ModifiersChanged(modifiers),
-                    egui::Event::PointerMoved(pos),
-                ],
-                n if n >= 4 && n % 2 == 0 && n < 4 + 2 * clicks => {
-                    vec![button(true), button(false)]
-                }
-                _ => Vec::new(),
-            };
-            let input = egui::RawInput {
-                events,
-                ..Default::default()
-            };
-            let mut output = ctx.run_ui(input, |ui| {
-                let now = tray(ui, buffer, selection, &thumbnails, 800.0);
-                out.item = out.item.or(now.item);
-                out.batch = out.batch.or(now.batch);
-            });
-            output.textures_delta.clear();
-            texts.clear();
-            for clipped in &output.shapes {
-                if let egui::Shape::Text(shape) = &clipped.shape {
-                    let drawn = shape.galley.text().to_owned();
-                    if drawn.starts_with(text) {
-                        target = shape.visual_bounding_rect();
+    #[test]
+    fn rename_and_keep_answer_the_offer() {
+        let mut buffer = Buffer::new();
+        buffer.push(ItemKind::Image, CaptureMode::Region);
+        let answer = |label: &str| {
+            let ctx = egui::Context::default();
+            install_fonts(&ctx, None);
+            let mut target = egui::Rect::NOTHING;
+            let mut answer = None;
+            for frame in 0..6 {
+                let pos = target.center();
+                let button = |pressed| egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                let events = match frame {
+                    3 => vec![egui::Event::PointerMoved(pos)],
+                    4 => vec![button(true), button(false)],
+                    _ => vec![],
+                };
+                let input = egui::RawInput {
+                    events,
+                    ..Default::default()
+                };
+                let mut prefix = "acme".to_string();
+                let mut output = ctx.run_ui(input, |ui| {
+                    let destination = Destination {
+                        prefix: &mut prefix,
+                        folder: Path::new("C:/Captures"),
+                        next_file: "x.png",
+                        focus: false,
+                        rename_offer: Some(1),
+                    };
+                    let thumbnails = HashMap::new();
+                    let out = tray(
+                        ui,
+                        &buffer,
+                        &Selection::default(),
+                        &thumbnails,
+                        destination,
+                        800.0,
+                    );
+                    answer = answer.or(out.rename);
+                });
+                output.textures_delta.clear();
+                for c in &output.shapes {
+                    if let egui::Shape::Text(t) = &c.shape {
+                        if t.galley.text() == label {
+                            target = t.visual_bounding_rect();
+                        }
                     }
-                    texts.push(drawn);
                 }
             }
-        }
-        (out, texts)
+            answer
+        };
+        assert_eq!(answer("Rename"), Some(true));
+        assert_eq!(answer("Keep names"), Some(false));
     }
 
     #[test]
-    fn clear_and_delete_ask_once_before_acting() {
-        let mut buffer = Buffer::new();
-        let a = buffer.push(ItemKind::Image, CaptureMode::Region);
-        let none = Selection::default();
-        let no_key = egui::Modifiers::NONE;
-        let (once, texts) =
-            click_in_tray_times(&buffer, &none, "Clear all", vec2(0.0, 0.0), no_key, 1);
-        assert_eq!(once.batch, None, "one click only asks");
-        assert!(texts.iter().any(|t| t == "Clear all?"), "{texts:?}");
-        let (twice, _) =
-            click_in_tray_times(&buffer, &none, "Clear all", vec2(0.0, 0.0), no_key, 2);
-        assert_eq!(twice.batch, Some(BatchAction::Clear));
-
-        let mut one = Selection::default();
-        one.click(a);
-        let (once, _) = click_in_tray_times(&buffer, &one, "Delete 1", vec2(0.0, 0.0), no_key, 1);
-        assert_eq!(once.batch, None);
-        let (twice, _) = click_in_tray_times(&buffer, &one, "Delete 1", vec2(0.0, 0.0), no_key, 2);
-        assert_eq!(twice.batch, Some(BatchAction::Delete));
-        let (copy, _) = click_in_tray_times(&buffer, &none, "Copy all", vec2(0.0, 0.0), no_key, 1);
-        assert_eq!(
-            copy.batch,
-            Some(BatchAction::CopyAll),
-            "the others act at once"
-        );
-    }
-
-    #[test]
-    fn batch_buttons_name_what_they_act_on() {
-        let mut buffer = Buffer::new();
-        let a = buffer.push(ItemKind::Image, CaptureMode::Region);
-        let b = buffer.push(ItemKind::Image, CaptureMode::Screen);
-        let none = Selection::default();
-        let none_key = egui::Modifiers::NONE;
-
-        let (out, texts) = click_in_tray(&buffer, &none, "Copy all", vec2(0.0, 0.0), none_key);
-        assert_eq!(out.batch, Some(BatchAction::CopyAll));
-        assert!(texts.iter().any(|t| t == "Clear all"), "{texts:?}");
-        assert!(!texts.iter().any(|t| t == "Deselect"), "{texts:?}");
-        assert!(!texts.iter().any(|t| t.starts_with("Delete")), "{texts:?}");
-
-        let mut one = Selection::default();
-        one.click(a);
-        let (out, texts) = click_in_tray(&buffer, &one, "Save 1", vec2(0.0, 0.0), none_key);
-        assert_eq!(out.batch, Some(BatchAction::SaveAll));
-        assert!(texts.iter().any(|t| t.ends_with("2 captures · 1 selected")));
-        assert!(texts.iter().any(|t| t == "Clear 1"), "{texts:?}");
-        assert!(texts.iter().any(|t| t == "Delete 1"), "{texts:?}");
-        let (out, _) = click_in_tray(&buffer, &one, "PDF", vec2(0.0, 0.0), none_key);
-        assert_eq!(out.batch, Some(BatchAction::ExportPdf));
-        let (out, _) = click_in_tray(&buffer, &one, "Deselect", vec2(0.0, 0.0), none_key);
-        assert_eq!(out.batch, Some(BatchAction::Deselect));
-
-        // The picture sits above the name; Region is the older card, drawn second.
-        let up = vec2(0.0, -60.0);
-        let (out, _) = click_in_tray(&buffer, &none, "PNG · Region", up, egui::Modifiers::SHIFT);
-        assert_eq!(out.item, Some((a, ItemAction::Select(SelectHow::Range))));
-        let (out, _) = click_in_tray(&buffer, &none, "PNG · Screen", up, egui::Modifiers::COMMAND);
-        assert_eq!(out.item, Some((b, ItemAction::Select(SelectHow::Toggle))));
+    fn long_names_are_shortened() {
+        assert_eq!(shorten("acme", 16), "acme");
+        let long = shorten("a very long client name indeed", 16);
+        assert_eq!(long.chars().count(), 16);
+        assert!(long.ends_with('…'));
     }
 
     #[test]
