@@ -798,6 +798,10 @@ pub enum BatchAction {
     SaveAll,
     /// Take the captures out of the buffer. Their files stay.
     Clear,
+    /// One PDF, a page per image (US-6.7).
+    ExportPdf,
+    /// Delete the selected captures, their files to the Recycle Bin.
+    Delete,
     Deselect,
 }
 
@@ -976,7 +980,8 @@ fn command_key() -> &'static str {
     }
 }
 
-/// Copy all, Save all and Clear, named for what they act on (FR-24).
+/// The batch actions, named for what they act on (FR-24). Delete only appears for a
+/// selection: one click must not send every capture to the Recycle Bin.
 fn batch_row(ui: &mut Ui, selected: usize) -> Option<BatchAction> {
     use palette::*;
     let style = ChipStyle {
@@ -988,12 +993,11 @@ fn batch_row(ui: &mut Ui, selected: usize) -> Option<BatchAction> {
         0 => ("all".to_string(), "every capture".to_string()),
         n => (n.to_string(), format!("the {n} selected")),
     };
-    // Right to left: the first is drawn rightmost.
-    let buttons = [
+    let mut buttons = vec![
         (
-            format!("Clear {what}"),
-            format!("Take {whose} out of the buffer; the files stay"),
-            BatchAction::Clear,
+            format!("Copy {what}"),
+            format!("Copy {whose}"),
+            BatchAction::CopyAll,
         ),
         (
             format!("Save {what}…"),
@@ -1001,29 +1005,35 @@ fn batch_row(ui: &mut Ui, selected: usize) -> Option<BatchAction> {
             BatchAction::SaveAll,
         ),
         (
-            format!("Copy {what}"),
-            format!("Copy {whose}"),
-            BatchAction::CopyAll,
+            "PDF…".to_string(),
+            format!("Export {whose} as one PDF, a page per image"),
+            BatchAction::ExportPdf,
+        ),
+        (
+            format!("Clear {what}"),
+            format!("Take {whose} out of the buffer; the files stay"),
+            BatchAction::Clear,
         ),
     ];
+    if selected > 0 {
+        buttons.push((
+            format!("Delete {what}"),
+            format!("Delete {whose}; the files go to the Recycle Bin"),
+            BatchAction::Delete,
+        ));
+        buttons.push((
+            "Deselect".to_string(),
+            "Act on every capture again".to_string(),
+            BatchAction::Deselect,
+        ));
+    }
     let mut action = None;
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
         for (label, tooltip, what) in &buttons {
             if chip(ui, &[Piece::Text(label)], &style, tooltip).clicked() {
                 action = Some(*what);
             }
-        }
-        if selected > 0
-            && chip(
-                ui,
-                &[Piece::Text("Deselect")],
-                &style,
-                "Act on every capture again",
-            )
-            .clicked()
-        {
-            action = Some(BatchAction::Deselect);
         }
     });
     action
@@ -1047,16 +1057,14 @@ pub fn tray(
         .show(ui, |ui| {
             // Less the margin and the border on both sides.
             ui.set_width((width - 26.0).max(1.0));
-            ui.horizontal(|ui| {
-                let title = match selection.len() {
-                    0 => format!("Buffer · {} captures", buffer.len()),
-                    n => format!("Buffer · {} captures · {n} selected", buffer.len()),
-                };
-                ui.label(RichText::new(title).color(TEXT).strong());
-                if !buffer.is_empty() {
-                    out.batch = batch_row(ui, selection.len());
-                }
-            });
+            let title = match selection.len() {
+                0 => format!("Buffer · {} captures", buffer.len()),
+                n => format!("Buffer · {} captures · {n} selected", buffer.len()),
+            };
+            ui.label(RichText::new(title).color(TEXT).strong());
+            if !buffer.is_empty() {
+                out.batch = batch_row(ui, selection.len());
+            }
             if buffer.is_empty() {
                 ui.label(
                     RichText::new(format!(
@@ -1484,6 +1492,7 @@ mod tests {
         assert_eq!(out.batch, Some(BatchAction::CopyAll));
         assert!(texts.iter().any(|t| t == "Clear all"), "{texts:?}");
         assert!(!texts.iter().any(|t| t == "Deselect"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.starts_with("Delete")), "{texts:?}");
 
         let mut one = Selection::default();
         one.click(a);
@@ -1491,6 +1500,9 @@ mod tests {
         assert_eq!(out.batch, Some(BatchAction::SaveAll));
         assert!(texts.iter().any(|t| t.ends_with("2 captures · 1 selected")));
         assert!(texts.iter().any(|t| t == "Clear 1"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Delete 1"), "{texts:?}");
+        let (out, _) = click_in_tray(&buffer, &one, "PDF", vec2(0.0, 0.0), none_key);
+        assert_eq!(out.batch, Some(BatchAction::ExportPdf));
         let (out, _) = click_in_tray(&buffer, &one, "Deselect", vec2(0.0, 0.0), none_key);
         assert_eq!(out.batch, Some(BatchAction::Deselect));
 

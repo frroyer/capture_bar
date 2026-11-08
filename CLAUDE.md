@@ -29,7 +29,7 @@ app/              entry point: window, shortcuts, command dispatch
 crates/core       Command, CaptureMode, Frame, traits ScreenSource / FrameSink / StreamHandle
 crates/ui         egui drawing of the bar (M1/M2.x) and tray; returns commands only
 crates/capture    CaptureService: queues grabs on a worker thread
-crates/encode     PNG today; MP4 / GIF / PDF and the encode queue next
+crates/encode     PNG, GIF (frames → animation) and PDF (images → pages); MP4 and the encode queue next
 crates/buffer     the capture buffer; write-ahead index + files next (US-6.1, 6.6)
 crates/platform   OS backends behind the core traits: macos.rs / windows.rs / linux.rs
 ```

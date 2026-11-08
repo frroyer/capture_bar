@@ -1,5 +1,11 @@
-//! Encoders. PNG works today (FR-13). MP4 (US-5.1), GIF and PDF (US-6.7)
-//! and the background job queue (US-6.2) come next.
+//! Encoders: PNG (FR-13), GIF and PDF (US-6.7). MP4 (US-5.1) and the background job
+//! queue (US-6.2) come next.
+
+mod anim;
+mod pdf;
+
+pub use anim::write_gif;
+pub use pdf::write_pdf;
 
 use cb_core::Frame;
 use std::io::{BufRead, Seek, Write};
@@ -14,6 +20,10 @@ pub enum EncodeError {
     Decode(#[from] png::DecodingError),
     #[error("not an 8-bit RGB or RGBA image")]
     Unsupported,
+    #[error(transparent)]
+    Gif(#[from] gif::EncodingError),
+    #[error("nothing to export")]
+    Nothing,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

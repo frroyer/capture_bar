@@ -372,8 +372,8 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: a GIF of 10 s at 720p is ≤ 15 MB; the PDF keeps native resolution.
 
-- [ ] GIF encoder (palette quantisation, gif crate)
-- [ ] PDF writer (printpdf or similar, permissive licence)
+- [x] GIF encoder (palette quantisation, gif crate) — only the changed rectangle per frame, still frames merged; the 10 s/720p ≤ 15 MB AC is an ignored release test. The Export GIF button for clips comes with US-5.1, when there are clips
+- [x] PDF writer (printpdf or similar, permissive licence) — written by hand (no new crate beyond miniz_oxide); a page per image at full resolution, oldest first, from the tray's PDF… button. The tray also gets Delete for a selection
 
 **US-6.8** As a user, I want to choose where captures go and how they are named, right from the bar, so that I can keep each piece of work apart without opening settings. (no artboard yet · FR-30)
 

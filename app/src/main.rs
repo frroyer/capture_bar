@@ -660,7 +660,7 @@ impl App {
     fn delete(&mut self, item: ItemId) {
         match self.forget(item) {
             Some(path) => {
-                let _ = self.output.send(output::Job::Trash(path));
+                let _ = self.output.send(output::Job::Trash(vec![path]));
             }
             // Not written yet: `poll_output` removes the file when it lands.
             None => self.flash("Deleted"),
@@ -718,6 +718,21 @@ impl App {
             .collect();
         match action {
             BatchAction::Deselect => self.selection.clear(),
+            // The tray offers Delete for a selection only.
+            BatchAction::Delete if self.selection.is_empty() => {}
+            BatchAction::Delete => {
+                let count = targets.len();
+                let paths: Vec<PathBuf> = targets
+                    .into_iter()
+                    .filter_map(|id| self.forget(id))
+                    .collect();
+                self.selection.clear();
+                if paths.is_empty() {
+                    self.flash(format!("Deleted {count}"));
+                } else {
+                    let _ = self.output.send(output::Job::Trash(paths));
+                }
+            }
             BatchAction::Clear => {
                 let everything = self.selection.is_empty();
                 let mut cleared = 0;
@@ -744,6 +759,16 @@ impl App {
                 let _ = self.output.send(job);
             }
             BatchAction::SaveAll => self.save_all(frame, files),
+            BatchAction::ExportPdf => {
+                let images: Vec<PathBuf> = targets
+                    .iter()
+                    .filter_map(|&id| self.buffer.get(id))
+                    .filter(|i| i.state == ItemState::Ready && i.kind == ItemKind::Image)
+                    .filter_map(|i| i.path.clone())
+                    .collect();
+                // Oldest first: pages read in the order the captures were taken.
+                self.export_pdf(frame, images.into_iter().rev().collect());
+            }
         }
     }
 
@@ -762,6 +787,29 @@ impl App {
                 }
             })
             .expect("spawn save all dialog thread");
+    }
+
+    /// Ask where to write the PDF, on the dialog's own thread; the output worker writes it.
+    fn export_pdf(&mut self, frame: &eframe::Frame, files: Vec<PathBuf>) {
+        if files.is_empty() {
+            return self.flash("No saved image to export yet");
+        }
+        let name = output::file_name(&self.bar.prefix, SystemTime::now());
+        let dialog = rfd::FileDialog::new()
+            .set_title(format!("Export {} images as one PDF", files.len()))
+            .add_filter("PDF document", &["pdf"])
+            .set_directory(&self.captures_dir)
+            .set_file_name(Path::new(&name).with_extension("pdf").to_string_lossy())
+            .set_parent(frame);
+        let output = self.output.clone();
+        std::thread::Builder::new()
+            .name("export pdf dialog".into())
+            .spawn(move || {
+                if let Some(to) = dialog.save_file() {
+                    let _ = output.send(output::Job::ExportPdf { files, to });
+                }
+            })
+            .expect("spawn export pdf dialog thread");
     }
 
     /// Ask where to save a copy of `from`, on the dialog's own thread; the output worker copies.
