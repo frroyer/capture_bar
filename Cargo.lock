@@ -293,6 +293,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "cb-annotate",
  "cb-buffer",
  "cb-capture",
  "cb-core",
@@ -308,9 +309,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "cb-annotate"
+version = "0.1.0"
+dependencies = [
+ "cb-core",
+ "epaint_default_fonts",
+ "serde",
+ "skrifa",
+ "thiserror 2.0.21",
+ "vello_cpu",
+]
+
+[[package]]
 name = "cb-buffer"
 version = "0.1.0"
 dependencies = [
+ "cb-annotate",
  "cb-core",
  "ron",
  "serde",
@@ -360,6 +374,7 @@ dependencies = [
 name = "cb-ui"
 version = "0.1.0"
 dependencies = [
+ "cb-annotate",
  "cb-buffer",
  "cb-core",
  "chrono",

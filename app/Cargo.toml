@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 cb-core.workspace = true
 cb-buffer.workspace = true
+cb-annotate.workspace = true
 cb-capture.workspace = true
 cb-encode.workspace = true
 cb-platform.workspace = true

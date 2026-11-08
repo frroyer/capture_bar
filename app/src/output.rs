@@ -58,6 +58,27 @@ pub enum Job {
         item: ItemId,
         path: PathBuf,
     },
+    /// Read a capture's image, for the annotation editor (US-7.1).
+    Load {
+        item: ItemId,
+        path: PathBuf,
+    },
+    /// Draw annotations into `base`, the capture as taken, and write the result over the
+    /// capture's file, then make its thumbnail and copy it, as for a new capture (US-7.1).
+    /// The file as taken is kept first, in `originals`, unless `original` already holds it.
+    /// No shapes puts the original back in place of the annotated file.
+    Annotate {
+        item: ItemId,
+        base: Arc<Frame>,
+        shapes: Vec<cb_annotate::Shape>,
+        font: Arc<[u8]>,
+        path: PathBuf,
+        original: Option<PathBuf>,
+        originals: PathBuf,
+    },
+    /// Delete files nobody will see again, such as the original of a capture that left the
+    /// buffer. Says nothing.
+    Remove(PathBuf),
 }
 
 pub enum Done {
@@ -79,6 +100,62 @@ pub enum Done {
         item: ItemId,
         path: PathBuf,
     },
+    Loaded {
+        item: ItemId,
+        result: Result<Frame, String>,
+    },
+    /// The capture's file now holds `shapes` over its original.
+    Annotated {
+        item: ItemId,
+        shapes: Vec<cb_annotate::Shape>,
+        result: Result<Annotated, String>,
+    },
+}
+
+pub struct Annotated {
+    /// What the capture's file holds now.
+    pub frame: Arc<Frame>,
+    /// Where the capture as taken is kept, while it has annotations.
+    pub original: Option<PathBuf>,
+}
+
+/// Run an [`Job::Annotate`]. On failure the capture's file and its original are as they were.
+fn annotate(
+    base: &Arc<Frame>,
+    shapes: &[cb_annotate::Shape],
+    font: &[u8],
+    path: &Path,
+    original: Option<&Path>,
+    originals: &Path,
+) -> Result<Annotated, String> {
+    if shapes.is_empty() {
+        if let Some(original) = original {
+            std::fs::rename(original, path).map_err(|e| e.to_string())?;
+        }
+        return Ok(Annotated {
+            frame: base.clone(),
+            original: None,
+        });
+    }
+    let frame = cb_annotate::flatten(base, shapes, font).map_err(|e| e.to_string())?;
+    let (original, kept_now) = match original {
+        Some(original) => (original.to_path_buf(), false),
+        None => {
+            std::fs::create_dir_all(originals).map_err(|e| e.to_string())?;
+            let kept = save_into(path, originals).map_err(|e| e.to_string())?;
+            (kept, true)
+        }
+    };
+    if let Err(e) = overwrite_png(&frame, path) {
+        if kept_now {
+            let _ = std::fs::remove_file(&original);
+        }
+        return Err(e);
+    }
+    Ok(Annotated {
+        frame: Arc::new(frame),
+        original: Some(original),
+    })
 }
 
 /// The prefix new captures get until the user picks one (FR-30).
@@ -197,6 +274,28 @@ fn write_png(frame: &Frame, path: &Path) -> Result<PathBuf, String> {
         })
 }
 
+/// Replace the file at `path` with `frame`, all at once: a failure leaves the old file whole.
+fn overwrite_png(frame: &Frame, path: &Path) -> Result<(), String> {
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".tmp");
+    let temporary = PathBuf::from(temporary);
+    let written = File::create(&temporary)
+        .map_err(|e| e.to_string())
+        .and_then(|file| {
+            cb_encode::write_png(frame, std::io::BufWriter::new(file)).map_err(|e| e.to_string())
+        })
+        .and_then(|()| std::fs::rename(&temporary, path).map_err(|e| e.to_string()));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written
+}
+
+fn read_image(path: &Path) -> Result<Frame, String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    cb_encode::read_png(std::io::BufReader::new(file)).map_err(|e| e.to_string())
+}
+
 fn copy(clipboard: &mut Option<arboard::Clipboard>, frame: &Frame) -> Result<(), String> {
     if clipboard.is_none() {
         *clipboard = Some(arboard::Clipboard::new().map_err(|e| e.to_string())?);
@@ -214,8 +313,7 @@ fn copy(clipboard: &mut Option<arboard::Clipboard>, frame: &Frame) -> Result<(),
 }
 
 fn read_thumbnail(path: &Path) -> Result<Frame, String> {
-    let file = File::open(path).map_err(|e| e.to_string())?;
-    let frame = cb_encode::read_png(std::io::BufReader::new(file)).map_err(|e| e.to_string())?;
+    let frame = read_image(path)?;
     cb_encode::thumbnail(&frame, THUMBNAIL_PIXELS.0, THUMBNAIL_PIXELS.1).map_err(|e| e.to_string())
 }
 
@@ -318,7 +416,13 @@ fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
                 ),
             }
         }
-        Job::Store { .. } | Job::Copy(_) | Job::Thumbnail { .. } | Job::Rename { .. } => {
+        Job::Store { .. }
+        | Job::Copy(_)
+        | Job::Thumbnail { .. }
+        | Job::Rename { .. }
+        | Job::Load { .. }
+        | Job::Annotate { .. }
+        | Job::Remove(_) => {
             unreachable!("not a one-off job")
         }
     }
@@ -370,6 +474,53 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> (mpsc::Sender<Job>, mpsc::Rece
                             }
                             Err(e) => tracing::warn!(error = %e, ?path, "no thumbnail"),
                         }
+                        continue;
+                    }
+                    Job::Load { item, path } => {
+                        let result = read_image(path);
+                        let _ = done_tx.send(Done::Loaded {
+                            item: *item,
+                            result,
+                        });
+                        wake();
+                        continue;
+                    }
+                    Job::Remove(path) => {
+                        if let Err(e) = std::fs::remove_file(path) {
+                            tracing::warn!(error = %e, ?path, "not removed");
+                        }
+                        continue;
+                    }
+                    Job::Annotate {
+                        item,
+                        base,
+                        shapes,
+                        font,
+                        path,
+                        original,
+                        originals,
+                    } => {
+                        let result =
+                            annotate(base, shapes, font, path, original.as_deref(), originals);
+                        if let Ok(Annotated { frame, .. }) = &result {
+                            if let Ok(thumbnail) =
+                                cb_encode::thumbnail(frame, THUMBNAIL_PIXELS.0, THUMBNAIL_PIXELS.1)
+                            {
+                                let _ = done_tx.send(Done::Thumbnail {
+                                    item: *item,
+                                    thumbnail,
+                                });
+                            }
+                            if let Err(e) = copy(&mut clipboard, frame) {
+                                let _ = done_tx.send(Done::ClipboardFailed(e));
+                            }
+                        }
+                        let _ = done_tx.send(Done::Annotated {
+                            item: *item,
+                            shapes: shapes.clone(),
+                            result,
+                        });
+                        wake();
                         continue;
                     }
                     Job::CopyFile(_)
@@ -524,7 +675,11 @@ mod tests {
                     thumbnail_seen = Some((item, thumbnail.width));
                     None
                 }
-                Done::ClipboardFailed(_) | Done::Message(_) | Done::Renamed { .. } => None,
+                Done::ClipboardFailed(_)
+                | Done::Message(_)
+                | Done::Renamed { .. }
+                | Done::Loaded { .. }
+                | Done::Annotated { .. } => None,
             })
             .unwrap();
         assert_eq!(stored.0, ItemId(item));
@@ -547,6 +702,100 @@ mod tests {
             std::fs::read_to_string(dir.join("nested").join("a-2.png")).unwrap(),
             "keep me"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Runs an annotation job and returns what it answered with the capture's file then.
+    fn annotate_job(
+        base: &Arc<Frame>,
+        shapes: Vec<cb_annotate::Shape>,
+        path: &Path,
+        original: Option<PathBuf>,
+        originals: &Path,
+    ) -> (Option<PathBuf>, Vec<u8>) {
+        let (jobs, done) = spawn(|| {});
+        jobs.send(Job::Annotate {
+            item: ItemId(7),
+            base: base.clone(),
+            shapes,
+            font: cb_annotate::fallback_font().into(),
+            path: path.to_path_buf(),
+            original,
+            originals: originals.to_path_buf(),
+        })
+        .unwrap();
+        let annotated = done
+            .iter()
+            .find_map(|d| match d {
+                Done::Annotated { item, result, .. } => {
+                    assert_eq!(item, ItemId(7));
+                    Some(result.unwrap())
+                }
+                _ => None,
+            })
+            .unwrap();
+        jobs.send(Job::Load {
+            item: ItemId(7),
+            path: path.to_path_buf(),
+        })
+        .unwrap();
+        let on_disk = done
+            .iter()
+            .find_map(|d| match d {
+                Done::Loaded { result, .. } => Some(result.unwrap().rgba),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            annotated.frame.rgba, on_disk,
+            "what it says is what the file holds"
+        );
+        (annotated.original, on_disk)
+    }
+
+    #[test]
+    fn annotating_keeps_the_original_out_of_sight_until_it_is_put_back() {
+        let dir = std::env::temp_dir().join(format!("cb-annotate-test-{}", std::process::id()));
+        let originals = dir.join(".buffer").join("originals");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.png");
+        let mut base = frame_at(SystemTime::now());
+        base.rgba = [0, 0, 0, 255].repeat(2);
+        let base = Arc::new(base);
+        overwrite_png(&base, &path).unwrap();
+        let pixel = |x: f32, color: [u8; 4]| cb_annotate::Shape::Highlight {
+            min: cb_annotate::Point::new(x, 0.0),
+            max: cb_annotate::Point::new(x + 1.0, 1.0),
+            color: cb_annotate::Rgba(color),
+        };
+        let files = |dir: &Path| std::fs::read_dir(dir).unwrap().count();
+
+        let (original, rgba) = annotate_job(
+            &base,
+            vec![pixel(0.0, [255, 0, 0, 255])],
+            &path,
+            None,
+            &originals,
+        );
+        assert_eq!(rgba, [255, 0, 0, 255, 0, 0, 0, 255]);
+        let original = original.expect("kept");
+        assert_eq!(original.parent(), Some(originals.as_path()));
+        assert_eq!(read_image(&original).unwrap().rgba, base.rgba, "as taken");
+        assert_eq!(files(&dir), 2, "the capture and .buffer: no temporary left");
+
+        // Edited again: the shapes go over the original, which is kept, not copied again.
+        let shapes = vec![pixel(1.0, [0, 0, 255, 255])];
+        let again = annotate_job(&base, shapes, &path, Some(original.clone()), &originals);
+        assert_eq!(
+            again,
+            (Some(original.clone()), vec![0, 0, 0, 255, 0, 0, 255, 255])
+        );
+        assert_eq!(files(&originals), 1);
+
+        // Every annotation undone: the original takes its place again.
+        let back = annotate_job(&base, Vec::new(), &path, Some(original), &originals);
+        assert_eq!(back, (None, base.rgba.clone()));
+        assert_eq!(files(&originals), 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

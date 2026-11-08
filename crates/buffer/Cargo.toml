@@ -7,5 +7,6 @@ license.workspace = true
 
 [dependencies]
 cb-core.workspace = true
+cb-annotate.workspace = true
 serde.workspace = true
 ron = "0.12"

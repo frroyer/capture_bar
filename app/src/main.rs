@@ -14,7 +14,10 @@ use cb_buffer::{index, Buffer, BufferItem, ItemId, ItemKind, ItemState, Selectio
 use cb_capture::{CaptureEvent, CaptureService};
 use cb_core::{CaptureMode, CaptureTarget, Command, DisplayId, Edge, Frame, Rect};
 use cb_platform::TrayAction;
-use cb_ui::{BarState, BatchAction, ItemAction, Overlay, OverlayResult, SelectHow, TooltipSide};
+use cb_ui::{
+    BarState, BatchAction, Editor, EditorResult, ItemAction, Overlay, OverlayResult, SelectHow,
+    ToastAction, TooltipSide,
+};
 use eframe::egui;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -208,16 +211,16 @@ fn default_shortcuts() -> Vec<(HotKey, Command)> {
 struct Toast {
     message: String,
     shown_at: Instant,
-    /// The capture this toast confirms, which Undo removes.
-    undo: Option<ItemId>,
+    /// The capture this toast confirms, which Annotate opens and Undo removes.
+    capture: Option<ItemId>,
 }
 
 impl Toast {
-    fn new(message: impl Into<String>, undo: Option<ItemId>) -> Self {
+    fn new(message: impl Into<String>, capture: Option<ItemId>) -> Self {
         Self {
             message: message.into(),
             shown_at: Instant::now(),
-            undo,
+            capture,
         }
     }
 }
@@ -251,6 +254,16 @@ struct App {
     /// The desktop grab an overlay is waiting for, and that overlay's mode.
     overlay_request: Option<(u64, CaptureMode)>,
     overlay: Option<Overlay>,
+    /// The annotation editor, open on one capture at a time (US-7.1).
+    editor: Option<Editor>,
+    /// The capture whose image is being read to open the editor.
+    editor_loading: Option<ItemId>,
+    /// Annotations saved before their capture's file was written: they go on once it is.
+    annotation_waiting: Option<(ItemId, Arc<Frame>, Vec<cb_annotate::Shape>)>,
+    /// What annotation text is written in: the bar's semibold font, as the editor shows it.
+    annotation_font: Arc<[u8]>,
+    /// Where annotated captures are kept as taken, out of sight (US-7.1).
+    originals_dir: PathBuf,
     last_region: Option<Rect>,
     record_started: Option<Instant>,
     toast: Option<Toast>,
@@ -309,7 +322,12 @@ struct App {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        cb_ui::install_fonts(&cc.egui_ctx, cb_platform::system_ui_fonts());
+        let system_fonts = cb_platform::system_ui_fonts();
+        let annotation_font: Arc<[u8]> = match &system_fonts {
+            Some((_, semibold)) => semibold.as_slice().into(),
+            None => cb_annotate::fallback_font().into(),
+        };
+        cb_ui::install_fonts(&cc.egui_ctx, system_fonts);
         if let Err(e) = cb_platform::remove_window_frame(cc) {
             tracing::warn!(error = %e, "window frame stays visible around the bar");
         }
@@ -389,6 +407,7 @@ impl App {
             .unwrap_or_else(|| default_dir.clone());
         // Where the default folder is, whichever folder captures go to now (FR-25).
         let index_path = default_dir.join(".buffer").join(index::INDEX_FILE);
+        let originals_dir = default_dir.join(".buffer").join("originals");
         let (buffer, damaged) = load_buffer(&index_path);
         let toast = toast.or_else(|| {
             damaged.then(|| Toast::new("The buffer index was damaged: started empty", None))
@@ -436,6 +455,11 @@ impl App {
             pending: HashMap::new(),
             overlay_request: None,
             overlay: None,
+            editor: None,
+            editor_loading: None,
+            annotation_waiting: None,
+            annotation_font,
+            originals_dir,
             last_region: cc
                 .storage
                 .and_then(|s| eframe::get_value(s, REGION_STORAGE_KEY)),
@@ -675,7 +699,11 @@ impl App {
         {
             self.newest_frame = None;
         }
-        self.buffer.remove(item).and_then(|removed| removed.path)
+        let removed = self.buffer.remove(item)?;
+        if let Some(original) = removed.original {
+            let _ = self.output.send(output::Job::Remove(original));
+        }
+        removed.path
     }
 
     /// Take a capture back: out of the buffer, and off the disk if it got there.
@@ -721,7 +749,7 @@ impl App {
                     found.pinned = !found.pinned;
                 }
             }
-            (ItemAction::Annotate, _) => self.flash("Annotate: not implemented yet (US-7.1)"),
+            (ItemAction::Annotate, _) => self.annotate(item),
             (ItemAction::Copy, Some(path)) => {
                 let _ = self.output.send(output::Job::CopyFile(path));
             }
@@ -865,6 +893,102 @@ impl App {
             .expect("spawn save dialog thread");
     }
 
+    /// Open the editor on a capture (US-7.1): at once when its image is in memory, or once
+    /// the output worker has read its file.
+    fn annotate(&mut self, item: ItemId) {
+        if let Some(editor) = &mut self.editor {
+            editor.focus();
+            if editor.item() != item {
+                self.flash("Save or close the open annotation first");
+            }
+            return;
+        }
+        let Some(found) = self.buffer.get(item) else {
+            return;
+        };
+        if found.kind != ItemKind::Image {
+            return self.flash("Only images can be annotated");
+        }
+        // The editor works on the capture as taken, with its annotations as layers.
+        let ready_file = (found.state == ItemState::Ready)
+            .then(|| found.original.clone().or_else(|| found.path.clone()))
+            .flatten();
+        let in_memory = self
+            .newest_frame
+            .as_ref()
+            .filter(|(id, _)| *id == item && found.original.is_none())
+            .map(|(_, frame)| frame.clone());
+        match (in_memory, ready_file) {
+            (Some(frame), _) => self.open_editor(item, frame),
+            (None, Some(path)) => {
+                self.editor_loading = Some(item);
+                let _ = self.output.send(output::Job::Load { item, path });
+            }
+            (None, None) => self.flash("This capture is not ready yet"),
+        }
+    }
+
+    fn open_editor(&mut self, item: ItemId, base: Arc<Frame>) {
+        let annotations = self
+            .buffer
+            .get(item)
+            .map(|i| i.annotations.clone())
+            .unwrap_or_default();
+        let title = self.editor_title(item);
+        self.editor = Some(Editor::new(item, base, title, annotations));
+    }
+
+    fn editor_title(&self, item: ItemId) -> String {
+        let name = self
+            .buffer
+            .get(item)
+            .and_then(|i| i.path.as_ref()?.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
+        match name {
+            Some(name) => format!("Annotate · {name}"),
+            None => "Annotate".into(),
+        }
+    }
+
+    fn show_editor(&mut self, ctx: &egui::Context) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let Some(result) = editor.show(ctx) else {
+            return;
+        };
+        let editor = self.editor.take().expect("just shown");
+        if let EditorResult::Save(shapes) = result {
+            self.save_annotation(editor.item(), editor.base().clone(), shapes);
+        }
+    }
+
+    /// Draw the annotations into the capture's own file, on the output worker: the
+    /// buffer item stays the same, with the new picture (US-7.1).
+    fn save_annotation(&mut self, item: ItemId, base: Arc<Frame>, shapes: Vec<cb_annotate::Shape>) {
+        let Some(found) = self.buffer.get(item) else {
+            return self.flash("The capture was removed: the annotations were not saved");
+        };
+        match (&found.state, found.path.clone()) {
+            (ItemState::Ready, Some(path)) => {
+                let job = output::Job::Annotate {
+                    item,
+                    base,
+                    shapes,
+                    font: self.annotation_font.clone(),
+                    path,
+                    original: found.original.clone(),
+                    originals: self.originals_dir.clone(),
+                };
+                let _ = self.output.send(job);
+            }
+            (ItemState::Failed(_), _) => {
+                self.flash("The capture was not saved, so its annotations cannot be");
+            }
+            _ => self.annotation_waiting = Some((item, base, shapes)),
+        }
+    }
+
     /// A grabbed frame goes to the worker, unless the capture was undone meanwhile.
     fn store(&mut self, item: ItemId, frame: Frame) {
         if self.buffer.get(item).is_none() {
@@ -893,6 +1017,50 @@ impl App {
                     }
                 }
                 output::Done::Message(message) => self.flash(message),
+                output::Done::Loaded { item, result } => {
+                    if self.editor_loading.take_if(|i| *i == item).is_none() {
+                        continue;
+                    }
+                    match result {
+                        Ok(frame) if self.buffer.get(item).is_some() => {
+                            self.open_editor(item, Arc::new(frame));
+                        }
+                        Ok(_) => {}
+                        Err(error) => self.flash(format!("Could not open the capture: {error}")),
+                    }
+                }
+                output::Done::Annotated {
+                    item,
+                    shapes,
+                    result,
+                } => match result {
+                    Ok(output::Annotated { frame, original }) => {
+                        if let Some((id, newest)) = &mut self.newest_frame {
+                            if *id == item {
+                                *newest = frame;
+                            }
+                        }
+                        let reverted = shapes.is_empty();
+                        match self.buffer.get_mut(item) {
+                            Some(found) => {
+                                found.original = original;
+                                found.annotations = shapes;
+                            }
+                            // Removed while saving: its original has no one left to come back to.
+                            None => {
+                                if let Some(original) = original {
+                                    let _ = self.output.send(output::Job::Remove(original));
+                                }
+                            }
+                        }
+                        self.flash(if reverted {
+                            "Back to the original · copied"
+                        } else {
+                            "Annotations saved · copied"
+                        });
+                    }
+                    Err(error) => self.flash(format!("Could not save the annotations: {error}")),
+                },
                 output::Done::Renamed { item, path } => {
                     if let Some(found) = self.buffer.get_mut(item) {
                         found.path = Some(path);
@@ -919,6 +1087,11 @@ impl App {
                             i.state = ItemState::Failed(error.clone());
                             self.flash(format!("Could not save the capture: {error}"));
                         }
+                    }
+                    if let Some((item, base, shapes)) =
+                        self.annotation_waiting.take_if(|(id, ..)| *id == item)
+                    {
+                        self.save_annotation(item, base, shapes);
                     }
                 }
             }
@@ -1167,11 +1340,15 @@ impl App {
             }
         }
         if let Some(toast) = &self.toast {
-            let undo = toast.undo;
-            if cb_ui::toast(ui, &toast.message, undo.is_some()) {
-                if let Some(item) = undo {
-                    self.undo(item);
+            let capture = toast.capture;
+            let asked = cb_ui::toast(ui, &toast.message, capture.is_some());
+            match (asked, capture) {
+                (Some(ToastAction::Undo), Some(item)) => self.undo(item),
+                (Some(ToastAction::Annotate), Some(item)) => {
+                    self.toast = None;
+                    self.annotate(item);
                 }
+                _ => {}
             }
         }
         if self.band {
@@ -1438,6 +1615,7 @@ impl eframe::App for App {
         }
         self.place_window(ctx, used);
         self.show_overlay(ctx);
+        self.show_editor(ctx);
         if std::mem::take(&mut self.folder_requested) {
             self.choose_folder(ctx, frame);
         }
