@@ -3,6 +3,7 @@
 
 use cb_core::ScreenSource;
 
+pub mod autostart;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]

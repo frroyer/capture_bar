@@ -280,6 +280,10 @@ struct App {
     settings_file: PathBuf,
     settings_writer: mpsc::Sender<Settings>,
     settings_window: Option<SettingsWindow>,
+    /// Whether the bar starts at login, as the OS had it when Settings opened (US-8.3).
+    autostart: bool,
+    /// The answer of the thread changing it.
+    autostart_done: Option<mpsc::Receiver<std::io::Result<()>>>,
     /// Put the keyboard in the prefix field on the next frame.
     focus_prefix: bool,
     /// The prefix the captures in the buffer were last offered to be renamed to.
@@ -507,6 +511,8 @@ impl App {
             settings_file,
             settings_writer,
             settings_window: None,
+            autostart: false,
+            autostart_done: None,
             focus_prefix: false,
             named_prefix: prefix,
             rename_offer: false,
@@ -640,6 +646,9 @@ impl App {
             Command::CopyNewest => self.copy_newest(),
             Command::OpenSettings => {
                 self.hidden = false;
+                if self.settings_window.is_none() {
+                    self.autostart = cb_platform::autostart::enabled();
+                }
                 self.settings_window
                     .get_or_insert_with(SettingsWindow::default)
                     .focus();
@@ -1025,14 +1034,53 @@ impl App {
         let Some(window) = &mut self.settings_window else {
             return;
         };
-        let out = window.show(ctx, &mut settings, &self.settings_file);
+        let mut autostart = self.autostart;
+        let out = window.show(ctx, &mut settings, &self.settings_file, &mut autostart);
         if settings != before {
             self.apply_settings(settings);
+        }
+        if autostart != self.autostart {
+            self.set_autostart(ctx, autostart);
         }
         self.folder_requested |= out.choose_folder;
         if out.closed {
             self.settings_window = None;
         }
+    }
+
+    /// Register or unregister the bar to start at login, off the UI thread (NFR-4).
+    fn set_autostart(&mut self, ctx: &egui::Context, on: bool) {
+        if self.autostart_done.is_some() {
+            return;
+        }
+        self.autostart = on;
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("autostart".into())
+            .spawn(move || {
+                let _ = tx.send(cb_platform::autostart::set_enabled(on));
+                ctx.request_repaint();
+            })
+            .expect("spawn autostart thread");
+        self.autostart_done = Some(rx);
+    }
+
+    fn poll_autostart(&mut self) {
+        let Some(rx) = &self.autostart_done else {
+            return;
+        };
+        match rx.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => return,
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "start at login not changed");
+                self.flash(format!("Start at login not changed: {error}"));
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {}
+        }
+        self.autostart_done = None;
+        self.autostart = cb_platform::autostart::enabled();
     }
 
     /// Send the settings to be written when they changed, from any window.
@@ -1662,6 +1710,7 @@ impl eframe::App for App {
         self.poll_captures();
         self.poll_output(ctx);
         self.poll_folder_choice();
+        self.poll_autostart();
         self.sweep();
         self.track_position(ctx);
 
