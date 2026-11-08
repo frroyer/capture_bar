@@ -299,9 +299,9 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: the bar switches to the M2.2 layout with a red border; the timer is accurate to 1 s; Esc asks before discarding.
 
-- [ ] Recording layout + timer
-- [ ] Pause/resume (⌥⇧P) with timestamp re-basing
-- [ ] Discard confirmation
+- [x] Recording layout + timer — red outline, no mode switch; Stop with the time, Pause, Discard; the timer counts recorded time only (`Stopwatch` in `app/src/main.rs`)
+- [x] Pause/resume (⌥⇧P) with timestamp re-basing — the encoder's timeline shifts by the pause, so the video has no gap (`windows_record.rs`)
+- [x] Discard confirmation — Esc or Discard turns the chip red and asks; a second press within 3 s stops and sends the file to the Recycle Bin. Esc works while the bar has the keyboard; not a global shortcut, so it never steals Esc from the app being recorded
 
 **US-5.3** As a user, I want to record my mic and optionally system audio. (M1 · FR-17)
 

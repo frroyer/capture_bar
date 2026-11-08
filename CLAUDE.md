@@ -64,8 +64,10 @@ only if a spike shows a need.
   folder. The buffer shows it as saving until the file is complete. A warm-up thread at launch loads the GPU
   device and encoder so the first recording starts in ~240 ms, not ~650. A recording's card shows its first
   frame and plays 12 frames spread over it while hovered (`cb_platform::video_frames`, decoded on the output
-  worker); its Play button opens the system player, and Copy puts the file on the clipboard. Pause, the M2.2
-  layout, audio and webcam are not done (US-5.2–5.5). The US-1.2 CPU-path spike stays in
+  worker); its Play button opens the system player, and Copy puts the file on the clipboard. While recording, the
+  bar shows the M2.2 layout (US-5.2): Stop with the timer, Pause / Resume (Ctrl+Shift+P; the timer and the
+  video skip the pause) and Discard, which Esc also triggers when the bar has the keyboard; both ask once
+  before throwing the file away. Audio, webcam and capture-while-recording are not done (US-5.3–5.5). The US-1.2 CPU-path spike stays in
   `windows_spike`; results in `docs/spikes/us-1.2-windows.md`.
 - macOS and Linux backends are still **stubs**: captures appear in the buffer, then show
   "not implemented on this platform yet". Next step is the rest of **US-1.2** (macOS, Linux spikes).

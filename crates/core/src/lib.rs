@@ -33,6 +33,8 @@ pub enum Command {
     CaptureWith(CaptureMode),
     ToggleRecording,
     TogglePause,
+    /// Stop the recording and throw its file away (FR-19). The bar asks first.
+    DiscardRecording,
     RepeatLastRegion,
     ToggleBuffer,
     CopyNewest,
