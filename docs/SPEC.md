@@ -352,28 +352,28 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: each action works per item; dragging into Slack, a mail client or Finder/Explorer delivers the file.
 
-- [ ] Per-item action row
-- [ ] OS drag-and-drop source (NSDraggingSource / OLE IDropSource / XDND + Wayland DnD)
+- [x] Per-item action row — Copy, Save a copy as…, Annotate (opens with US-7.1), Delete (file to the Recycle Bin)
+- [ ] OS drag-and-drop source (NSDraggingSource / OLE IDropSource / XDND + Wayland DnD) — Windows done (shell data object + SHDoDragDrop); macOS and Linux with their backends
 
 **US-6.5** As a user, I want batch actions on several captures. (M1 · FR-24)
 
 - AC: shift/cmd-click multi-select; Copy all, Save all to folder and Clear act on the selection (or on everything when nothing is selected).
 
-- [ ] Selection model + batch commands
+- [x] Selection model + batch commands — click, Ctrl/Cmd toggle, Shift range; Copy all (one image, or several as files), Save all into a folder without overwriting, Clear (files stay; pinned kept when clearing all). Batch delete and PDF export come with US-6.7
 
 **US-6.6** As a user, I want the buffer to survive restarts and clean itself up. (M3 · FR-25, NFR-12)
 
 - AC: after a kill -9 or reboot, every item is back; items older than the retention period are purged unless pinned.
 
-- [ ] Recovery on launch from the index
-- [ ] Retention sweeper + pin flag
+- [x] Recovery on launch from the index — `~/Captures/.buffer/index.ron`, rewritten atomically (temp file, fsync, rename) by a writer thread on every change; items whose file is gone are dropped; a damaged index is kept as `.bad`
+- [x] Retention sweeper + pin flag — 7 days (constant until US-8.2), swept at launch and hourly; expired captures leave the buffer but their files stay; pin from the card's picture corner
 
 **US-6.7** As a user, I want to export clips as GIF and images as a single PDF. (M3 · FR-18, FR-24)
 
 - AC: a GIF of 10 s at 720p is ≤ 15 MB; the PDF keeps native resolution.
 
-- [ ] GIF encoder (palette quantisation, gif crate)
-- [ ] PDF writer (printpdf or similar, permissive licence)
+- [x] GIF encoder (palette quantisation, gif crate) — only the changed rectangle per frame, still frames merged; the 10 s/720p ≤ 15 MB AC is an ignored release test. The Export GIF button for clips comes with US-5.1, when there are clips
+- [x] PDF writer (printpdf or similar, permissive licence) — written by hand (no new crate beyond miniz_oxide); a page per image at full resolution, oldest first, from the tray's PDF… button. The tray also gets Delete for a selection
 
 **US-6.8** As a user, I want to choose where captures go and how they are named, right from the bar, so that I can keep each piece of work apart without opening settings. (no artboard yet · FR-30)
 

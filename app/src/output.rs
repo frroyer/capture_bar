@@ -26,6 +26,33 @@ pub enum Job {
         path: PathBuf,
     },
     Copy(Arc<Frame>),
+    /// Copy the image in a PNG file to the clipboard (FR-23).
+    CopyFile(PathBuf),
+    /// Save a copy of a capture where the user chose. Overwrites: the dialog asked.
+    SaveAs {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    /// Move deleted captures' files to the Recycle Bin or Trash.
+    Trash(Vec<PathBuf>),
+    /// One PDF of the images in `files`, a page each, written to `to` (US-6.7). Overwrites:
+    /// the dialog asked.
+    ExportPdf {
+        files: Vec<PathBuf>,
+        to: PathBuf,
+    },
+    /// Put several files on the clipboard, to paste into a folder, a mail or a chat (FR-24).
+    CopyFiles(Vec<PathBuf>),
+    /// Copy files into `dir`, never overwriting what is there (FR-24).
+    SaveAllTo {
+        files: Vec<PathBuf>,
+        dir: PathBuf,
+    },
+    /// Make the thumbnail of a capture restored from the last run (FR-25).
+    Thumbnail {
+        item: ItemId,
+        path: PathBuf,
+    },
 }
 
 pub enum Done {
@@ -40,6 +67,8 @@ pub enum Done {
         result: Result<PathBuf, String>,
     },
     ClipboardFailed(String),
+    /// How a one-off job went, for a toast.
+    Message(String),
 }
 
 /// The prefix new captures get until the user picks one (FR-30).
@@ -114,6 +143,117 @@ fn copy(clipboard: &mut Option<arboard::Clipboard>, frame: &Frame) -> Result<(),
         .map_err(|e| e.to_string())
 }
 
+fn read_thumbnail(path: &Path) -> Result<Frame, String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let frame = cb_encode::read_png(std::io::BufReader::new(file)).map_err(|e| e.to_string())?;
+    cb_encode::thumbnail(&frame, THUMBNAIL_PIXELS.0, THUMBNAIL_PIXELS.1).map_err(|e| e.to_string())
+}
+
+/// Write the PNGs in `files` as one PDF at `to`, reading each only for its page. A
+/// failure leaves no half-written PDF behind.
+fn export_pdf(files: &[PathBuf], to: &Path) -> Result<usize, String> {
+    let pages = files.iter().map(|path| {
+        let file = File::open(path)?;
+        cb_encode::read_png(std::io::BufReader::new(file))
+    });
+    let out = File::create(to).map_err(|e| e.to_string())?;
+    cb_encode::write_pdf(pages, std::io::BufWriter::new(out)).map_err(|e| {
+        let _ = std::fs::remove_file(to);
+        e.to_string()
+    })
+}
+
+/// Copy `from` into `dir` under its own name, or `-2`, `-3`… when that is taken.
+fn save_into(from: &Path, dir: &Path) -> std::io::Result<PathBuf> {
+    let name = from.file_name().ok_or(ErrorKind::InvalidInput)?;
+    let mut source = File::open(from)?;
+    let (mut file, path) = create_unique(&dir.join(name))?;
+    match std::io::copy(&mut source, &mut file) {
+        Ok(_) => Ok(path),
+        Err(e) => {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            Err(e)
+        }
+    }
+}
+
+/// Runs a job that works on existing files and says how it went.
+fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
+    let file_name = |path: &Path| {
+        path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
+    };
+    match job {
+        Job::CopyFile(path) => {
+            let copied = File::open(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|file| {
+                    cb_encode::read_png(std::io::BufReader::new(file)).map_err(|e| e.to_string())
+                })
+                .and_then(|frame| copy(clipboard, &frame));
+            match copied {
+                Ok(()) => "Copied".into(),
+                Err(e) => format!("Could not copy: {e}"),
+            }
+        }
+        Job::SaveAs { from, to } => match std::fs::copy(&from, &to) {
+            Ok(_) => format!("Saved a copy as {}", file_name(&to)),
+            Err(e) => format!("Could not save a copy: {e}"),
+        },
+        Job::Trash(paths) => {
+            let mut failed = None;
+            for path in &paths {
+                if let Err(e) = cb_platform::move_to_trash(path) {
+                    tracing::warn!(error = %e, ?path, "deleted capture stays on disk");
+                    failed = Some(e);
+                }
+            }
+            match (failed, paths.as_slice()) {
+                (None, [one]) => format!("Deleted · {} is in the Recycle Bin", file_name(one)),
+                (None, _) => format!("Deleted {} · the files are in the Recycle Bin", paths.len()),
+                (Some(e), _) => format!("Removed from the buffer · some files stay: {e}"),
+            }
+        }
+        Job::ExportPdf { files, to } => match export_pdf(&files, &to) {
+            Ok(pages) => format!("Exported {pages} pages to {}", file_name(&to)),
+            Err(e) => format!("Could not export the PDF: {e}"),
+        },
+        Job::CopyFiles(files) => {
+            let copied = match clipboard {
+                Some(clipboard) => clipboard.set().file_list(&files),
+                None => arboard::Clipboard::new().and_then(|mut new| {
+                    let result = new.set().file_list(&files);
+                    *clipboard = Some(new);
+                    result
+                }),
+            };
+            match copied {
+                Ok(()) => format!("Copied {} files", files.len()),
+                Err(e) => format!("Could not copy: {e}"),
+            }
+        }
+        Job::SaveAllTo { files, dir } => {
+            let saved = files
+                .iter()
+                .filter(|from| save_into(from, &dir).is_ok())
+                .count();
+            match files.len() - saved {
+                0 => format!("Saved {saved} copies in {}", file_name(&dir)),
+                failed => format!(
+                    "Saved {saved} copies in {}; {failed} failed",
+                    file_name(&dir)
+                ),
+            }
+        }
+        Job::Store { .. } | Job::Copy(_) | Job::Thumbnail { .. } => {
+            unreachable!("not a one-off job")
+        }
+    }
+}
+
 /// `wake` runs after each finished job, to get the UI to read the result.
 pub fn spawn(wake: impl Fn() + Send + 'static) -> (mpsc::Sender<Job>, mpsc::Receiver<Done>) {
     let (job_tx, jobs) = mpsc::channel::<Job>();
@@ -126,6 +266,27 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> (mpsc::Sender<Job>, mpsc::Rece
             for job in jobs {
                 let frame = match &job {
                     Job::Store { frame, .. } | Job::Copy(frame) => frame,
+                    Job::Thumbnail { item, path } => {
+                        match read_thumbnail(path) {
+                            Ok(thumbnail) => {
+                                let item = *item;
+                                let _ = done_tx.send(Done::Thumbnail { item, thumbnail });
+                                wake();
+                            }
+                            Err(e) => tracing::warn!(error = %e, ?path, "no thumbnail"),
+                        }
+                        continue;
+                    }
+                    Job::CopyFile(_)
+                    | Job::SaveAs { .. }
+                    | Job::Trash(_)
+                    | Job::ExportPdf { .. }
+                    | Job::CopyFiles(_)
+                    | Job::SaveAllTo { .. } => {
+                        let _ = done_tx.send(Done::Message(one_off(&mut clipboard, job)));
+                        wake();
+                        continue;
+                    }
                 };
                 if let Job::Store { item, frame, .. } = &job {
                     match cb_encode::thumbnail(frame, THUMBNAIL_PIXELS.0, THUMBNAIL_PIXELS.1) {
@@ -204,7 +365,7 @@ mod tests {
                     thumbnail_seen = Some((item, thumbnail.width));
                     None
                 }
-                Done::ClipboardFailed(_) => None,
+                Done::ClipboardFailed(_) | Done::Message(_) => None,
             })
             .unwrap();
         assert_eq!(stored.0, ItemId(item));
@@ -226,6 +387,91 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.join("nested").join("a-2.png")).unwrap(),
             "keep me"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Runs one job and returns the toast it ends with.
+    fn message_of(job: Job) -> String {
+        let (jobs, done) = spawn(|| {});
+        jobs.send(job).unwrap();
+        match done.recv().unwrap() {
+            Done::Message(message) => message,
+            _ => panic!("a one-off job answers with a message"),
+        }
+    }
+
+    #[test]
+    fn save_as_copies_the_file_and_says_so() {
+        let dir = std::env::temp_dir().join(format!("cb-save-as-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (from, to) = (dir.join("a.png"), dir.join("b.png"));
+        std::fs::write(&from, "pixels").unwrap();
+        let message = message_of(Job::SaveAs {
+            from: from.clone(),
+            to: to.clone(),
+        });
+        assert_eq!(message, "Saved a copy as b.png");
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "pixels");
+        assert!(from.exists());
+
+        let missing = message_of(Job::SaveAs {
+            from: dir.join("gone.png"),
+            to,
+        });
+        assert!(missing.starts_with("Could not save a copy"), "{missing}");
+        let unreadable = message_of(Job::CopyFile(from));
+        assert!(unreadable.starts_with("Could not copy"), "{unreadable}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn export_pdf_makes_a_page_per_image_or_nothing_at_all() {
+        let dir = std::env::temp_dir().join(format!("cb-pdf-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = |name: &str| {
+            let path = dir.join(name);
+            let file = File::create(&path).unwrap();
+            cb_encode::write_png(&frame_at(SystemTime::now()), file).unwrap();
+            path
+        };
+        let (a, b, to) = (png("a.png"), png("b.png"), dir.join("out.pdf"));
+        let message = message_of(Job::ExportPdf {
+            files: vec![a.clone(), b],
+            to: to.clone(),
+        });
+        assert_eq!(message, "Exported 2 pages to out.pdf");
+        assert!(std::fs::read(&to).unwrap().starts_with(b"%PDF"));
+
+        let broken = dir.join("broken.pdf");
+        let message = message_of(Job::ExportPdf {
+            files: vec![a, dir.join("gone.png")],
+            to: broken.clone(),
+        });
+        assert!(message.starts_with("Could not export"), "{message}");
+        assert!(!broken.exists(), "no half-written PDF");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn save_all_copies_into_the_folder_without_overwriting() {
+        let dir = std::env::temp_dir().join(format!("cb-save-all-test-{}", std::process::id()));
+        let into = dir.join("picked");
+        std::fs::create_dir_all(&into).unwrap();
+        let (a, b) = (dir.join("a.png"), dir.join("b.png"));
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        std::fs::write(into.join("a.png"), "older").unwrap();
+
+        let message = message_of(Job::SaveAllTo {
+            files: vec![a, b, dir.join("gone.png")],
+            dir: into.clone(),
+        });
+        assert_eq!(message, "Saved 2 copies in picked; 1 failed");
+        let read = |name: &str| std::fs::read_to_string(into.join(name)).unwrap();
+        assert_eq!(
+            (read("a.png"), read("a-2.png"), read("b.png")),
+            ("older".into(), "a".into(), "b".into())
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

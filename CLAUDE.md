@@ -29,7 +29,7 @@ app/              entry point: window, shortcuts, command dispatch
 crates/core       Command, CaptureMode, Frame, traits ScreenSource / FrameSink / StreamHandle
 crates/ui         egui drawing of the bar (M1/M2.x) and tray; returns commands only
 crates/capture    CaptureService: queues grabs on a worker thread
-crates/encode     PNG today; MP4 / GIF / PDF and the encode queue next
+crates/encode     PNG, GIF (frames → animation) and PDF (images → pages); MP4 and the encode queue next
 crates/buffer     the capture buffer; write-ahead index + files next (US-6.1, 6.6)
 crates/platform   OS backends behind the core traits: macos.rs / windows.rs / linux.rs
 ```
@@ -47,11 +47,11 @@ only if a spike shows a need.
 - Global shortcuts (Ctrl+Shift / ⌥⇧ map from M3) fire from any app on Windows; macOS and X11 are not run yet, and the Wayland portal backend is not started. If none can be registered, a toast says so.
 - The collapse button shows the M2.3 pill; Ctrl+Shift+Space hides and shows. Hidden means transparent and click-through, not an OS-hidden window, because eframe stops running hidden windows. The bar fades to 40% when the cursor is away. A tray icon (not on Linux yet) toggles the bar and quits.
 - Bar UI follows M2.1 (vector icons in `crates/ui/src/icons.rs`; shortcuts in tooltips only). The window
-  follows its content and grows while hovered to give tooltips room. The buffer tray shows a thumbnail card per capture (US-6.3).
+  follows its content and grows while hovered to give tooltips room. The buffer tray shows a thumbnail card per capture (US-6.3), each with Copy, Save a copy, Annotate (stub until US-7.1) and Delete (to the Recycle Bin); on Windows the picture drags out as a file (US-6.4). Click, Ctrl/Cmd and Shift select cards; Copy all, Save all and Clear act on the selection or on everything (US-6.5).
 - Bar position and dock are saved per monitor layout through eframe storage and pulled back on-screen when
   monitors change. The bar docks to screen edges, vertical on left and right. `App::bar_pos` is the source of
   truth; the window follows it, because the tray, toast and tooltip band open on whichever side has room.
-- Screenshots work on Windows (Windows.Graphics.Capture): Screen takes the monitor under the cursor; Window and Region open one overlay window across all monitors, over a frozen image. Each capture goes to the buffer, the clipboard and a PNG on a worker thread, with an Undo toast. Files are `<prefix>_<local timestamp>.png`, never overwriting; the prefix and folder (default `~/Captures`) are set from a bar chip or Ctrl+Shift+L (US-6.8). The buffer does not survive a restart (US-6.1).
+- Screenshots work on Windows (Windows.Graphics.Capture): Screen takes the monitor under the cursor; Window and Region open one overlay window across all monitors, over a frozen image. Each capture goes to the buffer, the clipboard and a PNG on a worker thread, with an Undo toast. Files are `<prefix>_<local timestamp>.png`, never overwriting; the prefix and folder (default `~/Captures`) are set from a bar chip or Ctrl+Shift+L (US-6.8). The buffer survives restarts: its index is `~/Captures/.buffer/index.ron`, and unpinned captures leave it after 7 days while their files stay (US-6.6).
 - Windows: the bar is excluded from captures and has no OS frame. `start_stream` is a stub. The US-1.2 spike records MP4 via `windows_spike`; results
   in `docs/spikes/us-1.2-windows.md`.
 - macOS and Linux backends are still **stubs**: captures appear in the buffer, then show

@@ -8,4 +8,6 @@ license.workspace = true
 [dependencies]
 cb-core.workspace = true
 png.workspace = true
+miniz_oxide = "0.8"
+gif = { version = "0.14", default-features = false, features = ["std", "color_quant"] }
 thiserror.workspace = true

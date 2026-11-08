@@ -6,15 +6,15 @@
 mod output;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-use cb_buffer::{Buffer, ItemId, ItemKind, ItemState};
+use cb_buffer::{index, Buffer, BufferItem, ItemId, ItemKind, ItemState, Selection};
 use cb_capture::{CaptureEvent, CaptureService};
 use cb_core::{CaptureMode, CaptureTarget, Command, DisplayId, Edge, Frame, Rect};
 use cb_platform::TrayAction;
-use cb_ui::{BarState, Overlay, OverlayResult, TooltipSide};
+use cb_ui::{BarState, BatchAction, ItemAction, Overlay, OverlayResult, SelectHow, TooltipSide};
 use eframe::egui;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -31,6 +31,23 @@ const SNAP_DISTANCE: f32 = 24.0;
 /// How far a docked bar sits from the edge, in points.
 const DOCK_GAP: f32 = 8.0;
 const TRAY_WIDTH_BESIDE_BAR: f32 = 640.0;
+/// How often captures past the retention period are looked for (FR-25).
+const SWEEP_EVERY: Duration = Duration::from_secs(60 * 60);
+
+/// The buffer the last run left (FR-25), and whether its index was damaged. A damaged
+/// index is kept beside as `.bad`, never overwritten, so nothing in it is lost for good.
+fn load_buffer(path: &Path) -> (Buffer, bool) {
+    match index::read(path) {
+        Ok(items) => (Buffer::restore(items), false),
+        Err(error) => {
+            tracing::error!(%error, ?path, "buffer index unreadable");
+            if let Err(e) = std::fs::rename(path, path.with_extension("ron.bad")) {
+                tracing::warn!(error = %e, "damaged index left in place");
+            }
+            (Buffer::new(), true)
+        }
+    }
+}
 const TOAST_TIME: Duration = Duration::from_secs(2);
 const HOVER_GRACE: Duration = Duration::from_millis(300);
 /// Catches monitor changes that do not move the bar.
@@ -205,6 +222,14 @@ struct App {
     /// When the first frame was drawn.
     launched_at: Option<Instant>,
     buffer: Buffer,
+    /// Gets each new state of the buffer, to keep its index on disk (FR-25).
+    index: mpsc::Sender<Vec<BufferItem>>,
+    /// The buffer generation last sent to `index`.
+    indexed: u64,
+    /// When expired captures were last taken out of the buffer.
+    swept_at: Option<Instant>,
+    /// What Copy all, Save all and Clear act on; none means all (FR-24).
+    selection: Selection,
     /// What the tray shows for each capture (FR-22).
     thumbnails: HashMap<ItemId, egui::TextureHandle>,
     capture: CaptureService,
@@ -224,6 +249,13 @@ struct App {
     folder_choice: Option<mpsc::Receiver<Option<PathBuf>>>,
     /// "Choose…" was clicked: the dialog opens once the frame's window handle is at hand.
     folder_requested: bool,
+    /// What the tray asked of a capture this frame (FR-23), done once the frame's window
+    /// handle is at hand.
+    item_action: Option<(ItemId, ItemAction)>,
+    /// What the tray asked of the selection this frame, done like `item_action`.
+    batch_action: Option<BatchAction>,
+    /// An OS drag loop took the button release: egui is given one on the next frame.
+    release_pointer: bool,
     output: mpsc::Sender<output::Job>,
     output_done: mpsc::Receiver<output::Done>,
     /// What Copy puts on the clipboard (M3).
@@ -329,16 +361,24 @@ impl App {
         .inspect_err(|e| tracing::warn!(error = %e, "no tray icon"))
         .ok();
 
+        let default_dir = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Captures");
         let captures_dir = cc
             .storage
             .and_then(|s| eframe::get_value(s, FOLDER_STORAGE_KEY))
-            .unwrap_or_else(|| {
-                std::env::var_os("HOME")
-                    .or_else(|| std::env::var_os("USERPROFILE"))
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join("Captures")
-            });
+            .unwrap_or_else(|| default_dir.clone());
+        // Where the default folder is, whichever folder captures go to now (FR-25).
+        let index_path = default_dir.join(".buffer").join(index::INDEX_FILE);
+        let (buffer, damaged) = load_buffer(&index_path);
+        let toast = toast.or_else(|| {
+            damaged.then(|| Toast::new("The buffer index was damaged: started empty", None))
+        });
+        let index = index::spawn_writer(index_path, |error| {
+            tracing::warn!(%error, "buffer index not written");
+        });
         let prefix = cc
             .storage
             .and_then(|s| eframe::get_value(s, PREFIX_STORAGE_KEY))
@@ -347,6 +387,12 @@ impl App {
         let source: Arc<dyn cb_core::ScreenSource> = Arc::from(cb_platform::screen_source());
         let ctx = cc.egui_ctx.clone();
         let (output, output_done) = output::spawn(move || ctx.request_repaint());
+        for item in buffer.newest_first() {
+            if let Some(path) = item.path.clone() {
+                let item = item.id;
+                let _ = output.send(output::Job::Thumbnail { item, path });
+            }
+        }
         let ctx = cc.egui_ctx.clone();
         let capture = CaptureService::new(source.clone(), move || ctx.request_repaint());
 
@@ -362,7 +408,11 @@ impl App {
             click_through: false,
             bar_fade: 1.0,
             launched_at: None,
-            buffer: Buffer::new(),
+            indexed: buffer.generation(),
+            buffer,
+            index,
+            swept_at: None,
+            selection: Selection::default(),
             thumbnails: HashMap::new(),
             capture,
             pending: HashMap::new(),
@@ -378,6 +428,9 @@ impl App {
             destination_size: egui::Vec2::ZERO,
             folder_choice: None,
             folder_requested: false,
+            item_action: None,
+            batch_action: None,
+            release_pointer: false,
             output,
             output_done,
             newest_frame: None,
@@ -532,24 +585,56 @@ impl App {
     }
 
     fn copy_newest(&mut self) {
+        // After a restart the newest capture is only on disk.
+        let newest_file = || {
+            let newest = self.buffer.newest()?;
+            (newest.state == ItemState::Ready).then(|| newest.path.clone())?
+        };
         match &self.newest_frame {
             Some((_, frame)) => {
                 let _ = self.output.send(output::Job::Copy(frame.clone()));
                 self.flash("Copied");
             }
-            None => self.flash("Nothing to copy yet"),
+            None => match newest_file() {
+                Some(path) => {
+                    let _ = self.output.send(output::Job::CopyFile(path));
+                }
+                None => self.flash("Nothing to copy yet"),
+            },
         }
     }
 
-    /// Take a capture back: out of the buffer, and off the disk if it got there.
-    fn undo(&mut self, item: ItemId) {
-        self.toast = None;
-        self.thumbnails.remove(&item);
-        if let Some(path) = self.buffer.remove(item).and_then(|removed| removed.path) {
-            if let Err(e) = std::fs::remove_file(&path) {
-                tracing::warn!(error = %e, ?path, "undone capture stays on disk");
-            }
+    /// Take captures past the retention period out of the buffer, hourly. Pinned ones
+    /// stay, and every file stays on disk: only the buffer forgets them (FR-25).
+    fn sweep(&mut self) {
+        if self.swept_at.is_some_and(|at| at.elapsed() < SWEEP_EVERY) {
+            return;
         }
+        self.swept_at = Some(Instant::now());
+        let expired = self.buffer.expired(SystemTime::now(), cb_buffer::RETENTION);
+        if !expired.is_empty() {
+            tracing::info!(
+                count = expired.len(),
+                "captures past retention left the buffer"
+            );
+        }
+        for item in expired {
+            self.forget(item);
+        }
+    }
+
+    /// Send the buffer to the index writer if it changed since the last time.
+    fn save_index(&mut self) {
+        if self.buffer.generation() != self.indexed {
+            self.indexed = self.buffer.generation();
+            let _ = self.index.send(self.buffer.snapshot());
+        }
+    }
+
+    /// Drop a capture from the buffer and memory. Returns its file, if it got to disk.
+    fn forget(&mut self, item: ItemId) -> Option<PathBuf> {
+        self.thumbnails.remove(&item);
+        self.selection.remove(item);
         if self
             .newest_frame
             .as_ref()
@@ -557,6 +642,194 @@ impl App {
         {
             self.newest_frame = None;
         }
+        self.buffer.remove(item).and_then(|removed| removed.path)
+    }
+
+    /// Take a capture back: out of the buffer, and off the disk if it got there.
+    fn undo(&mut self, item: ItemId) {
+        self.toast = None;
+        if let Some(path) = self.forget(item) {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!(error = %e, ?path, "undone capture stays on disk");
+            }
+        }
+    }
+
+    /// Delete from the tray: unlike Undo, the file goes to the Recycle Bin, as it may be
+    /// an older capture the user still wants back.
+    fn delete(&mut self, item: ItemId) {
+        match self.forget(item) {
+            Some(path) => {
+                let _ = self.output.send(output::Job::Trash(vec![path]));
+            }
+            // Not written yet: `poll_output` removes the file when it lands.
+            None => self.flash("Deleted"),
+        }
+    }
+
+    /// Run what the tray asked of `item` (FR-23).
+    fn item_action(&mut self, frame: &eframe::Frame, item: ItemId, action: ItemAction) {
+        let Some(found) = self.buffer.get(item) else {
+            return;
+        };
+        let path = found.path.clone();
+        match (action, path) {
+            (ItemAction::Select(how), _) => match how {
+                SelectHow::Only => self.selection.click(item),
+                SelectHow::Toggle => self.selection.toggle(item),
+                SelectHow::Range => {
+                    let order: Vec<_> = self.buffer.newest_first().map(|i| i.id).collect();
+                    self.selection.extend_to(item, &order);
+                }
+            },
+            (ItemAction::Delete, _) => self.delete(item),
+            (ItemAction::TogglePin, _) => {
+                if let Some(found) = self.buffer.get_mut(item) {
+                    found.pinned = !found.pinned;
+                }
+            }
+            (ItemAction::Annotate, _) => self.flash("Annotate: not implemented yet (US-7.1)"),
+            (ItemAction::Copy, Some(path)) => {
+                let _ = self.output.send(output::Job::CopyFile(path));
+            }
+            (ItemAction::Save, Some(path)) => self.save_copy(frame, path),
+            (ItemAction::DragOut, Some(path)) => {
+                // Blocks this thread until the drop, as every OS drag loop does.
+                if let Err(e) = cb_platform::drag_file_out(&path) {
+                    tracing::warn!(error = %e, ?path, "drag out");
+                    self.flash(format!("Drag out: {e}"));
+                }
+                self.release_pointer = true;
+            }
+            // The tray only offers these once the file is on disk.
+            (ItemAction::Copy | ItemAction::Save | ItemAction::DragOut, None) => {}
+        }
+    }
+
+    /// Run a batch action on the selection, or on everything when nothing is selected (FR-24).
+    fn batch_action(&mut self, frame: &eframe::Frame, action: BatchAction) {
+        let targets = self.buffer.targets(&self.selection);
+        // Copy and save need the file; a capture still being written is left out.
+        let files: Vec<PathBuf> = targets
+            .iter()
+            .filter_map(|&id| self.buffer.get(id))
+            .filter(|i| i.state == ItemState::Ready)
+            .filter_map(|i| i.path.clone())
+            .collect();
+        match action {
+            BatchAction::Deselect => self.selection.clear(),
+            // The tray offers Delete for a selection only.
+            BatchAction::Delete if self.selection.is_empty() => {}
+            BatchAction::Delete => {
+                let count = targets.len();
+                let paths: Vec<PathBuf> = targets
+                    .into_iter()
+                    .filter_map(|id| self.forget(id))
+                    .collect();
+                self.selection.clear();
+                if paths.is_empty() {
+                    self.flash(format!("Deleted {count}"));
+                } else {
+                    let _ = self.output.send(output::Job::Trash(paths));
+                }
+            }
+            BatchAction::Clear => {
+                let everything = self.selection.is_empty();
+                let mut cleared = 0;
+                for id in targets {
+                    // Clearing everything keeps pinned captures (FR-25); a selection is explicit.
+                    if everything && self.buffer.get(id).is_some_and(|i| i.pinned) {
+                        continue;
+                    }
+                    self.forget(id);
+                    cleared += 1;
+                }
+                self.selection.clear();
+                self.flash(format!(
+                    "Cleared {cleared} from the buffer · the files stay"
+                ));
+            }
+            _ if files.is_empty() => self.flash("Nothing saved to copy yet"),
+            BatchAction::CopyAll => {
+                // One image pastes as an image anywhere; several go as files.
+                let job = match <[PathBuf; 1]>::try_from(files) {
+                    Ok([file]) => output::Job::CopyFile(file),
+                    Err(files) => output::Job::CopyFiles(files),
+                };
+                let _ = self.output.send(job);
+            }
+            BatchAction::SaveAll => self.save_all(frame, files),
+            BatchAction::ExportPdf => {
+                let images: Vec<PathBuf> = targets
+                    .iter()
+                    .filter_map(|&id| self.buffer.get(id))
+                    .filter(|i| i.state == ItemState::Ready && i.kind == ItemKind::Image)
+                    .filter_map(|i| i.path.clone())
+                    .collect();
+                // Oldest first: pages read in the order the captures were taken.
+                self.export_pdf(frame, images.into_iter().rev().collect());
+            }
+        }
+    }
+
+    /// Ask for a folder on the dialog's own thread; the output worker copies `files` there.
+    fn save_all(&mut self, frame: &eframe::Frame, files: Vec<PathBuf>) {
+        let dialog = rfd::FileDialog::new()
+            .set_title(format!("Save {} captures into…", files.len()))
+            .set_directory(&self.captures_dir)
+            .set_parent(frame);
+        let output = self.output.clone();
+        std::thread::Builder::new()
+            .name("save all dialog".into())
+            .spawn(move || {
+                if let Some(dir) = dialog.pick_folder() {
+                    let _ = output.send(output::Job::SaveAllTo { files, dir });
+                }
+            })
+            .expect("spawn save all dialog thread");
+    }
+
+    /// Ask where to write the PDF, on the dialog's own thread; the output worker writes it.
+    fn export_pdf(&mut self, frame: &eframe::Frame, files: Vec<PathBuf>) {
+        if files.is_empty() {
+            return self.flash("No saved image to export yet");
+        }
+        let name = output::file_name(&self.bar.prefix, SystemTime::now());
+        let dialog = rfd::FileDialog::new()
+            .set_title(format!("Export {} images as one PDF", files.len()))
+            .add_filter("PDF document", &["pdf"])
+            .set_directory(&self.captures_dir)
+            .set_file_name(Path::new(&name).with_extension("pdf").to_string_lossy())
+            .set_parent(frame);
+        let output = self.output.clone();
+        std::thread::Builder::new()
+            .name("export pdf dialog".into())
+            .spawn(move || {
+                if let Some(to) = dialog.save_file() {
+                    let _ = output.send(output::Job::ExportPdf { files, to });
+                }
+            })
+            .expect("spawn export pdf dialog thread");
+    }
+
+    /// Ask where to save a copy of `from`, on the dialog's own thread; the output worker copies.
+    fn save_copy(&mut self, frame: &eframe::Frame, from: PathBuf) {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Save a copy of the capture")
+            .add_filter("PNG image", &["png"])
+            .set_parent(frame);
+        if let Some(name) = from.file_name() {
+            dialog = dialog.set_file_name(name.to_string_lossy());
+        }
+        let output = self.output.clone();
+        std::thread::Builder::new()
+            .name("save dialog".into())
+            .spawn(move || {
+                if let Some(to) = dialog.save_file() {
+                    let _ = output.send(output::Job::SaveAs { from, to });
+                }
+            })
+            .expect("spawn save dialog thread");
     }
 
     /// A grabbed frame goes to the worker, unless the capture was undone meanwhile.
@@ -586,6 +859,7 @@ impl App {
                         self.thumbnails.insert(item, texture);
                     }
                 }
+                output::Done::Message(message) => self.flash(message),
                 output::Done::ClipboardFailed(error) => {
                     tracing::warn!(%error, "clipboard");
                     self.flash("Saved, but not copied to the clipboard");
@@ -832,8 +1106,13 @@ impl App {
             } else {
                 self.bar_size.x
             };
-            let (buffer, thumbnails) = (&self.buffer, &self.thumbnails);
-            self.tray_size = content_size(ui, |ui| cb_ui::tray(ui, buffer, thumbnails, width));
+            let (buffer, selection, thumbnails) = (&self.buffer, &self.selection, &self.thumbnails);
+            let mut asked = cb_ui::TrayOutput::default();
+            self.tray_size = content_size(ui, |ui| {
+                asked = cb_ui::tray(ui, buffer, selection, thumbnails, width);
+            });
+            self.item_action = self.item_action.or(asked.item);
+            self.batch_action = self.batch_action.or(asked.batch);
         }
         if let Some(toast) = &self.toast {
             let undo = toast.undo;
@@ -1042,6 +1321,21 @@ impl eframe::App for App {
         [0.0, 0.0, 0.0, 0.0] // transparent window: only the bar is visible
     }
 
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if std::mem::take(&mut self.release_pointer) {
+            let pos = ctx.input(|i| i.pointer.latest_pos()).unwrap_or_default();
+            raw_input.events.insert(
+                0,
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            );
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
         while let Ok(cmd) = self.commands.try_recv() {
@@ -1050,6 +1344,7 @@ impl eframe::App for App {
         self.poll_captures();
         self.poll_output(ctx);
         self.poll_folder_choice();
+        self.sweep();
         self.track_position(ctx);
 
         if let Some(start) = self.record_started {
@@ -1087,6 +1382,13 @@ impl eframe::App for App {
         if std::mem::take(&mut self.folder_requested) {
             self.choose_folder(ctx, frame);
         }
+        if let Some((item, action)) = self.item_action.take() {
+            self.item_action(frame, item, action);
+        }
+        if let Some(action) = self.batch_action.take() {
+            self.batch_action(frame, action);
+        }
+        self.save_index();
 
         // Keep the timer and toast fresh without spinning the CPU (NFR-7). A drag polls
         // faster, to show the snap preview and catch the drop.

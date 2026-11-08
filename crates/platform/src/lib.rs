@@ -165,6 +165,35 @@ pub fn cursor_position() -> Option<(i32, i32)> {
     }
 }
 
+/// Let the user drag the file at `path` into another app, which receives the file
+/// itself (FR-23). Call it while the primary button is held, from the UI thread: the OS
+/// runs its own drag loop and returns at the drop. The app never sees that release.
+pub fn drag_file_out(path: &std::path::Path) -> cb_core::CaptureResult<()> {
+    #[cfg(windows)]
+    {
+        windows::drag_file_out(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(cb_core::CaptureError::NotImplemented("drag_file_out"))
+    }
+}
+
+/// Move a file to the Recycle Bin or Trash, where the user can still get it back.
+/// Slow on some systems: call it from a worker thread.
+pub fn move_to_trash(path: &std::path::Path) -> cb_core::CaptureResult<()> {
+    #[cfg(windows)]
+    {
+        windows::move_to_trash(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(cb_core::CaptureError::NotImplemented("move_to_trash"))
+    }
+}
+
 /// The screen source for the current OS.
 pub fn screen_source() -> Box<dyn ScreenSource> {
     #[cfg(target_os = "macos")]

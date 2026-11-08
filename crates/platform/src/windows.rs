@@ -667,6 +667,55 @@ impl ScreenSource for WinScreenSource {
     }
 }
 
+/// See [`crate::drag_file_out`]. The shell builds the data object, the same one Explorer
+/// would offer for the file (CF_HDROP and shell IDs), and a default drop source.
+pub(crate) fn drag_file_out(path: &std::path::Path) -> CaptureResult<()> {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Com::IDataObject;
+    use windows::Win32::System::Ole::{IDropSource, DROPEFFECT_COPY};
+    use windows::Win32::UI::Shell::{
+        BHID_DataObject, IShellItem, SHCreateItemFromParsingName, SHDoDragDrop,
+    };
+    // SAFETY: plain COM calls on the UI thread, where winit initialised OLE for drag and drop.
+    unsafe {
+        let item: IShellItem = SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None)
+            .map_err(platform_err)?;
+        let data: IDataObject = item
+            .BindToHandler(None, &BHID_DataObject)
+            .map_err(platform_err)?;
+        SHDoDragDrop(None, &data, None::<&IDropSource>, DROPEFFECT_COPY).map_err(platform_err)?;
+    }
+    Ok(())
+}
+
+/// See [`crate::move_to_trash`].
+pub(crate) fn move_to_trash(path: &std::path::Path) -> CaptureResult<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::{
+        SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE,
+        SHFILEOPSTRUCTW,
+    };
+    // A list of paths, each ending in a NUL, then one more NUL.
+    let from: Vec<u16> = path.as_os_str().encode_wide().chain([0, 0]).collect();
+    let mut operation = SHFILEOPSTRUCTW {
+        wFunc: FO_DELETE,
+        pFrom: PCWSTR(from.as_ptr()),
+        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT).0 as u16,
+        ..Default::default()
+    };
+    // SAFETY: `from` is double-NUL terminated and outlives the call.
+    match unsafe { SHFileOperationW(&mut operation) } {
+        0 if !operation.fAnyOperationsAborted.as_bool() => Ok(()),
+        0 => Err(CaptureError::Platform(
+            "moving to the Recycle Bin was cancelled".into(),
+        )),
+        code => Err(CaptureError::Platform(format!(
+            "could not move to the Recycle Bin (error {code:#x})"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

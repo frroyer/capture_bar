@@ -1,8 +1,14 @@
-//! Encoders. PNG works today (FR-13). MP4 (US-5.1), GIF and PDF (US-6.7)
-//! and the background job queue (US-6.2) come next.
+//! Encoders: PNG (FR-13), GIF and PDF (US-6.7). MP4 (US-5.1) and the background job
+//! queue (US-6.2) come next.
+
+mod anim;
+mod pdf;
+
+pub use anim::write_gif;
+pub use pdf::write_pdf;
 
 use cb_core::Frame;
-use std::io::Write;
+use std::io::{BufRead, Seek, Write};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EncodeError {
@@ -10,6 +16,14 @@ pub enum EncodeError {
     BadFrame(u32, u32),
     #[error(transparent)]
     Png(#[from] png::EncodingError),
+    #[error(transparent)]
+    Decode(#[from] png::DecodingError),
+    #[error("not an 8-bit RGB or RGBA image")]
+    Unsupported,
+    #[error(transparent)]
+    Gif(#[from] gif::EncodingError),
+    #[error("nothing to export")]
+    Nothing,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -82,6 +96,33 @@ pub fn write_png<W: Write>(frame: &Frame, out: W) -> Result<(), EncodeError> {
     Ok(())
 }
 
+/// Read back a PNG this app wrote (or any 8-bit RGB/RGBA one), e.g. to copy it (FR-23).
+/// The capture time is not stored in the file: it becomes now.
+pub fn read_png<R: BufRead + Seek>(input: R) -> Result<Frame, EncodeError> {
+    let mut decoder = png::Decoder::new(input);
+    decoder.set_transformations(
+        png::Transformations::normalize_to_color8() | png::Transformations::ALPHA,
+    );
+    let mut reader = decoder.read_info()?;
+    if reader.output_color_type() != (png::ColorType::Rgba, png::BitDepth::Eight) {
+        return Err(EncodeError::Unsupported);
+    }
+    let mut rgba = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .ok_or(EncodeError::Unsupported)?
+    ];
+    let info = reader.next_frame(&mut rgba)?;
+    rgba.truncate(info.buffer_size());
+    Ok(Frame {
+        width: info.width,
+        height: info.height,
+        rgba,
+        captured_at: std::time::SystemTime::now(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,6 +139,16 @@ mod tests {
         let mut out = Vec::new();
         write_png(&frame, &mut out).unwrap();
         assert_eq!(&out[1..4], b"PNG");
+    }
+
+    #[test]
+    fn a_png_reads_back_as_the_same_pixels() {
+        let rgba: Vec<u8> = (0..24).collect();
+        let mut out = Vec::new();
+        write_png(&frame(3, 2, rgba.clone()), &mut out).unwrap();
+        let back = read_png(std::io::Cursor::new(out)).unwrap();
+        assert_eq!((back.width, back.height, back.rgba), (3, 2, rgba));
+        assert!(read_png(std::io::Cursor::new(b"not a png".to_vec())).is_err());
     }
 
     fn frame(width: u32, height: u32, rgba: Vec<u8>) -> Frame {
