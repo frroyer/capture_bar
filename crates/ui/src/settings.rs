@@ -33,21 +33,33 @@ impl SettingsWindow {
     }
 
     /// Draw it in its own OS window, editing `settings` in place. `file` is where they are
-    /// kept, shown at the bottom.
-    pub fn show(&mut self, ctx: &Context, settings: &mut Settings, file: &Path) -> SettingsOutput {
+    /// kept, shown at the bottom. `autostart` is whether the bar starts at login (US-8.3).
+    pub fn show(
+        &mut self,
+        ctx: &Context,
+        settings: &mut Settings,
+        file: &Path,
+        autostart: &mut bool,
+    ) -> SettingsOutput {
         let builder = ViewportBuilder::default()
             .with_title("Capture Bar settings")
-            .with_inner_size(vec2(460.0, 330.0))
+            .with_inner_size(vec2(460.0, 380.0))
             .with_resizable(false)
             .with_active(true);
         ctx.show_viewport_immediate(
             ViewportId::from_hash_of("settings"),
             builder,
-            |ui, _class| self.ui(ui, settings, file),
+            |ui, _class| self.ui(ui, settings, file, autostart),
         )
     }
 
-    fn ui(&mut self, ui: &mut Ui, settings: &mut Settings, file: &Path) -> SettingsOutput {
+    fn ui(
+        &mut self,
+        ui: &mut Ui,
+        settings: &mut Settings,
+        file: &Path,
+        autostart: &mut bool,
+    ) -> SettingsOutput {
         let ctx = ui.ctx().clone();
         if !self.focused {
             self.focused = true;
@@ -122,6 +134,9 @@ impl SettingsWindow {
                         });
                         ui.end_row();
                     });
+
+                section(ui, "General");
+                ui.checkbox(autostart, "Start Capture Bar when I log in");
 
                 section(ui, "Buffer");
                 ui.horizontal(|ui| {

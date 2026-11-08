@@ -423,7 +423,7 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: a toggle registers or unregisters (LaunchAgent / Run key / XDG autostart).
 
-- [ ] Autostart per OS
+- [x] Autostart per OS
 
 **US-8.4** As a keyboard or screen-reader user, I want every control reachable and labelled. (NFR-13, NFR-14)
 
