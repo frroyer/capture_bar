@@ -602,27 +602,58 @@ fn crop_on_monitor(
     Ok((left, top, right - left, bottom - top))
 }
 
-/// A session for a recording, with the cursor, and the part of its frames to keep:
-/// (x, y, width, height). A region across monitors keeps the part on the monitor
-/// that holds most of it.
-pub(crate) fn recording_source(
-    target: &CaptureTarget,
-) -> CaptureResult<(MonitorCapture, (u32, u32, u32, u32))> {
-    let (capture, region) = match target {
-        CaptureTarget::Display(id) => (
-            MonitorCapture::start(resolve_display(*id)?).map_err(platform_err)?,
-            None,
-        ),
+/// The top-left corner of a monitor in global physical pixels.
+fn monitor_origin(monitor: HMONITOR) -> (i32, i32) {
+    monitor_bounds(monitor).map_or((0, 0), |(r, ..)| (r.left, r.top))
+}
+
+/// The top-left corner of a window as captured, without its invisible border.
+fn window_origin(id: WindowId) -> (i32, i32) {
+    let mut r = RECT::default();
+    // SAFETY: a stale handle only makes the call fail; the out-pointer fits a RECT.
+    let found = unsafe {
+        DwmGetWindowAttribute(
+            HWND(id.0 as *mut _),
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut r as *mut _ as *mut _,
+            std::mem::size_of::<RECT>() as u32,
+        )
+    };
+    found.map_or((0, 0), |()| (r.left, r.top))
+}
+
+/// What a recording reads: a session with the cursor, and where in its frames.
+pub(crate) struct RecordingSource {
+    pub capture: MonitorCapture,
+    /// The part of the frames to keep: (x, y, width, height).
+    pub area: (u32, u32, u32, u32),
+    /// The frames' top-left corner on the desktop, in global physical pixels.
+    pub origin: (i32, i32),
+}
+
+/// A region across monitors keeps the part on the monitor that holds most of it.
+pub(crate) fn recording_source(target: &CaptureTarget) -> CaptureResult<RecordingSource> {
+    let (capture, region, origin) = match target {
+        CaptureTarget::Display(id) => {
+            let monitor = resolve_display(*id)?;
+            (
+                MonitorCapture::start(monitor).map_err(platform_err)?,
+                None,
+                monitor_origin(monitor),
+            )
+        }
         CaptureTarget::Region(rect) => {
             let monitor = monitor_of(rect);
             (
                 MonitorCapture::start(monitor).map_err(platform_err)?,
                 Some((monitor, *rect)),
+                monitor_origin(monitor),
             )
         }
         CaptureTarget::Window(id) => (
             MonitorCapture::start_with(&window_item(*id)?, true).map_err(platform_err)?,
             None,
+            window_origin(*id),
         ),
         CaptureTarget::Desktop => {
             return Err(CaptureError::NotImplemented(
@@ -634,7 +665,11 @@ pub(crate) fn recording_source(
         None => (0, 0, capture.width, capture.height),
         Some((monitor, rect)) => crop_on_monitor(monitor, rect, capture.width, capture.height)?,
     };
-    Ok((capture, area))
+    Ok(RecordingSource {
+        capture,
+        area,
+        origin,
+    })
 }
 
 fn grab_window(id: WindowId) -> CaptureResult<Frame> {

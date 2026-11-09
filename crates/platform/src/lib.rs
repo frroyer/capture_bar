@@ -17,6 +17,10 @@ mod windows;
 #[cfg(windows)]
 mod windows_audio;
 #[cfg(windows)]
+mod windows_bubble;
+#[cfg(windows)]
+mod windows_camera;
+#[cfg(windows)]
 mod windows_mp4;
 #[cfg(windows)]
 mod windows_record;
@@ -189,6 +193,75 @@ pub fn exclude_from_capture(
             "exclude_from_capture",
         ))
     }
+}
+
+/// What the webcam is doing (US-5.4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CameraState {
+    Off,
+    Starting,
+    Running,
+    Failed(String),
+}
+
+/// Start or stop the default webcam. Returns at once; [`camera_state`] follows.
+/// Windows only for now: elsewhere the camera fails to start.
+pub fn set_camera(on: bool) {
+    #[cfg(windows)]
+    windows_camera::set_on(on);
+    #[cfg(not(windows))]
+    let _ = on;
+}
+
+pub fn camera_state() -> CameraState {
+    #[cfg(windows)]
+    {
+        use windows_camera::State;
+        match windows_camera::state() {
+            State::Off => CameraState::Off,
+            State::Starting => CameraState::Starting,
+            State::Running => CameraState::Running,
+            State::Failed(e) => CameraState::Failed(e),
+        }
+    }
+    #[cfg(not(windows))]
+    CameraState::Off
+}
+
+/// The newest webcam picture as RGBA with its number, when newer than picture `seen`.
+pub fn camera_frame(seen: Option<u64>) -> Option<(u64, cb_core::Frame)> {
+    #[cfg(windows)]
+    {
+        let frame = windows_camera::latest().filter(|f| Some(f.seq) != seen)?;
+        let mut rgba = frame.bgra.clone();
+        for pixel in rgba.as_chunks_mut::<4>().0 {
+            pixel.swap(0, 2);
+            pixel[3] = 255;
+        }
+        Some((
+            frame.seq,
+            cb_core::Frame {
+                width: frame.width,
+                height: frame.height,
+                rgba,
+                captured_at: std::time::SystemTime::now(),
+            },
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = seen;
+        None
+    }
+}
+
+/// Where recordings draw the webcam bubble, in global physical pixels; `None` for no
+/// bubble. Read at every video frame, so moving the bubble moves it in the video.
+pub fn set_camera_bubble(rect: Option<cb_core::Rect>) {
+    #[cfg(windows)]
+    windows_camera::set_bubble(rect);
+    #[cfg(not(windows))]
+    let _ = rect;
 }
 
 /// One of this app's own windows, found by its title: for the windows egui opens

@@ -241,3 +241,7 @@ dialog-folder = Folder for new captures
 
 countdown-title = Recording starts
 countdown-cancel = Press { $key } to cancel
+
+bubble-title = Camera
+bubble-starting = Starting camera…
+toast-camera-failed = Camera unavailable: { $error }

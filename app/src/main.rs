@@ -266,6 +266,20 @@ fn show_in_capture() -> bool {
     cfg!(debug_assertions) && std::env::var_os("CB_SHOW_IN_CAPTURE").is_some()
 }
 
+/// The webcam and its bubble (US-5.4), on while the bar's cam toggle is.
+#[derive(Default)]
+struct Camera {
+    /// What `cb_platform::set_camera` was last told.
+    on: bool,
+    bubble: cb_ui::CameraBubble,
+    /// The last picture handed to the bubble.
+    seen: Option<u64>,
+    /// Where the bubble first opens: top-left corner, global physical pixels.
+    start: Option<(i32, i32)>,
+    /// Its window has lost the OS frame and is kept out of captures.
+    dressed: bool,
+}
+
 /// Seconds shown on screen before a recording starts (Settings: countdown).
 struct Countdown {
     mode: CaptureMode,
@@ -370,6 +384,7 @@ struct App {
     /// The running recording (US-5.1).
     recording: Option<ActiveRecording>,
     countdown: Option<Countdown>,
+    camera: Camera,
     /// Finished recordings, sent from their own threads.
     recorded: (mpsc::Sender<Recorded>, mpsc::Receiver<Recorded>),
     /// Wakes the UI when a recording finishes.
@@ -631,6 +646,7 @@ impl App {
                 .and_then(|s| eframe::get_value(s, REGION_STORAGE_KEY)),
             recording: None,
             countdown: None,
+            camera: Camera::default(),
             recorded: mpsc::channel(),
             repaint: cc.egui_ctx.clone(),
             overlay_records: false,
@@ -1596,6 +1612,61 @@ impl App {
         ))
     }
 
+    /// Follow the cam toggle: start or stop the webcam, and show its bubble while on.
+    fn show_camera(&mut self, ctx: &egui::Context) {
+        let wanted = self.bar.cam_on;
+        if wanted != self.camera.on {
+            cb_platform::set_camera(wanted);
+            if !wanted {
+                cb_platform::set_camera_bubble(None);
+                self.camera = Camera::default();
+                return;
+            }
+            self.camera.on = true;
+        }
+        if !wanted {
+            return;
+        }
+        let state = cb_platform::camera_state();
+        if let cb_platform::CameraState::Failed(error) = state {
+            self.bar.cam_on = false;
+            self.flash(tr!("toast-camera-failed", error = error));
+            return;
+        }
+        if let Some((seq, frame)) = cb_platform::camera_frame(self.camera.seen) {
+            self.camera.bubble.set_picture(ctx, &frame);
+            self.camera.seen = Some(seq);
+        }
+        let start = *self.camera.start.get_or_insert_with(|| {
+            // The bottom-right corner of the screen under the cursor, clear of its edges.
+            let size = (cb_ui::BUBBLE_SIZE * ctx.pixels_per_point()) as i32;
+            let display = cb_platform::cursor_position()
+                .and_then(|cursor| cb_core::display_at(cursor, &self.displays))
+                .or(self.displays.first());
+            display.map_or((100, 100), |d| {
+                let area = d.work_area;
+                let margin = size / 6;
+                (
+                    area.x + area.width as i32 - size - margin,
+                    area.y + area.height as i32 - size - margin,
+                )
+            })
+        });
+        let rect = self.camera.bubble.show(ctx, start);
+        // Recordings draw the camera only once there is a picture to draw.
+        let running = state == cb_platform::CameraState::Running;
+        cb_platform::set_camera_bubble(rect.filter(|_| running));
+        if !self.camera.dressed {
+            if let Some(window) = cb_platform::own_window(&tr!("bubble-title")) {
+                let _ = cb_platform::remove_window_frame(&window);
+                if !show_in_capture() {
+                    let _ = cb_platform::exclude_from_capture(&window);
+                }
+                self.camera.dressed = true;
+            }
+        }
+    }
+
     /// Draw the countdown, or start the recording once it is over. The countdown window
     /// is not drawn in the frame the recording starts, so it is gone from the video.
     fn show_countdown(&mut self, ctx: &egui::Context) {
@@ -2180,6 +2251,7 @@ impl eframe::App for App {
                 });
         }
         self.place_window(ctx, used);
+        self.show_camera(ctx);
         self.show_countdown(ctx);
         self.show_overlay(ctx);
         self.show_editor(ctx);
@@ -2201,6 +2273,9 @@ impl eframe::App for App {
         // The mic meter moves at 20 fps.
         let wake = if self.dragging {
             16
+        } else if self.bar.cam_on {
+            // The bubble follows the camera at 30 fps.
+            33
         } else if self.bar.mic_level.is_some() {
             50
         } else {
