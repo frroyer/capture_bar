@@ -7,12 +7,14 @@ mod editor;
 pub mod i18n;
 mod icons;
 mod overlay;
+mod place;
 mod settings;
 
 pub use bubble::{CameraBubble, BUBBLE_SIZE};
 pub use countdown::show_countdown;
 pub use editor::{Editor, EditorResult};
 pub use overlay::{Overlay, OverlayResult};
+pub use place::points_for_pixel;
 pub use settings::{SettingsOutput, SettingsWindow};
 
 use cb_buffer::{Buffer, BufferItem, ItemId, ItemKind, ItemState, Selection};

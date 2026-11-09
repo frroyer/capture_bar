@@ -2,6 +2,7 @@
 //! window, dragged anywhere on screen. Recordings draw the camera where it is, so it
 //! shows in the video without the window itself being captured.
 
+use crate::place::{keep_at, placed};
 use crate::{palette, tr};
 use egui::{
     epaint::{Mesh, Vertex},
@@ -18,6 +19,8 @@ pub struct CameraBubble {
     texture: Option<TextureHandle>,
     /// The camera picture's width over its height.
     aspect: f32,
+    /// Its window is in place and showing.
+    shown: bool,
 }
 
 impl CameraBubble {
@@ -32,15 +35,19 @@ impl CameraBubble {
         }
     }
 
-    /// Draw the bubble for one frame, first at `start` (top-left corner, global
-    /// physical pixels); the user moves it from there. Returns where it is now, as a
-    /// square in global physical pixels, once its window is open.
-    pub fn show(&mut self, ctx: &Context, start: (i32, i32)) -> Option<cb_core::Rect> {
-        let ppp = ctx.pixels_per_point();
+    /// Draw the bubble for one frame, first at `start` (global physical pixels, a
+    /// square of `BUBBLE_SIZE` points at its monitor's scale); the user moves it from
+    /// there. It stays hidden until `dressed` (by the caller, once the window exists)
+    /// and in place. Returns where it is now, as a square in global physical pixels,
+    /// once its window is open.
+    pub fn show(
+        &mut self,
+        ctx: &Context,
+        start: cb_core::Rect,
+        dressed: bool,
+    ) -> Option<cb_core::Rect> {
         let builder = ViewportBuilder::default()
             .with_title(tr!("bubble-title"))
-            .with_position(pos2(start.0 as f32, start.1 as f32) / ppp)
-            .with_inner_size(vec2(BUBBLE_SIZE, BUBBLE_SIZE))
             .with_decorations(false)
             .with_transparent(true)
             .with_has_shadow(false)
@@ -48,16 +55,21 @@ impl CameraBubble {
             .with_resizable(false)
             .with_taskbar(false)
             .with_active(false);
+        let builder = placed(builder, ctx, start, self.shown);
         ctx.show_viewport_immediate(
             ViewportId::from_hash_of("camera bubble"),
             builder,
             |ui, _class| {
+                // Placed once; after that it goes where the user drags it.
+                if !self.shown {
+                    self.shown = keep_at(ui.ctx(), start) && dressed;
+                }
                 CentralPanel::default()
                     .frame(Frame::NONE)
                     .show(ui, |ui| self.draw(ui));
                 let inner = ui.ctx().input(|i| i.viewport().inner_rect)?;
                 let ppp = ui.ctx().pixels_per_point();
-                Some(cb_core::Rect {
+                self.shown.then_some(cb_core::Rect {
                     x: (inner.min.x * ppp).round() as i32,
                     y: (inner.min.y * ppp).round() as i32,
                     width: (inner.width() * ppp).round() as u32,

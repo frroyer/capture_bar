@@ -120,15 +120,9 @@ tray-menu-quit = Quitter Capture Bar
 ## Sélection à l'écran
 
 overlay-title = Sélection Capture Bar
-overlay-record = Enregistrer  R
-overlay-capture = Capturer  ⏎
-hint-drag-region = Glisser pour une nouvelle zone
-hint-click-window = Cliquer sur une fenêtre
-hint-capture = Entrée ou double-clic pour capturer
-hint-record = R enregistrer
-hint-last-region = Espace dernière zone
-hint-lock-ratio = Maj garder les proportions
-hint-cancel = Échap annuler
+overlay-record = Enregistrer
+overlay-capture = Capturer
+overlay-cancel = Annuler
 
 ## Éditeur d'annotations (US-7.1)
 
