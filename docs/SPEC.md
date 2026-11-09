@@ -307,9 +307,9 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: the mic toggle reflects state (M1); audio stays in sync within 40 ms over 10 min.
 
-- [ ] Mic capture (cpal)
-- [ ] System audio: SCK audio / WASAPI loopback / PipeWire monitor
-- [ ] AAC encode + A/V sync
+- [ ] Mic capture (cpal) — Windows done with WASAPI directly (`windows_audio.rs`): one code path for mic and loopback, packet capture times from the performance counter, no new dependency. The bar's mic toggle picks it at the start of a recording. macOS and Linux open
+- [ ] System audio: SCK audio / WASAPI loopback / PipeWire monitor — Windows done (WASAPI loopback of the default output, mixed with the mic). macOS and Linux open
+- [ ] AAC encode + A/V sync — Windows done: AAC 160 kbit/s in the same fragmented MP4 through the sink writer; video slots and audio packets share one timeline that pauses with the recording, each source re-synced to its timestamps past 20 ms of drift (`audio_mix.rs`, unit tests; a tone at 1 s decodes at 1 s ± 40 ms). A 10-minute live sync measurement is still to do
 
 **US-5.4** As a user, I want a webcam bubble in my recording. (M1 · FR-17)
 

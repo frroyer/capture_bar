@@ -751,12 +751,14 @@ impl ScreenSource for WinScreenSource {
         &self,
         target: &CaptureTarget,
         fps: u32,
+        audio: AudioSources,
         path: &std::path::Path,
         done: Box<dyn FnOnce(CaptureResult<Recording>) + Send>,
     ) -> CaptureResult<Box<dyn StreamHandle>> {
         Ok(crate::windows_record::start(
             target.clone(),
             fps,
+            audio,
             path.to_path_buf(),
             done,
         ))

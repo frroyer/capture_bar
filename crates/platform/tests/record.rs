@@ -8,7 +8,7 @@
 //! The file holds whatever was on screen; it is deleted at the end.
 #![cfg(windows)]
 
-use cb_core::{CaptureTarget, DisplayId};
+use cb_core::{AudioSources, CaptureTarget, DisplayId};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -24,6 +24,10 @@ fn records_the_screen_to_a_valid_mp4_in_time() {
         .start_recording(
             &CaptureTarget::Display(DisplayId(0)),
             60,
+            AudioSources {
+                microphone: true,
+                system: true,
+            },
             &dir.join("ac.mp4"),
             Box::new(move |result| sender.send(result).unwrap()),
         )

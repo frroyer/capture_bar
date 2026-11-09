@@ -14,8 +14,8 @@ use std::time::{Duration, Instant, SystemTime};
 use cb_buffer::{index, Buffer, BufferItem, ItemId, ItemKind, ItemState, Selection};
 use cb_capture::{CaptureEvent, CaptureService};
 use cb_core::{
-    CaptureMode, CaptureResult, CaptureTarget, Command, DisplayId, Edge, Frame, Recording, Rect,
-    Settings, StreamHandle,
+    AudioSources, CaptureMode, CaptureResult, CaptureTarget, Command, DisplayId, Edge, Frame,
+    Recording, Rect, Settings, StreamHandle,
 };
 use cb_platform::TrayAction;
 use cb_ui::{
@@ -1546,10 +1546,16 @@ impl App {
             let _ = sender.send((item, result));
             repaint.request_repaint();
         });
-        match self
-            .screen
-            .start_recording(&target, self.prefs.frame_rate, &path, done)
-        {
+        match self.screen.start_recording(
+            &target,
+            self.prefs.frame_rate,
+            AudioSources {
+                microphone: self.bar.mic_on,
+                system: self.prefs.system_audio,
+            },
+            &path,
+            done,
+        ) {
             Ok(handle) => {
                 self.recording = Some(ActiveRecording {
                     handle,

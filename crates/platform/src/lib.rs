@@ -3,6 +3,8 @@
 
 use cb_core::ScreenSource;
 
+#[cfg(any(windows, test))]
+mod audio_mix;
 pub mod autostart;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -12,6 +14,8 @@ mod macos;
 mod tray;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+mod windows_audio;
 #[cfg(windows)]
 mod windows_mp4;
 #[cfg(windows)]

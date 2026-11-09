@@ -33,9 +33,10 @@ impl ScreenSource for MacScreenSource {
         &self,
         target: &CaptureTarget,
         fps: u32,
+        audio: AudioSources,
         path: &std::path::Path,
         done: Box<dyn FnOnce(CaptureResult<Recording>) + Send>,
     ) -> CaptureResult<Box<dyn StreamHandle>> {
-        self.inner.start_recording(target, fps, path, done)
+        self.inner.start_recording(target, fps, audio, path, done)
     }
 }

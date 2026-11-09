@@ -1,6 +1,7 @@
 //! H.264 MP4 files through a Media Foundation sink writer (US-5.1), from CPU rows or
-//! straight from D3D11 textures. Measured in the US-1.2 spike: docs/spikes/us-1.2-windows.md.
+//! straight from D3D11 textures, with an optional AAC sound track (US-5.3). Measured in the US-1.2 spike: docs/spikes/us-1.2-windows.md.
 
+use crate::audio_mix::{CHANNELS, RATE};
 use crate::windows::ensure_mta;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -31,6 +32,7 @@ pub(crate) fn pack(hi: u32, lo: u32) -> u64 {
 pub(crate) struct Mp4Writer {
     writer: IMFSinkWriter,
     stream: u32,
+    audio: Option<u32>,
     width: u32,
     height: u32,
     fps: u32,
@@ -38,13 +40,15 @@ pub(crate) struct Mp4Writer {
 
 impl Mp4Writer {
     /// `width` and `height` must be even: H.264 uses 4:2:0 chroma.
-    /// A device gives hardware encoders a D3D11 device to run on.
+    /// A device gives hardware encoders a D3D11 device to run on. With `audio`, the file
+    /// also has an AAC track fed by [`Self::write_audio`].
     pub fn new(
         path: &Path,
         width: u32,
         height: u32,
         fps: u32,
         device: Option<&ID3D11Device>,
+        audio: bool,
     ) -> WinResult<Self> {
         ensure_mf()?;
         // ~0.1 bit per pixel: enough for screen content at 1080p60 (~12 Mbit/s).
@@ -94,11 +98,17 @@ impl Mp4Writer {
             // A positive stride means top-down rows, the layout of captured textures.
             input.SetUINT32(&MF_MT_DEFAULT_STRIDE, width * 4)?;
             writer.SetInputMediaType(stream, &input, None)?;
+            let audio = if audio {
+                Some(add_audio_stream(&writer)?)
+            } else {
+                None
+            };
 
             writer.BeginWriting()?;
             Ok(Self {
                 writer,
                 stream,
+                audio,
                 width,
                 height,
                 fps,
@@ -160,6 +170,32 @@ impl Mp4Writer {
         }
     }
 
+    /// Queue 16-bit stereo PCM at [`RATE`] starting at frame `first` of the timeline.
+    /// Does nothing on a writer made without audio.
+    pub fn write_audio(&self, pcm: &[i16], first: i64) -> WinResult<()> {
+        let Some(stream) = self.audio else {
+            return Ok(());
+        };
+        let bytes = pcm.len() * 2;
+        let frames = (pcm.len() / CHANNELS) as i64;
+        let rate = i64::from(RATE);
+        // SAFETY: the buffer is locked while written and holds `bytes` bytes.
+        unsafe {
+            let buffer = MFCreateMemoryBuffer(bytes as u32)?;
+            let mut data = std::ptr::null_mut();
+            buffer.Lock(&mut data, None, None)?;
+            // Windows is little-endian, the byte order of PCM.
+            std::ptr::copy_nonoverlapping(pcm.as_ptr().cast::<u8>(), data, bytes);
+            buffer.Unlock()?;
+            buffer.SetCurrentLength(bytes as u32)?;
+            let sample = MFCreateSample()?;
+            sample.AddBuffer(&buffer)?;
+            sample.SetSampleTime(first * TICKS_PER_SECOND / rate)?;
+            sample.SetSampleDuration(frames * TICKS_PER_SECOND / rate)?;
+            self.writer.WriteSample(stream, &sample)
+        }
+    }
+
     /// The video encoder the sink writer picked, e.g. "Intel Quick Sync Video H.264 Encoder MFT".
     pub fn encoder_name(&self) -> String {
         let Ok(ex) = self.writer.cast::<IMFSinkWriterEx>() else {
@@ -187,6 +223,34 @@ impl Mp4Writer {
     pub fn finish(self) -> WinResult<()> {
         // SAFETY: every queued sample stays owned by the writer until it returns.
         unsafe { self.writer.Finalize() }
+    }
+}
+
+/// An AAC track fed with 16-bit stereo PCM at [`RATE`].
+fn add_audio_stream(writer: &IMFSinkWriter) -> WinResult<u32> {
+    let block = (CHANNELS * 2) as u32;
+    // SAFETY: Media Foundation calls below only read arguments valid for each call.
+    unsafe {
+        let output = MFCreateMediaType()?;
+        output.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+        output.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC)?;
+        output.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
+        output.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, RATE)?;
+        output.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, CHANNELS as u32)?;
+        // 160 kbit/s; the encoder only takes 96, 128, 160 or 192.
+        output.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 20_000)?;
+        let stream = writer.AddStream(&output)?;
+
+        let input = MFCreateMediaType()?;
+        input.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+        input.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)?;
+        input.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
+        input.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, RATE)?;
+        input.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, CHANNELS as u32)?;
+        input.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, block)?;
+        input.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, RATE * block)?;
+        writer.SetInputMediaType(stream, &input, None)?;
+        Ok(stream)
     }
 }
 
@@ -461,7 +525,7 @@ mod tests {
     #[test]
     fn mp4_round_trip_keeps_frames_and_orientation() {
         let path = temp_mp4("rows.mp4");
-        let mp4 = match Mp4Writer::new(&path, W, H, FPS, None) {
+        let mp4 = match Mp4Writer::new(&path, W, H, FPS, None, false) {
             Ok(mp4) => mp4,
             Err(e) => {
                 // Some Windows Server images ship no H.264 encoder.
@@ -524,7 +588,7 @@ mod tests {
         let texture = texture.unwrap();
 
         let path = temp_mp4("textures.mp4");
-        let mp4 = Mp4Writer::new(&path, W, H, FPS, Some(&gpu.device)).unwrap();
+        let mp4 = Mp4Writer::new(&path, W, H, FPS, Some(&gpu.device), false).unwrap();
         for i in 0..30 {
             mp4.write_texture(&texture, i).unwrap();
         }
@@ -541,7 +605,7 @@ mod tests {
     fn video_frames_spread_over_the_video() {
         let (w, h) = (650u32, 482u32);
         let path = temp_mp4("preview.mp4");
-        let Ok(mp4) = Mp4Writer::new(&path, w, h, FPS, None) else {
+        let Ok(mp4) = Mp4Writer::new(&path, w, h, FPS, None, false) else {
             eprintln!("skipped: no H.264 encoder on this machine");
             return;
         };
@@ -568,12 +632,102 @@ mod tests {
         }
     }
 
+    /// Decoded sound of `path`: its length, and when it first gets loud.
+    fn audio_onset(path: &Path) -> (Duration, Option<Duration>) {
+        let stream = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
+        let (mut frames, mut onset) = (0u64, None);
+        // SAFETY: as in `decode_check`.
+        unsafe {
+            let reader = MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), None)
+                .expect("reader");
+            let pcm = MFCreateMediaType().unwrap();
+            pcm.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).unwrap();
+            pcm.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM).unwrap();
+            pcm.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16).unwrap();
+            reader
+                .SetCurrentMediaType(stream, None, &pcm)
+                .expect("an audio track");
+            loop {
+                let (mut flags, mut timestamp, mut sample) = (0u32, 0i64, None);
+                reader
+                    .ReadSample(
+                        stream,
+                        0,
+                        None,
+                        Some(&mut flags),
+                        Some(&mut timestamp),
+                        Some(&mut sample),
+                    )
+                    .unwrap();
+                if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                    break;
+                }
+                let Some(sample): Option<IMFSample> = sample else {
+                    continue;
+                };
+                let buffer = sample.ConvertToContiguousBuffer().unwrap();
+                let (mut data, mut len) = (std::ptr::null_mut(), 0);
+                buffer.Lock(&mut data, None, Some(&mut len)).unwrap();
+                let samples = std::slice::from_raw_parts(data as *const i16, len as usize / 2);
+                let start = Duration::from_nanos(timestamp as u64 * 100);
+                if onset.is_none() {
+                    if let Some(i) = samples.iter().position(|s| s.abs() > 4000) {
+                        onset = Some(start + Duration::from_secs((i / CHANNELS) as u64) / RATE);
+                    }
+                }
+                frames = (timestamp as u64 * u64::from(RATE)) / 10_000_000
+                    + (samples.len() / CHANNELS) as u64;
+                buffer.Unlock().unwrap();
+            }
+        }
+        (Duration::from_secs(frames) / RATE, onset)
+    }
+
+    /// US-5.3: the sound track lasts as long as the video, and a sound placed at 1 s
+    /// plays at 1 s (AC: within 40 ms).
+    #[test]
+    fn sound_track_stays_in_sync_with_the_video() {
+        let path = temp_mp4("sound.mp4");
+        let Ok(mp4) = Mp4Writer::new(&path, W, H, FPS, None, true) else {
+            eprintln!("skipped: no H.264 or AAC encoder on this machine");
+            return;
+        };
+        let bgra = half_white();
+        let chunk = RATE as i64 / 100; // 10 ms
+        for i in 0..90 {
+            mp4.write_frame(&bgra, (W * 4) as usize, i).unwrap();
+            // 3 s of sound in 10 ms chunks, silent until 1 s, then a 1 kHz tone.
+            for c in (i * 100 / 30)..((i + 1) * 100 / 30) {
+                let first = c as i64 * chunk;
+                let pcm: Vec<i16> = (first..first + chunk)
+                    .flat_map(|f| {
+                        let t = f as f32 / RATE as f32;
+                        let v = if f >= RATE as i64 {
+                            (t * 1000.0 * std::f32::consts::TAU).sin() * 20_000.0
+                        } else {
+                            0.0
+                        };
+                        [v as i16; CHANNELS]
+                    })
+                    .collect();
+                mp4.write_audio(&pcm, first).unwrap();
+            }
+        }
+        mp4.finish().unwrap();
+        let (length, onset) = audio_onset(&path);
+        let _ = std::fs::remove_file(&path);
+        let off = |a: Duration, b: Duration| a.abs_diff(b).as_millis();
+        assert!(off(length, Duration::from_secs(3)) <= 40, "{length:?}");
+        let onset = onset.expect("the tone");
+        assert!(off(onset, Duration::from_secs(1)) <= 40, "{onset:?}");
+    }
+
     /// NFR-12: a recording cut off before `finish` (a crash) still plays up to
     /// its last complete fragment.
     #[test]
     fn unfinished_mp4_still_plays() {
         let path = temp_mp4("crashed.mp4");
-        let Ok(mp4) = Mp4Writer::new(&path, W, H, FPS, None) else {
+        let Ok(mp4) = Mp4Writer::new(&path, W, H, FPS, None, false) else {
             eprintln!("skipped: no H.264 encoder on this machine");
             return;
         };

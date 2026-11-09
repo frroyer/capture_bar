@@ -21,6 +21,7 @@ impl ScreenSource for StubScreenSource {
         &self,
         _target: &CaptureTarget,
         _fps: u32,
+        _audio: AudioSources,
         _path: &std::path::Path,
         _done: Box<dyn FnOnce(CaptureResult<Recording>) + Send>,
     ) -> CaptureResult<Box<dyn StreamHandle>> {

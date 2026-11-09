@@ -647,9 +647,10 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
 
                 if !state.recording {
                     divider(ui);
+                    // On is red, as the Record button: it will be in the recording.
                     let toggle = |on: bool| {
                         if on {
-                            ChipStyle::new(CHIP, TEXT)
+                            ChipStyle::new(CHIP, RECORD)
                         } else {
                             ChipStyle::new(Color32::TRANSPARENT, MUTED)
                         }
