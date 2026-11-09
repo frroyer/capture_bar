@@ -1,7 +1,9 @@
 //! Animated GIF from a clip's frames (FR-18, US-6.7). Screen recordings change little from
 //! one frame to the next, so each frame after the first carries only the rectangle that
 //! changed, and a frame that changed nothing just lengthens the one before. That, not the
-//! palette, is what keeps a clip small.
+//! palette, is what keeps a clip small. A clip decoded from a video differs a little
+//! everywhere from one frame to the next, so "changed" means by more than [`TOLERANCE`],
+//! and pixels inside the rectangle that did not change are left transparent.
 
 use crate::{check_size, EncodeError};
 use cb_core::Frame;
@@ -10,11 +12,33 @@ use std::io::Write;
 /// NeuQuant sampling: 1 is best and slowest, 30 fastest. 10 is the gif crate's default.
 const QUANTIZE_SPEED: i32 = 10;
 
+/// How far a colour channel may move and still count as unchanged: above the noise of
+/// a decoded video, below what anyone would notice.
+const TOLERANCE: u8 = 10;
+
+/// Whether two RGBA pixels look different.
+fn differs(a: &[u8; 4], b: &[u8; 4]) -> bool {
+    (0..3).any(|c| a[c].abs_diff(b[c]) > TOLERANCE)
+}
+
+/// Whether two runs of RGBA pixels look different anywhere.
+fn row_differs(a: &[u8], b: &[u8]) -> bool {
+    a.as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<4>().0)
+        .any(|(a, b)| differs(a, b))
+}
+
 /// The smallest rectangle `(x, y, width, height)` holding every pixel that differs.
 fn changed_rect(before: &Frame, after: &Frame) -> Option<(u32, u32, u32, u32)> {
     let row = after.width as usize * 4;
-    let mut rows = (0..after.height as usize)
-        .filter(|&y| before.rgba[y * row..(y + 1) * row] != after.rgba[y * row..(y + 1) * row]);
+    let mut rows = (0..after.height as usize).filter(|&y| {
+        row_differs(
+            &before.rgba[y * row..(y + 1) * row],
+            &after.rgba[y * row..(y + 1) * row],
+        )
+    });
     let top = rows.next()?;
     let bottom = rows.next_back().unwrap_or(top);
     let (mut left, mut right) = (after.width as usize, 0);
@@ -26,7 +50,7 @@ fn changed_rect(before: &Frame, after: &Frame) -> Option<(u32, u32, u32, u32)> {
             .iter()
             .zip(after.rgba[line].as_chunks::<4>().0.iter());
         for (x, (a, b)) in pixels.enumerate() {
-            if a != b {
+            if differs(a, b) {
                 left = left.min(x);
                 right = right.max(x);
             }
@@ -41,17 +65,29 @@ fn changed_rect(before: &Frame, after: &Frame) -> Option<(u32, u32, u32, u32)> {
     ))
 }
 
-/// The pixels of `frame` inside a rectangle, as RGBA rows.
-fn crop(frame: &Frame, (x, y, width, height): (u32, u32, u32, u32)) -> Vec<u8> {
+/// The pixels of `frame` inside a rectangle, as RGBA rows, transparent where they look
+/// like `shown`; `shown` takes the others, to stay what the GIF shows.
+fn changes(
+    frame: &Frame,
+    shown: &mut Frame,
+    (x, y, width, height): (u32, u32, u32, u32),
+) -> Vec<u8> {
     let row = frame.width as usize * 4;
-    (y as usize..(y + height) as usize)
-        .flat_map(|line| {
-            let start = line * row + x as usize * 4;
-            frame.rgba[start..start + width as usize * 4]
-                .iter()
-                .copied()
-        })
-        .collect()
+    let mut out = Vec::with_capacity(width as usize * height as usize * 4);
+    for line in y as usize..(y + height) as usize {
+        let span = line * row + x as usize * 4..line * row + (x + width) as usize * 4;
+        let new = frame.rgba[span.clone()].as_chunks::<4>().0;
+        let old = shown.rgba[span].as_chunks_mut::<4>().0;
+        for (new, old) in new.iter().zip(old) {
+            if differs(new, old) {
+                *old = *new;
+                out.extend_from_slice(new);
+            } else {
+                out.extend_from_slice(&[0; 4]);
+            }
+        }
+    }
+    out
 }
 
 /// Write `frames`, captured at `fps`, as a GIF that loops forever. All frames must have the
@@ -76,16 +112,17 @@ pub fn write_gif<W: Write>(
     let mut pending =
         gif::Frame::from_rgba_speed(width, height, &mut first.rgba.clone(), QUANTIZE_SPEED);
     let mut pending_from = 0u64;
-    let mut previous = first;
+    // What the GIF shows so far: changes below the tolerance add up until they show.
+    let mut shown = first;
     let mut written = 0;
     let mut n = 0u64;
     for frame in frames {
         n += 1;
-        if (frame.width, frame.height) != (previous.width, previous.height) {
+        if (frame.width, frame.height) != (shown.width, shown.height) {
             return Err(EncodeError::BadFrame(frame.width, frame.height));
         }
         check_size(&frame)?;
-        let Some(rect) = changed_rect(&previous, &frame) else {
+        let Some(rect) = changed_rect(&shown, &frame) else {
             continue;
         };
         pending.delay = start_of(n).saturating_sub(start_of(pending_from));
@@ -97,12 +134,11 @@ pub fn write_gif<W: Write>(
         pending = gif::Frame::from_rgba_speed(
             w as u16,
             h as u16,
-            &mut crop(&frame, rect),
+            &mut changes(&frame, &mut shown, rect),
             QUANTIZE_SPEED,
         );
         (pending.left, pending.top) = (x as u16, y as u16);
         pending_from = n;
-        previous = frame;
     }
     // The last frame lasts one frame time, plus any unchanged frames after it.
     pending.delay = start_of(n + 1)
@@ -156,6 +192,32 @@ mod tests {
             vec![((0, 0, 8, 6), 20), ((2, 1, 4, 3), 20)],
             "the still second frame doubles the first; the change is 2,1 to 5,3"
         );
+    }
+
+    /// A decoded video's noise is not a change; in a changed rectangle, what did not
+    /// change is transparent.
+    #[test]
+    fn small_differences_are_not_changes() {
+        let first = solid(8, 6, [100, 100, 100]);
+        let noisy = solid(8, 6, [104, 97, 100]);
+        let mut moved = noisy.clone();
+        paint(&mut moved, 1, 1, [250, 0, 0]);
+        paint(&mut moved, 3, 1, [250, 0, 0]);
+        let mut out = Vec::new();
+        assert_eq!(write_gif([first, noisy, moved], 10, &mut out).unwrap(), 2);
+        let mut decoder = gif::DecodeOptions::new().read_info(&out[..]).unwrap();
+        decoder.read_next_frame().unwrap();
+        let second = decoder.read_next_frame().unwrap().unwrap();
+        assert_eq!(
+            (second.left, second.top, second.width, second.height),
+            (1, 1, 3, 1)
+        );
+        let clear = second.transparent.expect("a transparent colour");
+        assert_eq!(
+            second.buffer[1], clear,
+            "the pixel between the two is unchanged"
+        );
+        assert_ne!(second.buffer[0], clear);
     }
 
     #[test]

@@ -328,35 +328,110 @@ pub(crate) struct Mp4Check {
 
 /// `count` frames spread evenly over the video at `path`, first one at the start, each
 /// handed to `each` as soon as it is decoded.
+/// A reader decoding the video at `path` to RGB32: with its picture size and its
+/// duration, in 100 ns units.
+///
+/// # Safety
+/// Media Foundation must be started ([`ensure_mf`]).
+unsafe fn rgb_reader(path: &Path) -> WinResult<(IMFSourceReader, usize, usize, u64)> {
+    let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+    let mut attrs = None;
+    MFCreateAttributes(&mut attrs, 1)?;
+    let attrs: IMFAttributes = attrs.expect("MFCreateAttributes without attributes");
+    // Lets the reader convert the decoded YUV to RGB.
+    attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)?;
+    let reader = MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), &attrs)?;
+    let rgb = MFCreateMediaType()?;
+    rgb.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+    rgb.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
+    reader.SetCurrentMediaType(stream, None, &rgb)?;
+    let size = reader
+        .GetCurrentMediaType(stream)?
+        .GetUINT64(&MF_MT_FRAME_SIZE)?;
+    let (width, height) = ((size >> 32) as usize, (size & 0xffff_ffff) as usize);
+    let duration = u64::try_from(
+        &reader.GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)?,
+    )?;
+    Ok((reader, width, height, duration))
+}
+
+/// The next decoded picture and its time in 100 ns units; `None` at the end.
+///
+/// # Safety
+/// `reader` comes from [`rgb_reader`].
+unsafe fn next_picture(reader: &IMFSourceReader) -> WinResult<Option<(IMFSample, i64)>> {
+    let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+    loop {
+        let (mut flags, mut timestamp, mut sample) = (0u32, 0i64, None);
+        reader.ReadSample(
+            stream,
+            0,
+            None,
+            Some(&mut flags),
+            Some(&mut timestamp),
+            Some(&mut sample),
+        )?;
+        if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+            return Ok(None);
+        }
+        if let Some(sample) = sample {
+            return Ok(Some((sample, timestamp)));
+        }
+    }
+}
+
+/// A decoded RGB32 picture as RGBA; `None` if its buffer is too small for the picture.
+///
+/// # Safety
+/// `reader` comes from [`rgb_reader`] and decoded `sample`; the locked slice is only used
+/// before Unlock.
+unsafe fn to_frame(
+    reader: &IMFSourceReader,
+    sample: &IMFSample,
+    width: usize,
+    height: usize,
+) -> WinResult<Option<cb_core::Frame>> {
+    let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+    // The decoder pads rows to its block size, so the pitch is wider than the
+    // picture unless the width is a multiple of 16. The media type only gives the
+    // real stride once a frame is decoded; negative means bottom-up rows.
+    let stride = reader
+        .GetCurrentMediaType(stream)?
+        .GetUINT32(&MF_MT_DEFAULT_STRIDE)
+        .map_or(width as i32 * 4, |s| s as i32);
+    let pitch = stride.unsigned_abs() as usize;
+    let buffer = sample.ConvertToContiguousBuffer()?;
+    let mut data = std::ptr::null_mut();
+    let mut len = 0;
+    buffer.Lock(&mut data, None, Some(&mut len))?;
+    let bytes = std::slice::from_raw_parts(data as *const u8, len as usize);
+    let mut rgba = Vec::with_capacity(width * height * 4);
+    if pitch >= width * 4 && bytes.len() >= pitch * height {
+        for y in 0..height {
+            let row = if stride < 0 { height - 1 - y } else { y } * pitch;
+            for [b, g, r, _] in bytes[row..row + width * 4].as_chunks::<4>().0 {
+                rgba.extend_from_slice(&[*r, *g, *b, 255]);
+            }
+        }
+    }
+    buffer.Unlock()?;
+    Ok((!rgba.is_empty()).then(|| cb_core::Frame {
+        width: width as u32,
+        height: height as u32,
+        rgba,
+        captured_at: std::time::SystemTime::now(),
+    }))
+}
+
 pub(crate) fn video_frames(
     path: &Path,
     count: u32,
     each: &mut dyn FnMut(cb_core::Frame),
 ) -> WinResult<()> {
     ensure_mf()?;
-    let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
-    // SAFETY: Media Foundation calls below only read arguments valid for each call;
-    // the locked slice is only used before Unlock.
+    // SAFETY: Media Foundation is started; the reader is ours.
     unsafe {
-        let mut attrs = None;
-        MFCreateAttributes(&mut attrs, 1)?;
-        let attrs: IMFAttributes = attrs.expect("MFCreateAttributes without attributes");
-        // Lets the reader convert the decoded YUV to RGB.
-        attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)?;
-        let reader = MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), &attrs)?;
-        let rgb = MFCreateMediaType()?;
-        rgb.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-        rgb.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
-        reader.SetCurrentMediaType(stream, None, &rgb)?;
-        let size = reader
-            .GetCurrentMediaType(stream)?
-            .GetUINT64(&MF_MT_FRAME_SIZE)?;
-        let (width, height) = ((size >> 32) as usize, (size & 0xffff_ffff) as usize);
-        let duration = u64::try_from(
-            &reader
-                .GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)?,
-        )?;
-
+        let (reader, width, height, duration) = rgb_reader(path)?;
         for i in 0..u64::from(count) {
             let target = duration * i / u64::from(count);
             reader.SetCurrentPosition(
@@ -365,57 +440,51 @@ pub(crate) fn video_frames(
             )?;
             // A seek lands on the keyframe before `target`: decode forward to it.
             let sample = loop {
-                let mut flags = 0u32;
-                let mut timestamp = 0i64;
-                let mut sample = None;
-                reader.ReadSample(
-                    stream,
-                    0,
-                    None,
-                    Some(&mut flags),
-                    Some(&mut timestamp),
-                    Some(&mut sample),
-                )?;
-                if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-                    break None;
-                }
-                if sample.is_some() && timestamp as u64 >= target {
-                    break sample;
+                match next_picture(&reader)? {
+                    None => break None,
+                    Some((sample, timestamp)) if timestamp as u64 >= target => break Some(sample),
+                    Some(_) => {}
                 }
             };
-            let Some(sample): Option<IMFSample> = sample else {
-                break;
-            };
-            // The decoder pads rows to its block size, so the pitch is wider than the
-            // picture unless the width is a multiple of 16. The media type only gives the
-            // real stride once a frame is decoded; negative means bottom-up rows.
-            let stride = reader
-                .GetCurrentMediaType(stream)?
-                .GetUINT32(&MF_MT_DEFAULT_STRIDE)
-                .map_or(width as i32 * 4, |s| s as i32);
-            let pitch = stride.unsigned_abs() as usize;
-            let buffer = sample.ConvertToContiguousBuffer()?;
-            let mut data = std::ptr::null_mut();
-            let mut len = 0;
-            buffer.Lock(&mut data, None, Some(&mut len))?;
-            let bytes = std::slice::from_raw_parts(data as *const u8, len as usize);
-            let mut rgba = Vec::with_capacity(width * height * 4);
-            if pitch >= width * 4 && bytes.len() >= pitch * height {
-                for y in 0..height {
-                    let row = if stride < 0 { height - 1 - y } else { y } * pitch;
-                    for [b, g, r, _] in bytes[row..row + width * 4].as_chunks::<4>().0 {
-                        rgba.extend_from_slice(&[*r, *g, *b, 255]);
-                    }
-                }
+            let Some(sample) = sample else { break };
+            if let Some(frame) = to_frame(&reader, &sample, width, height)? {
+                each(frame);
             }
-            buffer.Unlock()?;
-            if !rgba.is_empty() {
-                each(cb_core::Frame {
-                    width: width as u32,
-                    height: height as u32,
-                    rgba,
-                    captured_at: std::time::SystemTime::now(),
-                });
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn video_clip(
+    path: &Path,
+    fps: u32,
+    each: &mut dyn FnMut(cb_core::Frame, f32) -> bool,
+) -> WinResult<()> {
+    ensure_mf()?;
+    let step = 10_000_000 / i64::from(fps.max(1));
+    // SAFETY: Media Foundation is started; the reader is ours.
+    unsafe {
+        let (reader, width, height, duration) = rgb_reader(path)?;
+        let done = |at: i64| (at as f32 / duration.max(1) as f32).clamp(0.0, 1.0);
+        // Tick `next` shows the newest picture from before it. Pictures are only
+        // converted when shown, and one shown on several ticks is converted once.
+        let (mut next, mut pending, mut shown) = (0i64, None::<IMFSample>, None);
+        while let Some((sample, timestamp)) = next_picture(&reader)? {
+            while next < timestamp {
+                if let Some(picture) = pending.take() {
+                    shown = to_frame(&reader, &picture, width, height)?.or(shown);
+                }
+                let Some(frame) = &shown else { break };
+                if !each(frame.clone(), done(next)) {
+                    return Ok(());
+                }
+                next += step;
+            }
+            pending = Some(sample);
+        }
+        if let Some(picture) = pending {
+            if let Some(frame) = to_frame(&reader, &picture, width, height)? {
+                each(frame, 1.0);
             }
         }
         Ok(())
@@ -630,6 +699,39 @@ mod tests {
             assert!(red_at(20, y) > 200, "white on the left of row {y}");
             assert!(red_at(w - 20, y) < 50, "black on the right of row {y}");
         }
+    }
+
+    /// GIF export (US-6.7): a frame per tick at the asked rate, with progress up to the end.
+    #[test]
+    fn video_clip_gives_a_frame_per_tick() {
+        let (w, h) = (320u32, 240u32);
+        let path = temp_mp4("clip.mp4");
+        let Ok(mp4) = Mp4Writer::new(&path, w, h, FPS, None, false) else {
+            eprintln!("skipped: no H.264 encoder on this machine");
+            return;
+        };
+        let bgra = vec![128u8; (w * h * 4) as usize];
+        // 3 s.
+        for i in 0..u64::from(FPS) * 3 {
+            mp4.write_frame(&bgra, (w * 4) as usize, i).unwrap();
+        }
+        mp4.finish().unwrap();
+        let mut progress = Vec::new();
+        video_clip(&path, 10, &mut |frame, done| {
+            assert_eq!((frame.width, frame.height), (w, h));
+            progress.push(done);
+            true
+        })
+        .unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            (29..=31).contains(&progress.len()),
+            "{} frames",
+            progress.len()
+        );
+        assert!(progress.windows(2).all(|p| p[0] <= p[1]));
+        assert_eq!(progress.last(), Some(&1.0));
     }
 
     /// Decoded sound of `path`: its length, and when it first gets loud.

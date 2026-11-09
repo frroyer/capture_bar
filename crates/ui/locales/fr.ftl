@@ -78,6 +78,9 @@ card-copy = Copier l'image
 card-save = Enregistrer une copie sous…
 card-annotate = Annoter
 card-play = Lire
+card-gif = Exporter en GIF, à côté de la vidéo
+card-gif-waiting = GIF en attente…
+card-gif-progress = GIF { $percent } %
 card-delete = Supprimer la capture et son fichier
 # $count vaut 0 quand rien n'est sélectionné : l'action porte alors sur toutes les captures.
 batch-copy = { $count ->
@@ -230,6 +233,8 @@ toast-exported = { $count ->
    *[other] { $count } pages exportées dans { $file }
 }
 toast-export-failed = Export du PDF impossible : { $error }
+toast-gif-exported = { $file } exporté
+toast-gif-failed = Export du GIF impossible : { $error }
 toast-renamed = Renommées
 toast-renamed-some = Renommées, sauf { $count } fichiers
 toast-editor-busy = Enregistrez ou fermez d'abord l'annotation ouverte

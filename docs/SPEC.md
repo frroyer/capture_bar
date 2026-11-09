@@ -341,8 +341,8 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: the thumbnail shows a progress bar (M1); several clips queue and finish in order.
 
-- [ ] Encode job queue with priorities
-- [ ] Progress events → UI
+- [x] Encode job queue with priorities — MP4s are encoded live while recording, so the queue holds GIF exports: one export thread, first asked first done (no priorities needed yet)
+- [x] Progress events → UI — percent from the decoder's position; the card shows "GIF waiting…" or a bar with "GIF n%"
 
 **US-6.3** As a user, I want a tray of thumbnails newest first, with a live counter on the bar. (M1 · FR-22, FR-26)
 
@@ -375,7 +375,7 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: a GIF of 10 s at 720p is ≤ 15 MB; the PDF keeps native resolution.
 
-- [x] GIF encoder (palette quantisation, gif crate) — only the changed rectangle per frame, still frames merged; the 10 s/720p ≤ 15 MB AC is an ignored release test. The Export GIF button for clips comes with US-5.1, when there are clips
+- [x] GIF encoder (palette quantisation, gif crate) — only the changed rectangle per frame, still frames merged; the 10 s/720p ≤ 15 MB AC is an ignored release test. A recording's card has a GIF button: 15 fps, at most 1280×720, written next to the MP4 (US-6.2 queue). A decoded video differs a little everywhere, so a change is more than 10 per channel against what the GIF shows, and unchanged pixels in the rectangle are transparent: a 28 s 1920×1200 clip of a playing video went from 89 MB to 22 MB
 - [x] PDF writer (printpdf or similar, permissive licence) — written by hand (no new crate beyond miniz_oxide); a page per image at full resolution, oldest first, from the tray's PDF… button. The tray also gets Delete for a selection
 
 **US-6.8** As a user, I want to choose where captures go and how they are named, right from the bar, so that I can keep each piece of work apart without opening settings. (no artboard yet · FR-30)

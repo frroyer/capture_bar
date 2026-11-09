@@ -408,6 +408,25 @@ pub fn video_frames(
     }
 }
 
+/// The video at `path` from start to end at `fps` frames a second, for a GIF (US-6.7):
+/// each tick shows the newest picture before it. `each` gets the frame and how far along
+/// the video it is, 0 to 1, and returns false to stop. Slow: call it from a worker thread.
+pub fn video_clip(
+    path: &std::path::Path,
+    fps: u32,
+    each: &mut dyn FnMut(cb_core::Frame, f32) -> bool,
+) -> cb_core::CaptureResult<()> {
+    #[cfg(windows)]
+    {
+        windows_mp4::video_clip(path, fps, each).map_err(windows::platform_err)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, fps, each);
+        Err(cb_core::CaptureError::NotImplemented("video_clip"))
+    }
+}
+
 /// Move a file to the Recycle Bin or Trash, where the user can still get it back.
 /// Slow on some systems: call it from a worker thread.
 pub fn move_to_trash(path: &std::path::Path) -> cb_core::CaptureResult<()> {
