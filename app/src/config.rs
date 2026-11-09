@@ -137,7 +137,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "prefix = \"x\"\nframe_rate = 25\nretention_days = 0\n",
+            "prefix = \"x\"\nframe_rate = 25\nretention_days = 0\ncountdown_secs = 99\n",
         )
         .unwrap();
         let Loaded::Read(s) = load(&path, |_| {}) else {
@@ -148,6 +148,8 @@ mod tests {
         assert_eq!(s.retention_days, 1);
         assert_eq!(s.version, Settings::VERSION);
         assert!(s.system_audio);
+        assert_eq!(s.countdown_secs, 10);
+        assert_eq!(Settings::default().countdown_secs, 3);
     }
 
     #[test]

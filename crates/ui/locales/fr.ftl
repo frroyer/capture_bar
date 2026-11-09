@@ -175,6 +175,8 @@ settings-fps = { $rate } i/s
 settings-audio = Audio
 settings-system-audio = Son du système
 settings-microphone = Microphone
+settings-countdown = Compte à rebours
+settings-countdown-tip = Secondes affichées à l’écran avant le début d’un enregistrement ; 0 démarre aussitôt
 settings-general = Général
 settings-autostart = Lancer Capture Bar à l'ouverture de session
 settings-language = Langue
@@ -254,3 +256,6 @@ dialog-pdf-filter = Document PDF
 dialog-save-copy = Enregistrer une copie de la capture
 dialog-png-filter = Image PNG
 dialog-folder = Dossier des nouvelles captures
+
+countdown-title = Début de l’enregistrement
+countdown-cancel = { $key } pour annuler

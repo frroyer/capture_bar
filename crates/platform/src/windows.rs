@@ -74,6 +74,20 @@ pub(crate) fn exclude_from_capture(
     unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) }.map_err(platform_err)
 }
 
+/// This process's top-level window titled `title`, as in [`window_id`].
+pub(crate) fn own_window(title: &str) -> Option<isize> {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+    // SAFETY: the title outlives the call; a stale handle only makes the second fail.
+    unsafe {
+        let hwnd = FindWindowW(None, &HSTRING::from(title)).ok()?;
+        let mut process = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut process));
+        (process == GetCurrentProcessId()).then_some(hwnd.0 as isize)
+    }
+}
+
 /// The window's handle as a number, which can cross threads: see [`crate::Restorer`].
 pub(crate) fn window_id(window: &impl raw_window_handle::HasWindowHandle) -> Option<isize> {
     hwnd_of(window).ok().map(|hwnd| hwnd.0 as isize)

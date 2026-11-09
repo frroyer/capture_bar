@@ -1,12 +1,14 @@
 //! The bar UI (Epic E2), matching mockup M1 / M2.1 / M2.2.
 //! The UI only *returns commands*; it never calls OS or capture code directly.
 
+mod countdown;
 mod editor;
 pub mod i18n;
 mod icons;
 mod overlay;
 mod settings;
 
+pub use countdown::show_countdown;
 pub use editor::{Editor, EditorResult};
 pub use overlay::{Overlay, OverlayResult};
 pub use settings::{SettingsOutput, SettingsWindow};

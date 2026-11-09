@@ -261,6 +261,23 @@ enum Taskbar {
     In,
 }
 
+/// Debug builds only: `CB_SHOW_IN_CAPTURE` lets screenshots include the app's windows.
+fn show_in_capture() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("CB_SHOW_IN_CAPTURE").is_some()
+}
+
+/// Seconds shown on screen before a recording starts (Settings: countdown).
+struct Countdown {
+    mode: CaptureMode,
+    target: CaptureTarget,
+    /// Where it shows: the centre of what will be recorded, in global physical pixels.
+    center: (i32, i32),
+    ends: Instant,
+    total: Duration,
+    /// Its window has lost the OS frame and is kept out of captures.
+    dressed: bool,
+}
+
 struct ActiveRecording {
     handle: Box<dyn StreamHandle>,
     /// Its place in the buffer, there from the start.
@@ -352,6 +369,7 @@ struct App {
     last_region: Option<Rect>,
     /// The running recording (US-5.1).
     recording: Option<ActiveRecording>,
+    countdown: Option<Countdown>,
     /// Finished recordings, sent from their own threads.
     recorded: (mpsc::Sender<Recorded>, mpsc::Receiver<Recorded>),
     /// Wakes the UI when a recording finishes.
@@ -454,8 +472,7 @@ impl App {
         }
 
         // Debug builds can opt out, so the bar itself can be screenshotted during development.
-        let show_in_capture =
-            cfg!(debug_assertions) && std::env::var_os("CB_SHOW_IN_CAPTURE").is_some();
+        let show_in_capture = show_in_capture();
         if !show_in_capture {
             if let Err(e) = cb_platform::exclude_from_capture(cc) {
                 // FR-6 is not met on this OS yet: captures will include the bar.
@@ -613,6 +630,7 @@ impl App {
                 .storage
                 .and_then(|s| eframe::get_value(s, REGION_STORAGE_KEY)),
             recording: None,
+            countdown: None,
             recorded: mpsc::channel(),
             repaint: cc.egui_ctx.clone(),
             overlay_records: false,
@@ -1487,6 +1505,10 @@ impl App {
     /// Stop the recording, or start one in the current mode (FR-14). Window and Region
     /// open the overlay first, to pick what to record.
     fn toggle_recording(&mut self) {
+        // Pressed again during the countdown: no recording after all.
+        if self.countdown.take().is_some() {
+            return;
+        }
         if let Some(recording) = self.recording.take() {
             self.bar.recording = false;
             self.bar.paused = false;
@@ -1532,12 +1554,81 @@ impl App {
         self.flash(tr!("toast-record-discarded"));
     }
 
-    /// The recording shows in the buffer at once, as "saving" until its file is complete.
+    /// Record `target`, after the countdown when there is one.
     fn start_recording(&mut self, mode: CaptureMode, target: CaptureTarget) {
-        if self.recording.is_some() {
+        self.overlay_records = false;
+        if self.recording.is_some() || self.countdown.is_some() {
             return;
         }
-        self.overlay_records = false;
+        let total = Duration::from_secs(u64::from(self.prefs.countdown_secs));
+        let center = self
+            .target_center(&target)
+            .or_else(cb_platform::cursor_position);
+        match center {
+            Some(center) if !total.is_zero() => {
+                self.countdown = Some(Countdown {
+                    mode,
+                    target,
+                    center,
+                    ends: Instant::now() + total,
+                    total,
+                    dressed: false,
+                });
+            }
+            _ => self.record_now(mode, target),
+        }
+    }
+
+    /// The centre of what `target` covers on screen, in global physical pixels.
+    fn target_center(&self, target: &CaptureTarget) -> Option<(i32, i32)> {
+        let rect = match target {
+            CaptureTarget::Region(rect) => *rect,
+            CaptureTarget::Display(id) => self.displays.iter().find(|d| d.id == *id)?.bounds,
+            CaptureTarget::Window(id) => {
+                let windows = self.screen.windows().ok()?;
+                windows.into_iter().find(|w| w.id == *id)?.bounds
+            }
+            CaptureTarget::Desktop => return None,
+        };
+        Some((
+            rect.x + (rect.width / 2) as i32,
+            rect.y + (rect.height / 2) as i32,
+        ))
+    }
+
+    /// Draw the countdown, or start the recording once it is over. The countdown window
+    /// is not drawn in the frame the recording starts, so it is gone from the video.
+    fn show_countdown(&mut self, ctx: &egui::Context) {
+        let Some(countdown) = &mut self.countdown else {
+            return;
+        };
+        let left = countdown.ends.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            let Countdown { mode, target, .. } = self.countdown.take().expect("checked above");
+            self.record_now(mode, target);
+        } else {
+            cb_ui::show_countdown(
+                ctx,
+                countdown.center,
+                left.as_secs_f32(),
+                countdown.total.as_secs_f32(),
+            );
+            // The window exists once drawn: then it can lose the thin frame Windows 11
+            // draws around borderless windows, and stay out of the first frames.
+            if !countdown.dressed {
+                if let Some(window) = cb_platform::own_window(&tr!("countdown-title")) {
+                    let _ = cb_platform::remove_window_frame(&window);
+                    if !show_in_capture() {
+                        let _ = cb_platform::exclude_from_capture(&window);
+                    }
+                    countdown.dressed = true;
+                }
+            }
+        }
+    }
+
+    /// The recording shows in the buffer at once, as "saving" until its file is complete.
+    fn record_now(&mut self, mode: CaptureMode, target: CaptureTarget) {
         let name = output::file_name(&self.bar.prefix, SystemTime::now());
         let path = self.captures_dir.join(name).with_extension("mp4");
         let item = self.buffer.push(ItemKind::Video { duration_ms: 0 }, mode);
@@ -2089,6 +2180,7 @@ impl eframe::App for App {
                 });
         }
         self.place_window(ctx, used);
+        self.show_countdown(ctx);
         self.show_overlay(ctx);
         self.show_editor(ctx);
         self.show_settings(ctx);

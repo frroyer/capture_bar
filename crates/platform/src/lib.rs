@@ -191,6 +191,42 @@ pub fn exclude_from_capture(
     }
 }
 
+/// One of this app's own windows, found by its title: for the windows egui opens
+/// itself (viewports), whose handles it does not give out. Windows only for now.
+pub fn own_window(title: &str) -> Option<OwnWindow> {
+    #[cfg(windows)]
+    {
+        windows::own_window(title).map(OwnWindow)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = title;
+        None
+    }
+}
+
+/// See [`own_window`].
+pub struct OwnWindow(#[cfg_attr(not(windows), allow(dead_code))] isize);
+
+impl raw_window_handle::HasWindowHandle for OwnWindow {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        #[cfg(windows)]
+        {
+            let hwnd = std::num::NonZeroIsize::new(self.0)
+                .ok_or(raw_window_handle::HandleError::Unavailable)?;
+            let raw = raw_window_handle::Win32WindowHandle::new(hwnd);
+            // SAFETY: the handle names a window of this process, used on its thread.
+            Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw.into()) })
+        }
+        #[cfg(not(windows))]
+        {
+            Err(raw_window_handle::HandleError::NotSupported)
+        }
+    }
+}
+
 /// Remove the frame the OS draws around a borderless window, so only what the
 /// app paints is visible. macOS uses `ViewportBuilder::with_has_shadow` instead.
 pub fn remove_window_frame(

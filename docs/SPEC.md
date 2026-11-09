@@ -294,6 +294,7 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 - [ ] Capture pipeline: GPU frames → hardware encoder (VideoToolbox / Media Foundation / VA-API) — Windows done: capture textures go to Media Foundation with no CPU copy (`windows_record.rs`); 10 s at 1080p60 dropped 0 slots and started in ~240 ms (`tests/record.rs`, ignored: needs a desktop). macOS and Linux wait for their US-1.2 spikes
 - [ ] Software H.264 fallback + licence review — Windows: Media Foundation falls back to Microsoft's software encoder, licensed with the OS. macOS and Linux still open
 - [x] MP4 muxer, fragmented writes so a crash leaves a playable file (NFR-12) — Windows writes fragmented MP4; a file never finalised still decodes up to its last fragment (unit test)
+- [x] Countdown before recording (user's request, not in the mockups) — a disc with the seconds left and a draining ring, centred on what will be recorded, in a click-through window kept out of captures; Record again cancels. Settings → Countdown, 0–10 s, default 3, 0 starts at once (`crates/ui/src/countdown.rs`)
 
 **US-5.2** As a user, I want a compact recording bar with timer, pause and stop. (M2.2 · FR-15, FR-19)
 

@@ -131,6 +131,16 @@ impl SettingsWindow {
                             ui.checkbox(&mut settings.microphone, tr!("settings-microphone"));
                         });
                         ui.end_row();
+                        ui.label(tr!("settings-countdown"));
+                        ui.add(
+                            egui::Slider::new(
+                                &mut settings.countdown_secs,
+                                Settings::COUNTDOWN_SECS,
+                            )
+                            .suffix(" s"),
+                        )
+                        .on_hover_text(tr!("settings-countdown-tip"));
+                        ui.end_row();
                     });
 
                 section(ui, &tr!("settings-general"));
