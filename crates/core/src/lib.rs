@@ -704,6 +704,8 @@ pub struct Settings {
     pub system_audio: bool,
     /// Record the microphone. The bar's mic toggle is the same setting.
     pub microphone: bool,
+    /// Seconds counted down on screen before a recording starts; 0 starts at once.
+    pub countdown_secs: u32,
     /// The language of the interface (NFR-14).
     pub language: Language,
 }
@@ -723,6 +725,7 @@ impl Settings {
     pub const VERSION: u32 = 1;
     pub const FRAME_RATES: [u32; 2] = [30, 60];
     pub const RETENTION_DAYS: std::ops::RangeInclusive<u32> = 1..=365;
+    pub const COUNTDOWN_SECS: std::ops::RangeInclusive<u32> = 0..=10;
 
     /// `~/Captures`, or `./Captures` when there is no home folder.
     pub fn default_folder() -> std::path::PathBuf {
@@ -737,6 +740,7 @@ impl Settings {
     pub fn sanitized(mut self) -> Self {
         let days = Self::RETENTION_DAYS;
         self.retention_days = self.retention_days.clamp(*days.start(), *days.end());
+        self.countdown_secs = self.countdown_secs.min(*Self::COUNTDOWN_SECS.end());
         if !Self::FRAME_RATES.contains(&self.frame_rate) {
             self.frame_rate = Self::FRAME_RATES[0];
         }
@@ -759,6 +763,7 @@ impl Default for Settings {
             frame_rate: 30,
             system_audio: true,
             microphone: true,
+            countdown_secs: 3,
             language: Language::Auto,
         }
     }

@@ -172,6 +172,8 @@ settings-fps = { $rate } fps
 settings-audio = Audio
 settings-system-audio = System sound
 settings-microphone = Microphone
+settings-countdown = Countdown
+settings-countdown-tip = Seconds shown on screen before a recording starts; 0 starts at once
 settings-general = General
 settings-autostart = Start Capture Bar when I log in
 settings-language = Language
@@ -236,3 +238,6 @@ dialog-pdf-filter = PDF document
 dialog-save-copy = Save a copy of the capture
 dialog-png-filter = PNG image
 dialog-folder = Folder for new captures
+
+countdown-title = Recording starts
+countdown-cancel = Press { $key } to cancel

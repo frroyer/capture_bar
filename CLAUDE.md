@@ -58,7 +58,10 @@ only if a spike shows a need.
 - Screenshots work on Windows (Windows.Graphics.Capture): Screen takes the monitor under the cursor; Window and Region open one overlay window across all monitors, over a frozen image; Region opens with the last region selected, with Capture / Record buttons under it (double-click inside also captures). Each capture goes to the buffer, the clipboard and a PNG on a worker thread, with an Undo toast. Files are `<prefix>_<local timestamp>.png`, never overwriting; the prefix and folder (default `~/Captures`) are set on the tray's title line, which Ctrl+Shift+L opens with the keyboard in the prefix; after a prefix change the tray offers to rename the buffer's captures, keeping their timestamps (US-6.8). The buffer survives restarts: its index is `~/Captures/.buffer/index.ron`, and unpinned captures leave it after 7 days while their files stay (US-6.6).
 - Windows: the bar is excluded from captures and has no OS frame.
 - Recording (US-5.1) works on Windows: Record / Ctrl+Shift+R records the monitor under the cursor in Screen mode;
-  Window and Region open the overlay to pick what to record. `ScreenSource::start_recording` returns at once and
+  Window and Region open the overlay to pick what to record. A countdown (Settings, default 3 s, 0 = off) shows
+  centred on the target first, in its own click-through viewport (`crates/ui/src/countdown.rs`); Record again
+  cancels it. egui gives no handle for child viewports, so `cb_platform::own_window` finds it by title to strip
+  the Windows 11 frame and exclude it from captures. `ScreenSource::start_recording` returns at once and
   runs on its own thread: capture textures are cropped on the GPU and go straight to the hardware H.264 encoder
   (`windows_record.rs`, `windows_mp4.rs`), into a fragmented MP4 `<prefix>_<timestamp>.mp4` in the captures
   folder. The buffer shows it as saving until the file is complete. A warm-up thread at launch loads the GPU
