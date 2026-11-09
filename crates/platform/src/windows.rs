@@ -136,7 +136,9 @@ pub(crate) fn show_in_taskbar(
 /// With DWM's frame turned off, Windows paints the classic frame itself on
 /// WM_NCPAINT and WM_NCACTIVATE, right over the content: a white title bar flashed
 /// on the bar each time activation moved between it and the camera bubble. There is
-/// no frame to paint, so both are answered without painting.
+/// no frame to paint: WM_NCPAINT is answered here, and WM_NCACTIVATE goes on with
+/// lParam -1, which keeps Windows' own activation bookkeeping (window moves need
+/// it) but skips the repaint.
 unsafe extern "system" fn fill_window_proc(
     hwnd: HWND,
     msg: u32,
@@ -148,8 +150,10 @@ unsafe extern "system" fn fill_window_proc(
     match msg {
         WM_NCCALCSIZE if wparam.0 != 0 => return LRESULT(0),
         WM_NCPAINT => return LRESULT(0),
-        // TRUE lets the activation change go ahead.
-        WM_NCACTIVATE => return LRESULT(1),
+        WM_NCACTIVATE => {
+            // SAFETY: forwards the system's message, without the frame repaint.
+            return unsafe { DefSubclassProc(hwnd, msg, wparam, LPARAM(-1)) };
+        }
         _ => {}
     }
     // SAFETY: forwards the arguments the system passed in.
