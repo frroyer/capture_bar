@@ -45,7 +45,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetCursorPos, GetShellWindow, GetSystemMetrics, GetWindowTextW,
     GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SetWindowDisplayAffinity,
     SetWindowPos, SM_SWAPBUTTON, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, WDA_EXCLUDEFROMCAPTURE, WM_NCCALCSIZE,
+    SWP_NOZORDER, WDA_EXCLUDEFROMCAPTURE, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCPAINT,
 };
 
 /// How long to wait for the first frame of a capture session.
@@ -132,6 +132,13 @@ pub(crate) fn show_in_taskbar(
 /// winit keeps a 1 px strip above the client area of borderless windows, which
 /// shows wherever the bar's rounded corners leave the window transparent. Answering
 /// the message here makes the client area cover the whole window.
+///
+/// With DWM's frame turned off, Windows paints the classic frame itself on
+/// WM_NCPAINT and WM_NCACTIVATE, right over the content: a white title bar flashed
+/// on the bar each time activation moved between it and the camera bubble. There is
+/// no frame to paint: WM_NCPAINT is answered here, and WM_NCACTIVATE goes on with
+/// lParam -1, which keeps Windows' own activation bookkeeping (window moves need
+/// it) but skips the repaint.
 unsafe extern "system" fn fill_window_proc(
     hwnd: HWND,
     msg: u32,
@@ -140,8 +147,14 @@ unsafe extern "system" fn fill_window_proc(
     _id: usize,
     _data: usize,
 ) -> LRESULT {
-    if msg == WM_NCCALCSIZE && wparam.0 != 0 {
-        return LRESULT(0);
+    match msg {
+        WM_NCCALCSIZE if wparam.0 != 0 => return LRESULT(0),
+        WM_NCPAINT => return LRESULT(0),
+        WM_NCACTIVATE => {
+            // SAFETY: forwards the system's message, without the frame repaint.
+            return unsafe { DefSubclassProc(hwnd, msg, wparam, LPARAM(-1)) };
+        }
+        _ => {}
     }
     // SAFETY: forwards the arguments the system passed in.
     unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
