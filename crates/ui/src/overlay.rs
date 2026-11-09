@@ -285,6 +285,10 @@ impl Overlay {
         let builder = ViewportBuilder::default()
             .with_title(tr!("overlay-title"))
             .with_decorations(false)
+            // An opaque window shows white until its first frame is drawn; the frozen
+            // desktop covers every pixel anyway.
+            .with_transparent(true)
+            .with_has_shadow(false)
             .with_always_on_top()
             .with_resizable(false)
             .with_taskbar(false)
