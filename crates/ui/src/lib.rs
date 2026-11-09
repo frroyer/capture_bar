@@ -1624,6 +1624,47 @@ mod tests {
             .collect()
     }
 
+    /// US-5.5: the recording bar keeps a Capture button, and clicking it asks for a
+    /// capture (taken from the recording by the app).
+    #[test]
+    fn the_recording_bar_offers_capture() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx, None);
+        ctx.enable_accesskit();
+        let state = BarState {
+            recording: true,
+            ..Default::default()
+        };
+        // The commands of one frame, and the Capture button's node.
+        let frame = |events| {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let mut commands = Vec::new();
+            let mut output = ctx.run_ui(input, |ui| {
+                commands = bar(ui, &state, &Buffer::new()).commands;
+            });
+            output.textures_delta.clear();
+            let update = output.platform_output.accesskit_update.expect("accesskit");
+            let capture = update.nodes.iter().find_map(|(id, node)| {
+                node.label()
+                    .is_some_and(|l| l.contains(&tr!("bar-capture")))
+                    .then_some(*id)
+            });
+            (commands, capture)
+        };
+        let id = frame(vec![]).1.expect("a Capture button while recording");
+        let click = egui::Event::AccessKitActionRequest(egui::accesskit::ActionRequest {
+            action: egui::accesskit::Action::Click,
+            target_tree: egui::accesskit::TreeId::ROOT,
+            target_node: id,
+            data: None,
+        });
+        let (commands, _) = frame(vec![click]);
+        assert!(commands.contains(&Command::Capture), "{commands:?}");
+    }
+
     /// FR-19 / US-5.2 AC: Esc asks before discarding; a second Esc discards.
     #[test]
     fn esc_asks_before_discarding_a_recording() {

@@ -8,7 +8,7 @@ use crate::windows_audio::Chunk;
 use crate::windows_bubble::BubblePainter;
 use crate::windows_mp4::Mp4Writer;
 use cb_core::{
-    create_unique, AudioSources, CaptureError, CaptureResult, CaptureTarget, Recording,
+    create_unique, AudioSources, CaptureError, CaptureResult, CaptureTarget, Frame, Recording,
     StreamHandle,
 };
 use std::path::PathBuf;
@@ -24,12 +24,17 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SA
 
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Where a still taken during the recording goes (US-5.5).
+type StillDone = Box<dyn FnOnce(CaptureResult<Frame>) + Send>;
+
 /// Shared by the handle, the video loop and the audio thread.
 pub(crate) struct Control {
     pub stop: AtomicBool,
     /// The microphone's level as `f32` bits, set by the audio thread; negative without one.
     pub mic_level: AtomicU32,
     timeline: Mutex<Timeline>,
+    /// Stills asked for, taken by the video loop from its newest frame.
+    stills: Mutex<Vec<StillDone>>,
 }
 
 /// Recorded time: wall time since the first frame, less the pauses. Video slots and
@@ -49,7 +54,12 @@ impl Control {
                 origin: None,
                 paused_at: None,
             }),
+            stills: Mutex::new(Vec::new()),
         }
+    }
+
+    fn take_stills(&self) -> Vec<StillDone> {
+        std::mem::take(&mut *self.stills.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     fn timeline(&self) -> MutexGuard<'_, Timeline> {
@@ -110,6 +120,13 @@ impl StreamHandle for Handle {
     }
     fn mic_level(&self) -> Option<f32> {
         Some(f32::from_bits(self.0.mic_level.load(Relaxed))).filter(|level| *level >= 0.0)
+    }
+    fn still(&self, done: StillDone) {
+        self.0
+            .stills
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(done);
     }
     fn stop(self: Box<Self>) {}
 }
@@ -215,6 +232,38 @@ fn copy_area(
     }
 }
 
+/// Hand `screen`, the newest frame (`width` x `height`), to each still asked for. Only
+/// the GPU copy happens here; the colour conversion runs on a thread of its own, so the
+/// video loop keeps its pace.
+fn serve_stills(
+    capture: &MonitorCapture,
+    screen: &ID3D11Texture2D,
+    (width, height): (u32, u32),
+    stills: Vec<StillDone>,
+) {
+    if stills.is_empty() {
+        return;
+    }
+    let captured_at = std::time::SystemTime::now();
+    let bgra = capture
+        .read_bgra(screen, width, height)
+        .map_err(|e| platform_err(e).to_string());
+    std::thread::spawn(move || {
+        let frame = bgra.map(|bgra| {
+            let (w, h) = (width as usize, height as usize);
+            Frame {
+                width,
+                height,
+                rgba: crate::windows::bgra_to_rgba(&bgra, w * 4, 0, 0, w, h),
+                captured_at,
+            }
+        });
+        for done in stills {
+            done(frame.clone().map_err(CaptureError::Platform));
+        }
+    });
+}
+
 fn record(
     target: &CaptureTarget,
     fps: u32,
@@ -309,6 +358,8 @@ fn record(
             .map_err(platform_err)
     };
     while !control.stop.load(Relaxed) {
+        // Paused too: the screen is still there to capture.
+        serve_stills(&capture, &last, (width, height), control.take_stills());
         if let Some(Err(e)) = sound.as_ref().map(|s| write_sound(&s.chunks)) {
             failure = Some(e);
             break;
@@ -374,6 +425,7 @@ fn record(
             failure.get_or_insert(e);
         }
     }
+    serve_stills(&capture, &last, (width, height), control.take_stills());
     let finished = mp4.finish().map_err(platform_err);
     if let Some(e) = failure {
         return Err(e);

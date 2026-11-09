@@ -325,7 +325,7 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: Capture during a recording adds a PNG to the buffer without a frame drop in the video.
 
-- [ ] Tap the frame stream for stills instead of a second capture session
+- [ ] Tap the frame stream for stills instead of a second capture session — Windows done: `StreamHandle::still` copies the recording's newest frame (`windows_record.rs`, ~4 ms GPU readback, colour conversion on its own thread); the bar's Capture button and the capture shortcuts use it while recording. Desktop test: `cargo test -p cb-platform --release --test record -- --ignored stills` (0 dropped). macOS and Linux wait for their recorders
 
 ### E6 · Capture buffer
 

@@ -17,9 +17,9 @@ use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, TR
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
-    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_STAGING,
+    D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_CLOAKED,
@@ -424,6 +424,39 @@ impl MonitorCapture {
         Ok(())
     }
 
+    /// The BGRA pixels of the top-left `width` x `height` of `texture`, a texture of
+    /// this capture's device no larger than its frames, tightly packed. Waits for the
+    /// GPU copy: a few milliseconds.
+    pub fn read_bgra(
+        &self,
+        texture: &ID3D11Texture2D,
+        width: u32,
+        height: u32,
+    ) -> WinResult<Vec<u8>> {
+        let area = D3D11_BOX {
+            left: 0,
+            top: 0,
+            front: 0,
+            right: width.min(self.width),
+            bottom: height.min(self.height),
+            back: 1,
+        };
+        // SAFETY: both textures are on this device, in the same format; `area` lies
+        // inside each.
+        unsafe {
+            self.context
+                .CopySubresourceRegion(&self.staging, 0, 0, 0, 0, texture, 0, Some(&area));
+        }
+        let (row, rows) = (area.right as usize * 4, area.bottom as usize);
+        self.with_pixels(|bytes, pitch| {
+            let mut out = Vec::with_capacity(row * rows);
+            for line in bytes.chunks_exact(pitch).take(rows) {
+                out.extend_from_slice(&line[..row]);
+            }
+            out
+        })
+    }
+
     /// Run `f` on the staging texture's BGRA pixels with their row pitch in bytes.
     pub fn with_pixels<T>(&self, f: impl FnOnce(&[u8], usize) -> T) -> WinResult<T> {
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
@@ -449,7 +482,14 @@ impl Drop for MonitorCapture {
 }
 
 /// Copy a sub-rectangle of a BGRA image to tightly packed, opaque RGBA.
-fn bgra_to_rgba(bgra: &[u8], pitch: usize, x: usize, y: usize, w: usize, h: usize) -> Vec<u8> {
+pub(crate) fn bgra_to_rgba(
+    bgra: &[u8],
+    pitch: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+) -> Vec<u8> {
     let mut rgba = Vec::with_capacity(w * h * 4);
     for row in bgra.chunks_exact(pitch).skip(y).take(h) {
         for [b, g, r, _] in row[x * 4..(x + w) * 4].as_chunks::<4>().0 {

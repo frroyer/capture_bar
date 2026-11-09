@@ -415,6 +415,11 @@ pub trait StreamHandle: Send {
     fn mic_level(&self) -> Option<f32> {
         None
     }
+    /// A still of what is being recorded, taken from the recording's own frames, so the
+    /// video loses none (US-5.5). Returns at once; `done` runs on another thread.
+    fn still(&self, done: Box<dyn FnOnce(CaptureResult<Frame>) + Send>) {
+        done(Err(CaptureError::NotImplemented("capture while recording")));
+    }
     /// Returns at once; the recording's `done` runs when the file is complete.
     fn stop(self: Box<Self>);
 }
