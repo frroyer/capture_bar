@@ -54,7 +54,8 @@ pub struct Rect {
 }
 
 impl Rect {
-    fn contains(&self, (x, y): (i32, i32)) -> bool {
+    /// Whether the global point is inside.
+    pub fn contains(&self, (x, y): (i32, i32)) -> bool {
         let (x, y) = (i64::from(x), i64::from(y));
         x >= i64::from(self.x)
             && y >= i64::from(self.y)

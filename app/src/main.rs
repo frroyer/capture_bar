@@ -135,11 +135,24 @@ fn content_size(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) -> egui::Vec
     ui.scope(add).response.rect.size()
 }
 
-/// The point value that egui converts back to exactly `pixel`. Its conversion may
-/// truncate, so a plain division can land one pixel short.
-fn points_for_pixel(pixel: i32, ppp: f32) -> f32 {
-    let nudge = if pixel < 0 { -0.25 } else { 0.25 };
-    (pixel as f32 + nudge) / ppp
+use cb_ui::points_for_pixel;
+
+/// Ready one of the windows egui opens for the bar (overlay, countdown, camera bubble)
+/// to show: it loses the thin frame Windows 11 draws around borderless windows, and
+/// stays out of captures when `exclude`. Whether that is done: the window exists only
+/// once drawn, and is kept hidden until then. Nothing to do on other systems.
+fn dress_window(title: &str, exclude: bool) -> bool {
+    if !cfg!(windows) {
+        return true;
+    }
+    let Some(window) = cb_platform::own_window(title) else {
+        return false;
+    };
+    let _ = cb_platform::remove_window_frame(&window);
+    if exclude && !show_in_capture() {
+        let _ = cb_platform::exclude_from_capture(&window);
+    }
+    true
 }
 
 /// Whether to ask for `wanted` as the window size. Asking once is not enough: on Windows the
@@ -275,7 +288,7 @@ struct Camera {
     /// The last picture handed to the bubble.
     seen: Option<u64>,
     /// Where the bubble first opens: top-left corner, global physical pixels.
-    start: Option<(i32, i32)>,
+    start: Option<cb_core::Rect>,
     /// Its window has lost the OS frame and is kept out of captures.
     dressed: bool,
 }
@@ -290,6 +303,8 @@ struct Countdown {
     total: Duration,
     /// Its window has lost the OS frame and is kept out of captures.
     dressed: bool,
+    /// Its window is in place and showing.
+    shown: bool,
 }
 
 struct ActiveRecording {
@@ -370,6 +385,8 @@ struct App {
     /// The desktop grab an overlay is waiting for, and that overlay's mode.
     overlay_request: Option<(u64, CaptureMode)>,
     overlay: Option<Overlay>,
+    /// The overlay's window has lost its frame and may show.
+    overlay_dressed: bool,
     /// The annotation editor, open on one capture at a time (US-7.1).
     editor: Option<Editor>,
     /// The capture whose image is being read to open the editor.
@@ -636,6 +653,7 @@ impl App {
             pending: HashMap::new(),
             overlay_request: None,
             overlay: None,
+            overlay_dressed: false,
             editor: None,
             editor_loading: None,
             annotation_waiting: None,
@@ -709,6 +727,20 @@ impl App {
         CaptureTarget::Display(display.map_or(DisplayId(0), |d| d.id))
     }
 
+    /// Whether Screen mode asks which monitor: with several, when the pointer is on the
+    /// bar, so it says nothing about the screen wanted. A shortcut pressed with the
+    /// pointer elsewhere takes the monitor under it.
+    fn pick_screen(&self) -> bool {
+        if self.displays.len() < 2 {
+            return false;
+        }
+        let ppp = self.repaint.pixels_per_point();
+        match (self.bar_pos, cb_platform::cursor_position()) {
+            (Some(bar), Some(cursor)) => self.bar_rect(bar, ppp).contains(cursor),
+            _ => true,
+        }
+    }
+
     /// Capture now, or open the overlay to choose what. Asking again while it is open
     /// closes it: the way out if the overlay did not get the keyboard for Esc.
     fn begin_capture(&mut self, mode: CaptureMode) {
@@ -717,8 +749,10 @@ impl App {
             return;
         }
         match mode {
-            CaptureMode::Screen => self.capture_still(mode, self.screen_target()),
-            CaptureMode::Window | CaptureMode::Region => {
+            CaptureMode::Screen if !self.pick_screen() => {
+                self.capture_still(mode, self.screen_target());
+            }
+            _ => {
                 let request = self.capture.request_still(CaptureTarget::Desktop);
                 self.overlay_request = Some((request, mode));
             }
@@ -726,12 +760,9 @@ impl App {
     }
 
     fn open_overlay(&mut self, mode: CaptureMode, desktop: Frame) {
-        let origin = self
-            .screen
-            .displays()
-            .ok()
-            .and_then(|displays| cb_core::desktop_bounds(&displays))
-            .map_or((0, 0), |bounds| (bounds.x, bounds.y));
+        let displays = self.screen.displays().unwrap_or_default();
+        let origin =
+            cb_core::desktop_bounds(&displays).map_or((0, 0), |bounds| (bounds.x, bounds.y));
         let windows = self.screen.windows().unwrap_or_else(|e| {
             tracing::warn!(error = %e, "window list unavailable");
             Vec::new()
@@ -741,8 +772,11 @@ impl App {
             desktop,
             origin,
             windows,
+            displays,
             self.last_region,
+            self.overlay_records,
         ));
+        self.overlay_dressed = false;
     }
 
     fn show_overlay(&mut self, ctx: &egui::Context) {
@@ -750,8 +784,26 @@ impl App {
             return;
         };
         let mode = overlay.mode();
-        match overlay.show(ctx) {
+        let result = overlay.show(ctx, self.overlay_dressed);
+        // Once its window exists it loses the frame Windows 11 draws round borderless
+        // windows, before it shows.
+        self.overlay_dressed = self.overlay_dressed || dress_window(&tr!("overlay-title"), false);
+        match result {
             None => {}
+            Some(OverlayResult::Display(id)) => {
+                let bounds = self.displays.iter().find(|d| d.id == id).map(|d| d.bounds);
+                let frame = bounds.and_then(|rect| overlay.crop(rect));
+                self.overlay = None;
+                if self.overlay_records {
+                    self.start_recording(mode, CaptureTarget::Display(id));
+                } else if let Some(frame) = frame {
+                    // What the overlay showed, as for a region.
+                    let item = self.add_capture(mode);
+                    self.store(item, frame);
+                } else {
+                    self.capture_still(mode, CaptureTarget::Display(id));
+                }
+            }
             Some(OverlayResult::Cancelled) => self.overlay = None,
             Some(OverlayResult::Window(id)) => {
                 self.overlay = None;
@@ -1533,7 +1585,9 @@ impl App {
             return;
         }
         match self.bar.mode {
-            CaptureMode::Screen => self.start_recording(CaptureMode::Screen, self.screen_target()),
+            CaptureMode::Screen if !self.pick_screen() => {
+                self.start_recording(CaptureMode::Screen, self.screen_target());
+            }
             mode => {
                 self.begin_capture(mode);
                 self.overlay_records = self.overlay_request.is_some();
@@ -1589,6 +1643,7 @@ impl App {
                     ends: Instant::now() + total,
                     total,
                     dressed: false,
+                    shown: false,
                 });
             }
             _ => self.record_now(mode, target),
@@ -1638,33 +1693,36 @@ impl App {
             self.camera.seen = Some(seq);
         }
         let start = *self.camera.start.get_or_insert_with(|| {
-            // The bottom-right corner of the screen under the cursor, clear of its edges.
-            let size = (cb_ui::BUBBLE_SIZE * ctx.pixels_per_point()) as i32;
+            // The bottom-right corner of the screen under the cursor, clear of its edges,
+            // at that screen's scale.
             let display = cb_platform::cursor_position()
                 .and_then(|cursor| cb_core::display_at(cursor, &self.displays))
                 .or(self.displays.first());
-            display.map_or((100, 100), |d| {
-                let area = d.work_area;
-                let margin = size / 6;
-                (
-                    area.x + area.width as i32 - size - margin,
-                    area.y + area.height as i32 - size - margin,
-                )
-            })
+            display.map_or(
+                cb_core::Rect {
+                    x: 100,
+                    y: 100,
+                    width: 180,
+                    height: 180,
+                },
+                |d| {
+                    let size = (cb_ui::BUBBLE_SIZE * d.scale_factor).round() as u32;
+                    let area = d.work_area;
+                    let margin = size / 6;
+                    cb_core::Rect {
+                        x: area.x + (area.width - size - margin) as i32,
+                        y: area.y + (area.height - size - margin) as i32,
+                        width: size,
+                        height: size,
+                    }
+                },
+            )
         });
-        let rect = self.camera.bubble.show(ctx, start);
+        let rect = self.camera.bubble.show(ctx, start, self.camera.dressed);
         // Recordings draw the camera only once there is a picture to draw.
         let running = state == cb_platform::CameraState::Running;
         cb_platform::set_camera_bubble(rect.filter(|_| running));
-        if !self.camera.dressed {
-            if let Some(window) = cb_platform::own_window(&tr!("bubble-title")) {
-                let _ = cb_platform::remove_window_frame(&window);
-                if !show_in_capture() {
-                    let _ = cb_platform::exclude_from_capture(&window);
-                }
-                self.camera.dressed = true;
-            }
-        }
+        self.camera.dressed = self.camera.dressed || dress_window(&tr!("bubble-title"), true);
     }
 
     /// Draw the countdown, or start the recording once it is over. The countdown window
@@ -1673,6 +1731,8 @@ impl App {
         let Some(countdown) = &mut self.countdown else {
             return;
         };
+        let scale = cb_core::display_at(countdown.center, &self.displays)
+            .map_or_else(|| ctx.pixels_per_point(), |d| d.scale_factor);
         let left = countdown.ends.saturating_duration_since(Instant::now());
         if left.is_zero() {
             let Countdown { mode, target, .. } = self.countdown.take().expect("checked above");
@@ -1681,20 +1741,13 @@ impl App {
             cb_ui::show_countdown(
                 ctx,
                 countdown.center,
+                scale,
                 left.as_secs_f32(),
                 countdown.total.as_secs_f32(),
+                countdown.dressed,
+                &mut countdown.shown,
             );
-            // The window exists once drawn: then it can lose the thin frame Windows 11
-            // draws around borderless windows, and stay out of the first frames.
-            if !countdown.dressed {
-                if let Some(window) = cb_platform::own_window(&tr!("countdown-title")) {
-                    let _ = cb_platform::remove_window_frame(&window);
-                    if !show_in_capture() {
-                        let _ = cb_platform::exclude_from_capture(&window);
-                    }
-                    countdown.dressed = true;
-                }
-            }
+            countdown.dressed = countdown.dressed || dress_window(&tr!("countdown-title"), true);
         }
     }
 
@@ -2434,17 +2487,6 @@ mod tests {
         let rounded = wanted - egui::vec2(0.4, 0.8);
         assert!(!needs_resize(wanted, wanted, Some(rounded), false));
         assert!(!needs_resize(wanted, wanted, None, false));
-    }
-
-    #[test]
-    fn points_for_pixel_round_trips_at_fractional_scales() {
-        for ppp in [1.0, 1.25, 1.5, 1.75, 2.0, 2.25] {
-            for pixel in [-3840, -1, 0, 1, 100, 1439, 1920, 3840, 5119] {
-                let back = points_for_pixel(pixel, ppp) * ppp;
-                assert_eq!(back as i32, pixel, "truncating at {ppp}");
-                assert_eq!(back.round() as i32, pixel, "rounding at {ppp}");
-            }
-        }
     }
 
     /// Frames at 60 Hz until `FADE_TIME` is over, for `animated_opacity`.

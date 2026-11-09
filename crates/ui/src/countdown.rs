@@ -1,6 +1,7 @@
 //! The countdown before a recording starts: a number in a disc, centred on what is
 //! about to be recorded, in a small window that lets clicks through.
 
+use crate::place::{keep_at, placed};
 use crate::{palette, shortcut, tr};
 use egui::{
     pos2, vec2, Align2, CentralPanel, Color32, Context, FontFamily, FontId, Frame, Shape, Stroke,
@@ -12,24 +13,36 @@ const SIZE: f32 = 160.0;
 /// Room under the disc for the cancel hint.
 const HINT: f32 = 28.0;
 
-/// Draw the countdown for one frame. `center` is in global physical pixels; `left` is
-/// the time still to wait, out of `total`.
-pub fn show_countdown(ctx: &Context, center: (i32, i32), left: f32, total: f32) {
-    let ppp = ctx.pixels_per_point();
-    let size = vec2(SIZE + 80.0, SIZE + HINT);
-    let top_left = pos2(center.0 as f32, center.1 as f32) / ppp - vec2(size.x, SIZE) / 2.0;
+/// Draw the countdown for one frame. `center` is in global physical pixels, on a
+/// monitor of `scale`; `left` is the time still to wait, out of `total`. The window
+/// stays hidden until `dressed` (by the caller, once it exists) and in place; `shown`
+/// then turns true.
+pub fn show_countdown(
+    ctx: &Context,
+    center: (i32, i32),
+    scale: f32,
+    left: f32,
+    total: f32,
+    dressed: bool,
+    shown: &mut bool,
+) {
+    let size = vec2(SIZE + 80.0, SIZE + HINT) * scale;
+    let rect = cb_core::Rect {
+        x: center.0 - (size.x / 2.0).round() as i32,
+        y: center.1 - (SIZE * scale / 2.0).round() as i32,
+        width: size.x.round() as u32,
+        height: size.y.round() as u32,
+    };
     let builder = ViewportBuilder::default()
         .with_title(tr!("countdown-title"))
-        .with_position(top_left)
-        .with_inner_size(size)
         .with_decorations(false)
         .with_transparent(true)
         .with_has_shadow(false)
         .with_always_on_top()
         .with_resizable(false)
         .with_taskbar(false)
-        .with_mouse_passthrough(true)
         .with_active(false);
+    let builder = placed(builder, ctx, rect, *shown);
     ctx.show_viewport_immediate(
         ViewportId::from_hash_of("record countdown"),
         builder,
@@ -39,8 +52,13 @@ pub fn show_countdown(ctx: &Context, center: (i32, i32), left: f32, total: f32) 
                 .show(ui, |ui| draw(ui, left, total));
             // Smooth ring; the main loop alone wakes too rarely.
             ui.ctx().request_repaint();
-            ui.ctx()
-                .send_viewport_cmd(ViewportCommand::MousePassthrough(true));
+            // Clicks pass through once it shows: a window made click-through while
+            // still hidden is never drawn.
+            if *shown {
+                ui.ctx()
+                    .send_viewport_cmd(ViewportCommand::MousePassthrough(true));
+            }
+            *shown |= keep_at(ui.ctx(), rect) && dressed;
         },
     );
 }

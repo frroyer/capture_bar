@@ -1,12 +1,15 @@
 //! The full-desktop overlay over a frozen image of the screens (M2.4, FR-8, FR-9).
 
-use cb_core::{window_at, CaptureMode, Rect, WindowId, WindowInfo};
+use cb_core::{
+    display_at, window_at, CaptureMode, DisplayId, DisplayInfo, Rect, WindowId, WindowInfo,
+};
 use egui::{
     pos2, vec2, Align2, CentralPanel, Color32, ColorImage, Context, CursorIcon, FontFamily, FontId,
     Frame, Key, Painter, Pos2, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, Ui,
     ViewportBuilder, ViewportCommand, ViewportId,
 };
 
+use crate::place::{keep_at, placed};
 use crate::{palette, tr};
 
 const DIM: Color32 = Color32::from_black_alpha(120);
@@ -19,6 +22,8 @@ const HANDLE_SIZE: f32 = 8.0;
 pub enum OverlayResult {
     Cancelled,
     Window(WindowId),
+    /// A whole monitor, picked in Screen mode.
+    Display(DisplayId),
     /// A selection in global pixels, to capture or to record.
     Region {
         rect: Rect,
@@ -158,8 +163,14 @@ pub struct Overlay {
     /// The desktop's top-left corner, in global physical pixels.
     origin: (i32, i32),
     windows: Vec<WindowInfo>,
+    /// The monitors, numbered from 1 in this order for the Screen picker.
+    displays: Vec<DisplayInfo>,
     texture: Option<TextureHandle>,
     focused: bool,
+    /// Its window is in place and showing.
+    shown: bool,
+    /// The bar asked to record rather than capture: the region's one button says so.
+    records: bool,
     selection: Option<Rect>,
     grab: Option<Grab>,
     last_region: Option<Rect>,
@@ -224,15 +235,20 @@ impl Overlay {
         desktop: cb_core::Frame,
         origin: (i32, i32),
         windows: Vec<WindowInfo>,
+        displays: Vec<DisplayInfo>,
         last_region: Option<Rect>,
+        records: bool,
     ) -> Self {
         let mut overlay = Self {
             mode,
             desktop,
             origin,
             windows,
+            displays,
             texture: None,
             focused: false,
+            shown: false,
+            records,
             selection: None,
             grab: None,
             last_region,
@@ -263,28 +279,31 @@ impl Overlay {
         }
     }
 
-    /// Draw it in its own OS window. Call each frame until it returns a result.
-    pub fn show(&mut self, ctx: &Context) -> Option<OverlayResult> {
-        let ppp = ctx.pixels_per_point();
+    /// Draw it in its own OS window. Call each frame until it returns a result. The
+    /// window stays hidden until `dressed` (by the caller, once it exists) and in place.
+    pub fn show(&mut self, ctx: &Context, dressed: bool) -> Option<OverlayResult> {
         let builder = ViewportBuilder::default()
             .with_title(tr!("overlay-title"))
-            .with_position(pos2(self.origin.0 as f32, self.origin.1 as f32) / ppp)
-            .with_inner_size(vec2(self.desktop.width as f32, self.desktop.height as f32) / ppp)
             .with_decorations(false)
             .with_always_on_top()
             .with_resizable(false)
             .with_taskbar(false)
             .with_active(true);
+        let builder = placed(builder, ctx, self.area(), self.shown);
         ctx.show_viewport_immediate(
             ViewportId::from_hash_of("capture overlay"),
             builder,
-            |ui, _class| self.ui(ui),
+            |ui, _class| {
+                self.shown |= keep_at(ui.ctx(), self.area()) && dressed;
+                self.ui(ui)
+            },
         )
     }
 
     fn ui(&mut self, ui: &mut Ui) -> Option<OverlayResult> {
         let ctx = ui.ctx().clone();
-        if !self.focused {
+        // A hidden window cannot take the keyboard.
+        if !self.focused && self.shown {
             self.focused = true;
             ctx.send_viewport_cmd(ViewportCommand::Focus);
         }
@@ -311,11 +330,71 @@ impl Overlay {
         let whole = egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
         ui.painter()
             .image(texture.id(), screen, whole, Color32::WHITE);
-        if self.mode == CaptureMode::Region {
-            self.draw_region(ui, screen)
-        } else {
-            self.draw_window(ui, screen)
+        match self.mode {
+            CaptureMode::Region => self.draw_region(ui, screen),
+            CaptureMode::Window => self.draw_window(ui, screen),
+            CaptureMode::Screen => self.draw_screen(ui, screen),
         }
+    }
+
+    /// Pick a monitor: the one under the pointer lights up, a click or its number
+    /// takes it.
+    fn draw_screen(&mut self, ui: &mut Ui, screen: egui::Rect) -> Option<OverlayResult> {
+        let ppp = ui.ctx().pixels_per_point();
+        let response = ui.interact(screen, ui.scope_id().with("overlay"), Sense::click());
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        let hovered = response
+            .hover_pos()
+            .and_then(|pos| display_at(to_global(pos, ppp, self.origin), &self.displays));
+
+        let painter = ui.painter();
+        for (number, display) in (1..).zip(&self.displays) {
+            let local = to_local(display.bounds, ppp, self.origin);
+            let lit = hovered.is_some_and(|h| h.id == display.id);
+            if !lit {
+                painter.rect_filled(local, 0.0, DIM);
+            }
+            let stroke = if lit {
+                Stroke::new(4.0, palette::ACCENT)
+            } else {
+                Stroke::new(1.0, palette::MUTED)
+            };
+            painter.rect_stroke(local, 0.0, stroke, StrokeKind::Inside);
+            let disc = 48.0;
+            let fill = if lit { palette::ACCENT } else { palette::BAR };
+            painter.circle_filled(local.center(), disc, fill);
+            painter.text(
+                local.center(),
+                Align2::CENTER_CENTER,
+                number.to_string(),
+                FontId::new(56.0, FontFamily::Proportional),
+                Color32::WHITE,
+            );
+        }
+
+        if ui.input(|i| i.key_pressed(Key::Escape)) || response.secondary_clicked() {
+            return Some(OverlayResult::Cancelled);
+        }
+        if response.clicked() {
+            return hovered.map(|d| OverlayResult::Display(d.id));
+        }
+        const DIGITS: [Key; 9] = [
+            Key::Num1,
+            Key::Num2,
+            Key::Num3,
+            Key::Num4,
+            Key::Num5,
+            Key::Num6,
+            Key::Num7,
+            Key::Num8,
+            Key::Num9,
+        ];
+        let typed = DIGITS
+            .iter()
+            .position(|key| ui.input(|i| i.key_pressed(*key)));
+        typed
+            .and_then(|index| self.displays.get(index))
+            .map(|d| OverlayResult::Display(d.id))
     }
 
     fn draw_window(&mut self, ui: &mut Ui, screen: egui::Rect) -> Option<OverlayResult> {
@@ -340,11 +419,6 @@ impl Overlay {
             let at = rect.left_top() + vec2(8.0, 8.0);
             paint_label(painter, screen, at, Align2::LEFT_TOP, &window.title);
         }
-        paint_hints(
-            painter,
-            screen,
-            &[tr!("hint-click-window"), tr!("hint-cancel")],
-        );
 
         if ui.input(|i| i.key_pressed(Key::Escape)) || response.secondary_clicked() {
             return Some(OverlayResult::Cancelled);
@@ -412,7 +486,7 @@ impl Overlay {
             if let Some(rect) = self.selection {
                 return Some(OverlayResult::Region {
                     rect,
-                    record: false,
+                    record: self.records,
                 });
             }
         }
@@ -457,31 +531,20 @@ impl Overlay {
             let at = local.left_top() - vec2(0.0, 8.0);
             paint_label(painter, screen, at, Align2::LEFT_BOTTOM, &size);
             if self.grab.is_none() {
-                for (button, label, record) in action_buttons(local, screen) {
-                    let id = ui.scope_id().with(("region action", record));
-                    let clicked = ui.interact(button, id, Sense::click());
-                    let fill = match (record, clicked.hovered()) {
-                        (false, false) => palette::PRIMARY,
-                        (false, true) => Color32::WHITE,
-                        (true, false) => palette::BAR,
-                        (true, true) => palette::CHIP,
-                    };
-                    let color = if record {
-                        palette::TEXT
-                    } else {
-                        palette::PRIMARY_TEXT
-                    };
-                    ui.painter().rect_filled(button, 8.0, fill);
-                    ui.painter().text(
-                        button.center(),
-                        Align2::CENTER_CENTER,
-                        label,
-                        FontId::new(13.0, FontFamily::Proportional),
-                        color,
-                    );
-                    if clicked.clicked() {
-                        return Some(OverlayResult::Region { rect, record });
-                    }
+                let [action, cancel] = action_buttons(local, screen);
+                let label = if self.records {
+                    tr!("overlay-record")
+                } else {
+                    tr!("overlay-capture")
+                };
+                if region_button(ui, action, label, true) {
+                    return Some(OverlayResult::Region {
+                        rect,
+                        record: self.records,
+                    });
+                }
+                if region_button(ui, cancel, tr!("overlay-cancel"), false) {
+                    return Some(OverlayResult::Cancelled);
                 }
             }
         } else if let Some(window) = snap_hint {
@@ -496,19 +559,6 @@ impl Overlay {
         } else {
             paint_dim(painter, screen, None);
         }
-        paint_hints(
-            painter,
-            screen,
-            &[
-                tr!("hint-drag-region"),
-                tr!("hint-click-window"),
-                tr!("hint-capture"),
-                tr!("hint-record"),
-                tr!("hint-last-region"),
-                tr!("hint-lock-ratio"),
-                tr!("hint-cancel"),
-            ],
-        );
 
         if ui.input(|i| i.key_pressed(Key::Escape)) || response.secondary_clicked() {
             return Some(OverlayResult::Cancelled);
@@ -519,22 +569,19 @@ impl Overlay {
             }
         }
         let rect = self.selection?;
-        if ui.input(|i| i.key_pressed(Key::Enter)) {
-            return Some(OverlayResult::Region {
+        ui.input(|i| i.key_pressed(Key::Enter))
+            .then_some(OverlayResult::Region {
                 rect,
-                record: false,
-            });
-        }
-        ui.input(|i| i.key_pressed(Key::R))
-            .then_some(OverlayResult::Region { rect, record: true })
+                record: self.records,
+            })
     }
 }
 
-/// Where the Capture and Record buttons go for a selection at `selection`: under its
-/// right end, or inside it when the screen ends there. Each with its label and whether
-/// it records.
-fn action_buttons(selection: egui::Rect, screen: egui::Rect) -> [(egui::Rect, String, bool); 2] {
-    const SIZE: egui::Vec2 = vec2(96.0, 30.0);
+/// Where the buttons go for a selection at `selection`: under its right end, or inside
+/// it when the screen ends there. The action (Capture or Record, as asked from the
+/// bar) on the right, Cancel on its left.
+fn action_buttons(selection: egui::Rect, screen: egui::Rect) -> [egui::Rect; 2] {
+    const SIZE: egui::Vec2 = vec2(112.0, 30.0);
     const GAP: f32 = 6.0;
     let below = selection.bottom() + 10.0;
     let top = if below + SIZE.y <= screen.bottom() {
@@ -545,12 +592,30 @@ fn action_buttons(selection: egui::Rect, screen: egui::Rect) -> [(egui::Rect, St
     let right = selection
         .right()
         .clamp(screen.left() + 2.0 * SIZE.x + GAP, screen.right());
-    let capture = egui::Rect::from_min_size(pos2(right - SIZE.x, top), SIZE);
-    let record = capture.translate(vec2(-(SIZE.x + GAP), 0.0));
-    [
-        (record, tr!("overlay-record"), true),
-        (capture, tr!("overlay-capture"), false),
-    ]
+    let action = egui::Rect::from_min_size(pos2(right - SIZE.x, top), SIZE);
+    let cancel = action.translate(vec2(-(SIZE.x + GAP), 0.0));
+    [action, cancel]
+}
+
+/// One button under the selection; whether it was clicked. `primary` is the light one.
+fn region_button(ui: &mut Ui, rect: egui::Rect, label: String, primary: bool) -> bool {
+    let id = ui.scope_id().with(("region button", primary));
+    let response = ui.interact(rect, id, Sense::click());
+    let (fill, color) = match (primary, response.hovered()) {
+        (true, false) => (palette::PRIMARY, palette::PRIMARY_TEXT),
+        (true, true) => (Color32::WHITE, palette::PRIMARY_TEXT),
+        (false, false) => (palette::BAR, palette::TEXT),
+        (false, true) => (palette::CHIP, palette::TEXT),
+    };
+    ui.painter().rect_filled(rect, 8.0, fill);
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::new(13.0, FontFamily::Proportional),
+        color,
+    );
+    response.clicked()
 }
 
 fn resize_cursor(edges: Edges) -> CursorIcon {
@@ -559,29 +624,6 @@ fn resize_cursor(edges: Edges) -> CursorIcon {
         (false, true) => CursorIcon::ResizeVertical,
         _ if edges.left == edges.top => CursorIcon::ResizeNwSe,
         _ => CursorIcon::ResizeNeSw,
-    }
-}
-
-/// The key hints, as a row of chips along the top of the screen.
-fn paint_hints(painter: &Painter, screen: egui::Rect, hints: &[String]) {
-    let font = FontId::new(13.0, FontFamily::Proportional);
-    let galleys: Vec<_> = hints
-        .iter()
-        .map(|hint| painter.layout_no_wrap(hint.clone(), font.clone(), palette::TEXT))
-        .collect();
-    let (pad, gap) = (vec2(16.0, 8.0), 6.0);
-    let total: f32 = galleys
-        .iter()
-        .map(|g| g.size().x + pad.x + gap)
-        .sum::<f32>()
-        - gap;
-    let mut x = screen.center().x - total / 2.0;
-    let y = screen.top() + 16.0;
-    for galley in galleys {
-        let rect = egui::Rect::from_min_size(pos2(x, y), galley.size() + pad);
-        painter.rect_filled(rect, 6.0, palette::BAR);
-        x += rect.width() + gap;
-        painter.galley(rect.min + pad / 2.0, galley, palette::TEXT);
     }
 }
 
@@ -599,13 +641,70 @@ mod tests {
     }
 
     fn region_overlay(last: Option<Rect>) -> Overlay {
+        overlay_for(last, false)
+    }
+
+    fn overlay_for(last: Option<Rect>, records: bool) -> Overlay {
         let desktop = cb_core::Frame {
             width: 800,
             height: 600,
             rgba: vec![0; 800 * 600 * 4],
             captured_at: std::time::SystemTime::now(),
         };
-        Overlay::new(CaptureMode::Region, desktop, (0, 0), Vec::new(), last)
+        Overlay::new(
+            CaptureMode::Region,
+            desktop,
+            (0, 0),
+            Vec::new(),
+            Vec::new(),
+            last,
+            records,
+        )
+    }
+
+    #[test]
+    fn a_click_or_a_number_picks_the_screen() {
+        let display = |id, x| DisplayInfo {
+            id: DisplayId(id),
+            name: String::new(),
+            bounds: rect(x, 0, 400, 600),
+            work_area: rect(x, 0, 400, 600),
+            scale_factor: 1.0,
+        };
+        let picker = || {
+            let mut overlay = region_overlay(None);
+            overlay.mode = CaptureMode::Screen;
+            overlay.displays = vec![display(7, 0), display(9, 400)];
+            overlay
+        };
+        let answer = click_overlay(&mut picker(), pos2(600.0, 300.0), 1);
+        assert_eq!(answer, Some(OverlayResult::Display(DisplayId(9))));
+        let answer = click_overlay(&mut picker(), pos2(100.0, 300.0), 1);
+        assert_eq!(answer, Some(OverlayResult::Display(DisplayId(7))));
+
+        let ctx = Context::default();
+        let mut overlay = picker();
+        let mut answer = None;
+        for events in [vec![], vec![key(Key::Num2)]] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| answer = answer.take().or(overlay.ui(ui)));
+            output.textures_delta.clear();
+        }
+        assert_eq!(answer, Some(OverlayResult::Display(DisplayId(9))));
+    }
+
+    fn key(key: Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
     }
 
     /// Clicks at `pos` (`clicks` times) and returns what the overlay answered.
@@ -646,23 +745,26 @@ mod tests {
         let last = rect(100, 100, 300, 200);
         let screen = egui::Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
         let local = to_local(last, 1.0, (0, 0));
-        let [(record, ..), (capture, ..)] = action_buttons(local, screen);
+        let [action, cancel] = action_buttons(local, screen);
 
         let mut overlay = region_overlay(Some(last));
         assert_eq!(overlay.selection, Some(last), "preselected");
-        let answer = click_overlay(&mut overlay, capture.center(), 1);
+        let answer = click_overlay(&mut overlay, action.center(), 1);
         assert!(
             matches!(answer, Some(OverlayResult::Region { rect, record: false }) if rect == last)
         );
-        let answer = click_overlay(&mut region_overlay(Some(last)), record.center(), 1);
+        // Asked from Record, the one button records.
+        let answer = click_overlay(&mut overlay_for(Some(last), true), action.center(), 1);
         assert!(matches!(
             answer,
             Some(OverlayResult::Region { record: true, .. })
         ));
-        let inside = click_overlay(&mut region_overlay(Some(last)), local.center(), 2);
+        let inside = click_overlay(&mut overlay_for(Some(last), true), local.center(), 2);
         assert!(
-            matches!(inside, Some(OverlayResult::Region { rect, record: false }) if rect == last)
+            matches!(inside, Some(OverlayResult::Region { rect, record: true }) if rect == last)
         );
+        let answer = click_overlay(&mut region_overlay(Some(last)), cancel.center(), 1);
+        assert_eq!(answer, Some(OverlayResult::Cancelled));
 
         assert_eq!(region_overlay(None).selection, None);
         let off_screen = rect(5000, 5000, 10, 10);
@@ -676,7 +778,7 @@ mod tests {
             egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0)),
             egui::Rect::from_min_size(pos2(0.0, 500.0), vec2(40.0, 100.0)),
         ] {
-            for (button, ..) in action_buttons(selection, screen) {
+            for button in action_buttons(selection, screen) {
                 assert!(screen.contains_rect(button), "{button:?} for {selection:?}");
             }
         }
