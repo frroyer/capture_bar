@@ -37,6 +37,8 @@ pub mod palette {
     pub const RECORD: Color32 = Color32::from_rgb(0xFF, 0x5A, 0x36);
     pub const RECORD_BG: Color32 = Color32::from_rgb(0x3A, 0x1A, 0x14);
     pub const ACCENT: Color32 = Color32::from_rgb(0x3B, 0x82, 0xF6);
+    /// The microphone level meter.
+    pub const LEVEL: Color32 = Color32::from_rgb(0x34, 0xC7, 0x59);
     /// Behind a thumbnail that does not fill its slot.
     pub const SLOT_BG: Color32 = Color32::from_rgb(0x0E, 0x0F, 0x11);
 }
@@ -56,6 +58,8 @@ pub struct BarState {
     pub elapsed_secs: u64,
     pub tray_open: bool,
     pub mic_on: bool,
+    /// While recording with the microphone: its level, from 0 to 1.
+    pub mic_level: Option<f32>,
     pub cam_on: bool,
     /// Docked to a left or right edge: stacked, icons only (M2.5).
     pub vertical: bool,
@@ -294,6 +298,24 @@ fn chip(ui: &mut Ui, pieces: &[Piece], style: &ChipStyle, tooltip: &str) -> Resp
     }
     show_tooltip(&response, tooltip);
     response
+}
+
+/// A slim meter beside the icon of an icon-only chip: lit from the bottom as loud as
+/// the microphone is, on a decibel scale so speech moves it well.
+fn level_led(painter: &egui::Painter, chip: egui::Rect, level: f32) {
+    const FLOOR_DB: f32 = -50.0;
+    let db = 20.0 * level.max(1e-5).log10();
+    let lit = ((db - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0);
+    let track = egui::Rect::from_center_size(
+        chip.center() + vec2(icons::SIZE / 2.0 + 4.0, 0.0),
+        vec2(3.0, icons::SIZE),
+    );
+    painter.rect_filled(track, CornerRadius::same(1), palette::SELECTED);
+    if lit > 0.0 {
+        let mut fill = track;
+        fill.set_top(track.bottom() - track.height() * lit);
+        painter.rect_filled(fill, CornerRadius::same(1), palette::LEVEL);
+    }
 }
 
 /// A chip that is on or off, told as such to screen readers (NFR-14).
@@ -594,6 +616,15 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                         out.commands.push(Command::TogglePause);
                     }
                     discard_chip(ui, &mut out);
+                    if let Some(level) = state.mic_level {
+                        let mic = chip(
+                            ui,
+                            &[Piece::Tinted(Icon::Mic, RECORD)],
+                            &ChipStyle::new(Color32::TRANSPARENT, RECORD),
+                            &tr!("bar-mic-level-tip"),
+                        );
+                        level_led(ui.painter(), mic.rect, level);
+                    }
                 } else if chip(
                     ui,
                     &[

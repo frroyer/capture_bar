@@ -24,6 +24,7 @@ bar-buffer = Buffer
 bar-buffer-tip = Show or hide the buffer ({ $key })
 bar-mic = Microphone
 bar-mic-tip = Microphone on or off
+bar-mic-level-tip = Microphone level
 bar-cam = Webcam
 bar-cam-tip = Webcam on or off
 bar-settings = Settings

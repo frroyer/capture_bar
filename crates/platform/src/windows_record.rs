@@ -11,7 +11,7 @@ use cb_core::{
     StreamHandle,
 };
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -26,6 +26,8 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 /// Shared by the handle, the video loop and the audio thread.
 pub(crate) struct Control {
     pub stop: AtomicBool,
+    /// The microphone's level as `f32` bits, set by the audio thread; negative without one.
+    pub mic_level: AtomicU32,
     timeline: Mutex<Timeline>,
 }
 
@@ -41,6 +43,7 @@ impl Control {
     fn new() -> Self {
         Self {
             stop: AtomicBool::new(false),
+            mic_level: AtomicU32::new((-1.0f32).to_bits()),
             timeline: Mutex::new(Timeline {
                 origin: None,
                 paused_at: None,
@@ -103,6 +106,9 @@ impl StreamHandle for Handle {
             // The pause leaves no gap in the video or the sound.
             *origin += paused.elapsed();
         }
+    }
+    fn mic_level(&self) -> Option<f32> {
+        Some(f32::from_bits(self.0.mic_level.load(Relaxed))).filter(|level| *level >= 0.0)
     }
     fn stop(self: Box<Self>) {}
 }
