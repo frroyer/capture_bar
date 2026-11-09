@@ -311,6 +311,7 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 - [ ] Mic capture (cpal) — Windows done with WASAPI directly (`windows_audio.rs`): one code path for mic and loopback, packet capture times from the performance counter, no new dependency. The bar's mic toggle picks it at the start of a recording. macOS and Linux open
 - [ ] System audio: SCK audio / WASAPI loopback / PipeWire monitor — Windows done (WASAPI loopback of the default output, mixed with the mic). macOS and Linux open
 - [ ] AAC encode + A/V sync — Windows done: AAC 160 kbit/s in the same fragmented MP4 through the sink writer; video slots and audio packets share one timeline that pauses with the recording, each source re-synced to its timestamps past 20 ms of drift (`audio_mix.rs`, unit tests; a tone at 1 s decodes at 1 s ± 40 ms). A 10-minute live sync measurement is still to do
+- [x] Mic level meter (user's request, not in the mockups) — the mic and cam toggles are red when on; while recording with the mic, the M2.2 bar shows a red mic icon with a slim green meter (-50 dB scale, falls back after peaks) fed by `StreamHandle::mic_level`. Not shown before recording: opening the mic only for a meter would keep the OS "mic in use" indicator on
 
 **US-5.4** As a user, I want a webcam bubble in my recording. (M1 · FR-17)
 
