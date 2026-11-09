@@ -317,8 +317,9 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: the cam toggle shows a draggable round overlay that is composited into the video.
 
-- [ ] Camera capture per OS (AVFoundation / Media Foundation / V4L2-PipeWire)
-- [ ] GPU compositing of the bubble
+- [ ] Camera capture per OS (AVFoundation / Media Foundation / V4L2-PipeWire) — Windows done: the first camera through a Media Foundation source reader on its own thread, largest size up to 1280 wide at ≥ 24 fps, RGB32 through the video processor (`windows_camera.rs`; ignored test needs a camera). On while the cam toggle is on. macOS and Linux open
+- [ ] GPU compositing of the bubble — Windows done: the bubble is its own round, draggable window (`crates/ui/src/bubble.rs`), mirrored, kept out of captures; each recorded frame gets a fresh copy of the screen with the camera's centre square drawn as a disc with a white rim where the bubble is, by a D3D11 shader (`windows_bubble.rs`; GPU unit test, and an ignored end-to-end test). Moving the bubble while recording moves it in the video. In Window mode it is drawn relative to the window's position at the start. macOS and Linux open
+- [ ] Setting: bubble in the video or a separate camera file (user's request) — bubble first; separate file still to do
 
 **US-5.5** As a user, I want to take screenshots while recording. (M2.2 · FR-16)
 

@@ -259,3 +259,7 @@ dialog-folder = Dossier des nouvelles captures
 
 countdown-title = Début de l’enregistrement
 countdown-cancel = { $key } pour annuler
+
+bubble-title = Caméra
+bubble-starting = Démarrage de la caméra…
+toast-camera-failed = Caméra indisponible : { $error }

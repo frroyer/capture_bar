@@ -3,8 +3,9 @@
 //! US-1.2 spike's CPU copy dropped 4–5% of frames (docs/spikes/us-1.2-windows.md).
 
 use crate::audio_mix::RATE;
-use crate::windows::{platform_err, recording_source, MonitorCapture};
+use crate::windows::{platform_err, recording_source, MonitorCapture, RecordingSource};
 use crate::windows_audio::Chunk;
+use crate::windows_bubble::BubblePainter;
 use crate::windows_mp4::Mp4Writer;
 use cb_core::{
     create_unique, AudioSources, CaptureError, CaptureResult, CaptureTarget, Recording,
@@ -158,6 +159,18 @@ pub(crate) fn warm_up() {
     );
 }
 
+/// All of a `width` x `height` texture.
+fn whole(width: u32, height: u32) -> D3D11_BOX {
+    D3D11_BOX {
+        left: 0,
+        top: 0,
+        front: 0,
+        right: width,
+        bottom: height,
+        back: 1,
+    }
+}
+
 fn io_err(e: std::io::Error) -> CaptureError {
     CaptureError::Platform(e.to_string())
 }
@@ -222,7 +235,14 @@ fn record(
     let sound = audio
         .any()
         .then(|| crate::windows_audio::start(audio, control.clone()));
-    let (capture, (x, y, w, h)) = recording_source(target)?;
+    let RecordingSource {
+        capture,
+        area: (x, y, w, h),
+        origin,
+    } = recording_source(target)?;
+    // The area's top-left corner on the desktop: where the bubble is drawn from.
+    let area_origin = (origin.0 + x as i32, origin.1 + y as i32);
+    let mut bubble_painter = None;
     // H.264 needs even dimensions; a trailing odd row or column is dropped.
     let (width, height) = (w & !1, h & !1);
     if width == 0 || height == 0 {
@@ -251,6 +271,8 @@ fn record(
     };
 
     let deadline = Instant::now() + FIRST_FRAME_TIMEOUT;
+    // The newest screen picture, without the bubble: repeated while the screen is
+    // still, with the camera drawn afresh on each copy.
     let mut last = loop {
         if let Some(frame) = capture.latest_texture().map_err(platform_err)? {
             break copy_area(&capture, &frame, &area)?;
@@ -311,9 +333,29 @@ fn record(
                 Some(frame) => copy_area(&capture, &frame, &area),
                 None => Ok(last.clone()),
             })
-            .and_then(|frame| {
-                mp4.write_texture(&frame, slots).map_err(platform_err)?;
-                Ok(frame)
+            .and_then(|screen| {
+                let out = match crate::windows_camera::bubble() {
+                    Some((bubble, picture)) => {
+                        let out = copy_area(&capture, &screen, &whole(width, height))?;
+                        let painter = match &mut bubble_painter {
+                            Some(painter) => painter,
+                            None => bubble_painter
+                                .insert(BubblePainter::new(&capture.device).map_err(platform_err)?),
+                        };
+                        let place = (
+                            bubble.x - area_origin.0,
+                            bubble.y - area_origin.1,
+                            bubble.width,
+                        );
+                        painter
+                            .paint(&capture.device, &capture.context, &out, place, &picture)
+                            .map_err(platform_err)?;
+                        out
+                    }
+                    None => screen.clone(),
+                };
+                mp4.write_texture(&out, slots).map_err(platform_err)?;
+                Ok(screen)
             });
         match written {
             Ok(frame) => last = frame,
