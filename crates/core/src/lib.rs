@@ -371,9 +371,24 @@ pub trait ScreenSource: Send + Sync {
         &self,
         target: &CaptureTarget,
         fps: u32,
+        audio: AudioSources,
         path: &std::path::Path,
         done: Box<dyn FnOnce(CaptureResult<Recording>) + Send>,
     ) -> CaptureResult<Box<dyn StreamHandle>>;
+}
+
+/// The sounds a recording takes (FR-17). A source that cannot be opened is left out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AudioSources {
+    pub microphone: bool,
+    /// What the computer plays.
+    pub system: bool,
+}
+
+impl AudioSources {
+    pub fn any(self) -> bool {
+        self.microphone || self.system
+    }
 }
 
 /// A finished recording.

@@ -35,8 +35,8 @@ pub(crate) fn record(
     capture.wait_first_frame()?;
     // H.264 needs even dimensions; a trailing odd row or column is dropped.
     let (width, height) = (capture.width & !1, capture.height & !1);
-    let mp4 =
-        Mp4Writer::new(path, width, height, fps, Some(&capture.device)).map_err(platform_err)?;
+    let mp4 = Mp4Writer::new(path, width, height, fps, Some(&capture.device), false)
+        .map_err(platform_err)?;
     let encoder = mp4.encoder_name();
     let hardware_encoders = hardware_h264_encoders();
 

@@ -2,12 +2,18 @@
 //! is cropped into a texture of its own, which the H.264 encoder reads directly. The
 //! US-1.2 spike's CPU copy dropped 4–5% of frames (docs/spikes/us-1.2-windows.md).
 
+use crate::audio_mix::RATE;
 use crate::windows::{platform_err, recording_source, MonitorCapture};
+use crate::windows_audio::Chunk;
 use crate::windows_mp4::Mp4Writer;
-use cb_core::{create_unique, CaptureError, CaptureResult, CaptureTarget, Recording, StreamHandle};
+use cb_core::{
+    create_unique, AudioSources, CaptureError, CaptureResult, CaptureTarget, Recording,
+    StreamHandle,
+};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use std::sync::Arc;
+use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX,
@@ -17,20 +23,86 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SA
 
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 
-#[derive(Default)]
-struct Control {
-    stop: AtomicBool,
-    paused: AtomicBool,
+/// Shared by the handle, the video loop and the audio thread.
+pub(crate) struct Control {
+    pub stop: AtomicBool,
+    timeline: Mutex<Timeline>,
+}
+
+/// Recorded time: wall time since the first frame, less the pauses. Video slots and
+/// audio packets are both placed on it, which keeps them in sync (US-5.3).
+struct Timeline {
+    /// Time zero; `None` until the first frame is in.
+    origin: Option<Instant>,
+    paused_at: Option<Instant>,
+}
+
+impl Control {
+    fn new() -> Self {
+        Self {
+            stop: AtomicBool::new(false),
+            timeline: Mutex::new(Timeline {
+                origin: None,
+                paused_at: None,
+            }),
+        }
+    }
+
+    fn timeline(&self) -> MutexGuard<'_, Timeline> {
+        self.timeline.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Time zero is now: the first frame is in.
+    fn start(&self) {
+        self.timeline().origin = Some(Instant::now());
+    }
+
+    /// The instant of time zero, or `None` while paused.
+    fn origin(&self) -> Option<Instant> {
+        let timeline = self.timeline();
+        timeline.origin.filter(|_| timeline.paused_at.is_none())
+    }
+
+    /// The audio frame captured at `at`; `None` before the start or during the current
+    /// pause. Negative for a packet captured just before time zero.
+    pub fn frames_at(&self, at: Instant) -> Option<i64> {
+        let timeline = self.timeline();
+        if timeline.paused_at.is_some_and(|paused| at >= paused) {
+            return None;
+        }
+        Some(frames_between(timeline.origin?, at))
+    }
+
+    /// The audio frame of now (while paused, of the pause); `None` before the start.
+    pub fn frames_now(&self) -> Option<i64> {
+        let timeline = self.timeline();
+        Some(frames_between(
+            timeline.origin?,
+            timeline.paused_at.unwrap_or_else(Instant::now),
+        ))
+    }
+}
+
+fn frames_between(from: Instant, to: Instant) -> i64 {
+    let nanos = match to.checked_duration_since(from) {
+        Some(after) => after.as_nanos() as i128,
+        None => -((from - to).as_nanos() as i128),
+    };
+    (nanos * i128::from(RATE) / 1_000_000_000) as i64
 }
 
 struct Handle(Arc<Control>);
 
 impl StreamHandle for Handle {
     fn pause(&mut self) {
-        self.0.paused.store(true, Relaxed);
+        self.0.timeline().paused_at.get_or_insert_with(Instant::now);
     }
     fn resume(&mut self) {
-        self.0.paused.store(false, Relaxed);
+        let mut timeline = self.0.timeline();
+        if let (Some(paused), Some(origin)) = (timeline.paused_at.take(), &mut timeline.origin) {
+            // The pause leaves no gap in the video or the sound.
+            *origin += paused.elapsed();
+        }
     }
     fn stop(self: Box<Self>) {}
 }
@@ -44,21 +116,22 @@ impl Drop for Handle {
 pub(crate) fn start(
     target: CaptureTarget,
     fps: u32,
+    audio: AudioSources,
     path: PathBuf,
     done: Box<dyn FnOnce(CaptureResult<Recording>) + Send>,
 ) -> Box<dyn StreamHandle> {
-    let control = Arc::new(Control::default());
+    let control = Arc::new(Control::new());
     let shared = control.clone();
     std::thread::Builder::new()
         .name("recording".into())
-        .spawn(move || done(record(&target, fps.max(1), path, &shared)))
+        .spawn(move || done(record(&target, fps.max(1), audio, path, shared)))
         .expect("spawn recording thread");
     Box::new(Handle(control))
 }
 
 /// Pay the one-off costs of a first recording ahead of time: the GPU device, the
-/// primary monitor's capture item, Media Foundation and the hardware encoder
-/// (~400 ms on a cold process, against the 300 ms start budget of US-5.1).
+/// primary monitor's capture item, Media Foundation, the hardware encoder and the AAC
+/// encoder (~400 ms on a cold process, against the 300 ms start budget of US-5.1).
 pub(crate) fn warm_up() {
     let started = Instant::now();
     let ready = crate::windows::shared_gpu().is_ok()
@@ -68,7 +141,7 @@ pub(crate) fn warm_up() {
     // Loading the hardware encoder is the slowest part: open one on a scratch file.
     let scratch = std::env::temp_dir().join(format!("capture-bar-{}.mp4", std::process::id()));
     let encoder = crate::windows::shared_gpu()
-        .and_then(|gpu| Mp4Writer::new(&scratch, 64, 64, 30, Some(&gpu.device)))
+        .and_then(|gpu| Mp4Writer::new(&scratch, 64, 64, 30, Some(&gpu.device), true))
         .map(|mp4| mp4.encoder_name());
     let _ = std::fs::remove_file(&scratch);
     tracing::debug!(
@@ -126,10 +199,23 @@ fn copy_area(
 fn record(
     target: &CaptureTarget,
     fps: u32,
+    audio: AudioSources,
     path: PathBuf,
-    control: &Control,
+    control: Arc<Control>,
 ) -> CaptureResult<Recording> {
     let asked = Instant::now();
+    // However this returns, the audio thread ends too.
+    struct StopOnReturn(Arc<Control>);
+    impl Drop for StopOnReturn {
+        fn drop(&mut self) {
+            self.0.stop.store(true, Relaxed);
+        }
+    }
+    let _stop = StopOnReturn(control.clone());
+    // The sound devices open while the screen capture starts.
+    let sound = audio
+        .any()
+        .then(|| crate::windows_audio::start(audio, control.clone()));
     let (capture, (x, y, w, h)) = recording_source(target)?;
     // H.264 needs even dimensions; a trailing odd row or column is dropped.
     let (width, height) = (w & !1, h & !1);
@@ -140,8 +226,15 @@ fn record(
         std::fs::create_dir_all(dir).map_err(io_err)?;
     }
     let (_, path) = create_unique(&path).map_err(io_err)?;
-    let mp4 =
-        Mp4Writer::new(&path, width, height, fps, Some(&capture.device)).map_err(platform_err)?;
+    let mp4 = Mp4Writer::new(
+        &path,
+        width,
+        height,
+        fps,
+        Some(&capture.device),
+        sound.is_some(),
+    )
+    .map_err(platform_err)?;
     let area = D3D11_BOX {
         left: x,
         top: y,
@@ -168,6 +261,7 @@ fn record(
         width,
         height,
         fps,
+        sound = sound.is_some(),
         "recording started"
     );
 
@@ -177,19 +271,24 @@ fn record(
     // MAX_LAG_SLOTS (encoder overload, not scheduler jitter) skips slots: those are drops.
     const MAX_LAG_SLOTS: u64 = 4;
     let slot_time = |slot: u64| Duration::from_secs(slot) / fps;
-    let mut origin = Instant::now();
+    control.start();
     let (mut slots, mut dropped) = (0u64, 0u64);
     let mut failure = None;
+    let write_sound = |chunks: &Receiver<Chunk>| {
+        chunks
+            .try_iter()
+            .try_for_each(|(first, pcm)| mp4.write_audio(&pcm, first))
+            .map_err(platform_err)
+    };
     while !control.stop.load(Relaxed) {
-        if control.paused.load(Relaxed) {
-            let paused_at = Instant::now();
-            while control.paused.load(Relaxed) && !control.stop.load(Relaxed) {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            // The pause leaves no gap in the video.
-            origin += paused_at.elapsed();
-            continue;
+        if let Some(Err(e)) = sound.as_ref().map(|s| write_sound(&s.chunks)) {
+            failure = Some(e);
+            break;
         }
+        let Some(origin) = control.origin() else {
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        };
         let due = origin + slot_time(slots);
         let now = Instant::now();
         if now < due {
@@ -219,6 +318,14 @@ fn record(
         }
         slots += 1;
     }
+    // Already raised by the handle, unless writing failed: either way the audio thread
+    // hands over its last chunk and ends.
+    control.stop.store(true, Relaxed);
+    if let Some(sound) = sound {
+        if let Err(e) = write_sound(&sound.join()) {
+            failure.get_or_insert(e);
+        }
+    }
     let finished = mp4.finish().map_err(platform_err);
     if let Some(e) = failure {
         return Err(e);
@@ -241,4 +348,33 @@ fn record(
         "recording finished"
     );
     Ok(recording)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Audio packets land where the video is: nothing before the first frame, nothing
+    /// during a pause, and no jump in time across it.
+    #[test]
+    fn a_pause_leaves_no_gap_in_the_timeline() {
+        let control = Arc::new(Control::new());
+        assert_eq!(control.frames_now(), None);
+        assert_eq!(control.frames_at(Instant::now()), None);
+        control.start();
+        let mut handle = Handle(control.clone());
+        std::thread::sleep(Duration::from_millis(50));
+        handle.pause();
+        let paused = control.frames_now().unwrap();
+        assert!(paused >= i64::from(RATE) / 20, "{paused}");
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(control.frames_now(), Some(paused));
+        assert_eq!(control.frames_at(Instant::now()), None);
+        handle.resume();
+        let resumed = control.frames_now().unwrap();
+        assert!(
+            resumed - paused < i64::from(RATE) / 100,
+            "{resumed} vs {paused}"
+        );
+    }
 }
