@@ -104,3 +104,66 @@ fn records_the_camera_bubble() {
     println!("{recording:#?} bubble {bubble:?}");
     assert_eq!(recording.dropped, 0, "{recording:?}");
 }
+
+/// US-5.5 AC: a capture during a recording gives a picture of what is recorded, at its
+/// size, and the video loses no frame for it. Five stills over 3 s, one while paused.
+#[test]
+#[ignore = "needs a desktop session"]
+fn stills_while_recording_cost_no_frame() {
+    cb_platform::warm_up_recording();
+    let display = cb_platform::screen_source().displays().expect("displays")[0].clone();
+    let path = std::env::temp_dir().join("cb-stills.mp4");
+    let (sender, done) = mpsc::channel();
+    let mut handle = cb_platform::screen_source()
+        .start_recording(
+            &CaptureTarget::Display(display.id),
+            30,
+            AudioSources::default(),
+            &path,
+            Box::new(move |result| sender.send(result).unwrap()),
+        )
+        .expect("start");
+    let (still_sender, stills) = mpsc::channel();
+    for n in 0..5 {
+        std::thread::sleep(Duration::from_millis(600));
+        if n == 3 {
+            handle.pause();
+        }
+        let sender = still_sender.clone();
+        handle.still(Box::new(move |frame| sender.send(frame).unwrap()));
+        if n == 3 {
+            std::thread::sleep(Duration::from_millis(300));
+            handle.resume();
+        }
+    }
+    let frames: Vec<_> = (0..5)
+        .map(|_| {
+            stills
+                .recv_timeout(Duration::from_secs(2))
+                .expect("still in time")
+                .expect("still")
+        })
+        .collect();
+    handle.stop();
+    let recording = done
+        .recv_timeout(Duration::from_secs(10))
+        .expect("finished in time")
+        .expect("recorded");
+    let _ = std::fs::remove_file(&recording.path);
+    println!("{recording:#?}");
+    for frame in frames {
+        // The recorded picture, at its size.
+        assert_eq!(
+            (frame.width, frame.height),
+            (recording.width, recording.height)
+        );
+        assert_eq!(frame.rgba.len(), (frame.width * frame.height * 4) as usize);
+        assert!(frame
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|p| p != &[0, 0, 0, 255]));
+    }
+    assert_eq!(recording.dropped, 0, "{recording:?}");
+}

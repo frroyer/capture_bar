@@ -259,6 +259,8 @@ impl Toast {
 
 /// A recording's place in the buffer and how it ended.
 type Recorded = (ItemId, CaptureResult<Recording>);
+/// A still taken from a running recording (US-5.5), for its buffer item.
+type Still = (ItemId, CaptureResult<Frame>);
 
 /// Where the bar is on its way to or from the taskbar (Windows). It has a taskbar
 /// button only while minimized.
@@ -404,6 +406,7 @@ struct App {
     camera: Camera,
     /// Finished recordings, sent from their own threads.
     recorded: (mpsc::Sender<Recorded>, mpsc::Receiver<Recorded>),
+    stills: (mpsc::Sender<Still>, mpsc::Receiver<Still>),
     /// Wakes the UI when a recording finishes.
     repaint: egui::Context,
     /// The overlay picks what to record rather than what to capture.
@@ -666,6 +669,7 @@ impl App {
             countdown: None,
             camera: Camera::default(),
             recorded: mpsc::channel(),
+            stills: mpsc::channel(),
             repaint: cc.egui_ctx.clone(),
             overlay_records: false,
             toast,
@@ -746,6 +750,10 @@ impl App {
     fn begin_capture(&mut self, mode: CaptureMode) {
         self.overlay_records = false;
         if self.overlay.take().is_some() || self.overlay_request.is_some() {
+            return;
+        }
+        if self.recording.is_some() {
+            self.capture_while_recording(mode);
             return;
         }
         match mode {
@@ -836,7 +844,10 @@ impl App {
             Command::SetMode(mode) => self.bar.mode = mode,
             Command::Capture => self.begin_capture(self.bar.mode),
             Command::CaptureWith(mode) => {
-                self.bar.mode = mode;
+                // While recording it takes a still of the recording; the mode stays.
+                if self.recording.is_none() {
+                    self.bar.mode = mode;
+                }
                 self.begin_capture(mode);
             }
             Command::ToggleRecording => self.toggle_recording(),
@@ -884,7 +895,38 @@ impl App {
     }
 
     /// FR-20: the item appears in the buffer immediately; the frame arrives later.
+    /// A still of what is being recorded, from the recording's own frames (US-5.5): no
+    /// second capture session, no overlay over the video, no frame lost.
+    fn capture_while_recording(&mut self, mode: CaptureMode) {
+        let item = self.add_capture(mode);
+        let Some(recording) = &self.recording else {
+            return;
+        };
+        let (sender, repaint) = (self.stills.0.clone(), self.repaint.clone());
+        recording.handle.still(Box::new(move |result| {
+            let _ = sender.send((item, result));
+            repaint.request_repaint();
+        }));
+    }
+
+    fn poll_stills(&mut self) {
+        while let Ok((item, result)) = self.stills.1.try_recv() {
+            match result {
+                Ok(frame) => self.store(item, frame),
+                Err(error) => {
+                    if let Some(i) = self.buffer.get_mut(item) {
+                        i.state = ItemState::Failed(error.to_string());
+                        self.flash(tr!("toast-capture-failed", error = error.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
     fn capture_still(&mut self, mode: CaptureMode, target: CaptureTarget) {
+        if self.recording.is_some() {
+            return self.capture_while_recording(mode);
+        }
         let item = self.add_capture(mode);
         let req = self.capture.request_still(target);
         self.pending.insert(req, item);
@@ -2252,6 +2294,7 @@ impl eframe::App for App {
         }
         self.poll_captures();
         self.poll_recordings();
+        self.poll_stills();
         self.poll_output(ctx);
         self.poll_folder_choice();
         self.poll_autostart();
