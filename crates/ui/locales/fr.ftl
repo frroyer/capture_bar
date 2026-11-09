@@ -24,6 +24,7 @@ bar-buffer = Tampon
 bar-buffer-tip = Afficher ou masquer le tampon ({ $key })
 bar-mic = Microphone
 bar-mic-tip = Activer ou couper le microphone
+bar-mic-level-tip = Niveau du microphone
 bar-cam = Webcam
 bar-cam-tip = Activer ou couper la webcam
 bar-settings = Réglages

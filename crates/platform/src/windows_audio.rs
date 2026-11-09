@@ -41,6 +41,7 @@ impl AudioCapture {
 
 struct Source {
     name: &'static str,
+    microphone: bool,
     // Kept alive: capture stops with the client.
     _client: IAudioClient,
     capture: IAudioCaptureClient,
@@ -71,6 +72,7 @@ fn open_all(sources: AudioSources) -> Vec<Source> {
         .filter_map(|(_, name, flow, loopback)| match open(flow, loopback) {
             Ok((client, capture)) => Some(Source {
                 name,
+                microphone: !loopback,
                 _client: client,
                 capture,
             }),
@@ -135,16 +137,25 @@ fn qpc_100ns() -> u64 {
 fn run(sources: Vec<Source>, control: &Control, out: &Sender<Chunk>) {
     let mut sources: Vec<Option<Source>> = sources.into_iter().map(Some).collect();
     let mut mixer = Mixer::new(sources.len());
+    let mut level = 0.0f32;
     loop {
         let stopping = control.stop.load(Relaxed);
+        let mut mic = None;
         for (index, slot) in sources.iter_mut().enumerate() {
             let Some(source) = slot else { continue };
-            if let Err(e) = read(source, index, control, &mut mixer) {
-                // Unplugged, or the default device changed: the rest has no sound from it.
-                tracing::warn!("{} stopped: {e}", source.name);
-                *slot = None;
+            match read(source, index, control, &mut mixer) {
+                Ok(peak) if source.microphone => mic = Some(peak),
+                Ok(_) => {}
+                Err(e) => {
+                    // Unplugged, or the default device changed: the rest has no sound from it.
+                    tracing::warn!("{} stopped: {e}", source.name);
+                    *slot = None;
+                }
             }
         }
+        // A meter's fall: a peak fades to a third in 100 ms.
+        level = mic.map_or(-1.0, |peak| peak.max(level.max(0.0) * 0.9));
+        control.mic_level.store(level.to_bits(), Relaxed);
         // Nothing is handed out before the first frame.
         let until = control.frames_now().map(|now| {
             if stopping {
@@ -165,8 +176,9 @@ fn run(sources: Vec<Source>, control: &Control, out: &Sender<Chunk>) {
     }
 }
 
-/// Move every packet waiting in `source` into the mixer.
-fn read(source: &Source, index: usize, control: &Control, mixer: &mut Mixer) -> WinResult<()> {
+/// Move every packet waiting in `source` into the mixer; returns their peak, from 0 to 1.
+fn read(source: &Source, index: usize, control: &Control, mixer: &mut Mixer) -> WinResult<f32> {
+    let mut peak = 0u16;
     // SAFETY: the buffer from GetBuffer holds `frames` frames of 16-bit stereo and is
     // only read before ReleaseBuffer.
     unsafe {
@@ -198,10 +210,11 @@ fn read(source: &Source, index: usize, control: &Control, mixer: &mut Mixer) -> 
                         .map(|&b| i16::from_le_bytes(b))
                         .collect()
                 };
+                peak = pcm.iter().fold(peak, |max, s| max.max(s.unsigned_abs()));
                 mixer.add(index, at, &pcm);
             }
             source.capture.ReleaseBuffer(frames)?;
         }
     }
-    Ok(())
+    Ok(f32::from(peak) / f32::from(i16::MAX))
 }

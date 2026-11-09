@@ -409,6 +409,11 @@ pub struct Recording {
 pub trait StreamHandle: Send {
     fn pause(&mut self);
     fn resume(&mut self);
+    /// How loud the microphone is, from 0 to 1, falling back over a fraction of a second
+    /// after a peak; `None` when the recording has no microphone.
+    fn mic_level(&self) -> Option<f32> {
+        None
+    }
     /// Returns at once; the recording's `done` runs when the file is complete.
     fn stop(self: Box<Self>);
 }

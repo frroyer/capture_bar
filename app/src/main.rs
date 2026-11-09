@@ -2047,6 +2047,7 @@ impl eframe::App for App {
         if let Some(recording) = &self.recording {
             self.bar.elapsed_secs = recording.clock.elapsed(Instant::now()).as_secs();
         }
+        self.bar.mic_level = self.recording.as_ref().and_then(|r| r.handle.mic_level());
 
         if std::mem::take(&mut self.focus_bar) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -2105,7 +2106,14 @@ impl eframe::App for App {
 
         // Keep the timer and toast fresh without spinning the CPU (NFR-7). A drag polls
         // faster, to show the snap preview and catch the drop.
-        let wake = if self.dragging { 16 } else { 250 };
+        // The mic meter moves at 20 fps.
+        let wake = if self.dragging {
+            16
+        } else if self.bar.mic_level.is_some() {
+            50
+        } else {
+            250
+        };
         ctx.request_repaint_after(Duration::from_millis(wake));
     }
 }
