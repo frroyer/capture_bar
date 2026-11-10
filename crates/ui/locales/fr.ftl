@@ -186,10 +186,34 @@ settings-days = { $count ->
 }
 settings-keep-tip = Leurs fichiers restent dans le dossier
 settings-file = Enregistrés dans { $file }
+settings-shortcuts = Raccourcis globaux
+settings-shortcuts-reset = Tout réinitialiser
+settings-shortcut-press = Appuyez sur les touches…
+settings-shortcut-tip = Cliquez, puis appuyez sur les nouvelles touches. Échap garde les anciennes, Retour arrière retire le raccourci
+settings-shortcuts-conflicts = { $count ->
+    [one] Un raccourci n'est pas actif : survolez-le pour savoir pourquoi
+   *[other] { $count } raccourcis ne sont pas actifs : survolez-les pour savoir pourquoi
+}
+shortcut-none = aucun raccourci
+shortcut-toggle-bar = Afficher ou masquer la barre
+shortcut-capture = Capturer
+shortcut-record = Enregistrer ou arrêter
+shortcut-pause = Pause ou reprise
+shortcut-region = Capturer une zone
+shortcut-window = Capturer une fenêtre
+shortcut-screen = Capturer l'écran
+shortcut-repeat = Même zone à nouveau
+shortcut-buffer = Afficher le tampon
+shortcut-copy = Copier la dernière
+shortcut-prefix = Préfixe des fichiers
+shortcut-taken = Pris par le système ou une autre application : choisissez d'autres touches
+shortcut-same-as = Déjà utilisé par « { $action } »
+shortcut-invalid = Ces touches ne peuvent pas servir de raccourci global
 
 ## Messages
 
 toast-no-shortcuts = Raccourcis globaux indisponibles : utilisez la barre ou l'icône de notification
+toast-shortcuts-taken = Des raccourcis sont pris par d'autres applications : changez-les dans les Réglages
 toast-settings-damaged = Le fichier de réglages était endommagé : valeurs par défaut
 toast-index-damaged = L'index du tampon était endommagé : tampon vide
 toast-recorded = Enregistrement sauvegardé ({ $seconds } s)

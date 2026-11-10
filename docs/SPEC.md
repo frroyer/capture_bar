@@ -189,10 +189,10 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: cargo build produces a runnable binary on macOS, Windows and Linux in CI. Platform code lives only in platform/* crates.
 
-- [ ] Create workspace: core, ui, capture, encode, buffer, platform-{macos,windows,linux}
-- [ ] Define traits ScreenSource, FrameSink, Encoder, HotkeyService, OverlayWindow
-- [ ] CI matrix (GitHub Actions): macOS arm64/x64, Windows x64/ARM64, Ubuntu x64/arm64
-- [ ] cargo-deny licence gate (NFR-15)
+- [x] Create workspace: core, ui, capture, encode, buffer, platform-{macos,windows,linux} — plus annotate; one `platform` crate with `cfg` modules (windows.rs / macos.rs / linux.rs), to split if a backend grows large
+- [ ] Define traits ScreenSource, FrameSink, Encoder, HotkeyService, OverlayWindow — `ScreenSource` and `StreamHandle` exist in core; encoders are plain functions in `cb-encode`, shortcuts use global-hotkey, the overlay is an egui viewport. Add the other traits only when a second implementation needs them
+- [ ] CI matrix (GitHub Actions): macOS arm64/x64, Windows x64/ARM64, Ubuntu x64/arm64 — `.github/workflows/ci.yml` runs Windows x64, macOS arm64 and x64 (tests skipped on x64), Ubuntu x64; Windows ARM64 and Ubuntu arm64 missing
+- [x] cargo-deny licence gate (NFR-15) — `deny.toml`, a CI job with cargo-deny-action
 
 **US-1.2** As a tech lead, I want spikes proving capture and encoding on each OS, so that risks are retired before feature work.
 
@@ -251,8 +251,8 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: a new binding is applied without restart; a binding already taken by the OS or another app is flagged.
 
-- [ ] Shortcut recorder UI in settings
-- [ ] Registration-failure detection → conflict warning
+- [x] Shortcut recorder UI in settings — a Global shortcuts section: click a binding, press the new keys (Ctrl, Alt or ⌘ required, except F1–F24); Esc keeps the old keys, Backspace removes the shortcut, Reset all goes back to M3. Global shortcuts are off while recording, so the keys reach the window. Only changed bindings go to `capture-bar.toml` (`[shortcuts]`); tooltips show the bindings as set
+- [x] Registration-failure detection → conflict warning — a binding the OS refuses is marked ⚠ with "taken by the system or another app", as are two actions on the same keys and unreadable keys in a hand-edited file; a toast says so at launch. Windows verified (test with a second window holding the keys); macOS and X11 not run
 
 ### E4 · Screenshot capture
 
@@ -333,9 +333,9 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: 10 screenshots in 1 s produce 10 items in order; the UI thread never blocks.
 
-- [ ] Bounded in-memory ring + spill-to-disk
-- [ ] Write-ahead index (redb) for every item
-- [ ] Load test: 10 captures/s for 60 s
+- [x] Bounded in-memory ring + spill-to-disk — no ring needed: each frame goes to disk at once on the output worker; memory keeps only thumbnails, recording previews and the newest frame (for the editor)
+- [x] Write-ahead index (redb) for every item — replaced by `index.ron`, rewritten atomically by a writer thread on every change (US-6.6); no redb dependency
+- [ ] Load test: 10 captures/s for 60 s — only a unit test so far (`ten_pushes_keep_order`, cb-buffer); the end-to-end burst through capture and the output worker is not written
 
 **US-6.2** As a user, I want recordings to finish encoding in the background, with visible progress. (M1 · FR-21)
 
@@ -387,7 +387,7 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 - AC: prefix and folder are remembered between launches.
 
 - [x] Prefix and folder panel, opened from a bar chip and a shortcut — moved to the tray's title line (folder chip + prefix field) to keep the bar simple; ⌥⇧L opens the tray there. A new prefix offers to rename the captures in the buffer, keeping their timestamps and never overwriting
-- [x] Native folder picker on a worker thread — rfd, parented to the bar so it opens in front; Windows verified
+- [x] Native folder picker on a worker thread — rfd, parented to the bar so it opens in front; Windows verified Known: on Windows in dark mode the folder dialog (and the Save / PDF dialogs) shows white for about 3 frames before it draws dark. That is Windows' common dialog, the same with or without the bar; uxtheme's undocumented SetPreferredAppMode did not change it (tested 2026-11-09). No fix planned
 - [x] Naming and no-overwrite in the output worker
 
 ### E7 · Annotation (v1.1)

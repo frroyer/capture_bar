@@ -106,14 +106,21 @@ mod tests {
     #[test]
     fn settings_written_are_read_back() {
         let path = temp_dir("roundtrip").join(FILE_NAME);
-        let settings = Settings {
+        let mut settings = Settings {
             prefix: "acme".into(),
             retention_days: 30,
             frame_rate: 60,
             microphone: false,
             ..Settings::default()
         };
+        settings.set_keys(cb_core::Shortcut::Capture, "Ctrl+Alt+F5".into());
+        settings.set_keys(cb_core::Shortcut::Copy, String::new());
+        let record = cb_core::Shortcut::Record;
+        settings.set_keys(record, record.default_keys());
+        assert_eq!(settings.shortcuts.len(), 2, "defaults are not kept");
         write(&path, &settings).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("capture = \"Ctrl+Alt+F5\""), "{text}");
         assert_eq!(
             load(&path, |_| panic!("no migration")),
             Loaded::Read(settings)

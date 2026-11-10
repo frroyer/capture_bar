@@ -183,10 +183,34 @@ settings-days = { $count ->
 }
 settings-keep-tip = Their files stay in the folder
 settings-file = Saved in { $file }
+settings-shortcuts = Global shortcuts
+settings-shortcuts-reset = Reset all
+settings-shortcut-press = Press the keys…
+settings-shortcut-tip = Click, then press the new keys. Esc keeps the old ones, Backspace removes the shortcut
+settings-shortcuts-conflicts = { $count ->
+    [one] One shortcut is not in effect: hover over it to see why
+   *[other] { $count } shortcuts are not in effect: hover over them to see why
+}
+shortcut-none = no shortcut
+shortcut-toggle-bar = Show or hide the bar
+shortcut-capture = Capture
+shortcut-record = Record or stop
+shortcut-pause = Pause or resume
+shortcut-region = Capture a region
+shortcut-window = Capture a window
+shortcut-screen = Capture the screen
+shortcut-repeat = Same region again
+shortcut-buffer = Show the buffer
+shortcut-copy = Copy the newest
+shortcut-prefix = File name prefix
+shortcut-taken = Taken by the system or another app: choose other keys
+shortcut-same-as = Already used by “{ $action }”
+shortcut-invalid = Not keys a global shortcut can use
 
 ## Messages
 
 toast-no-shortcuts = Global shortcuts unavailable: use the bar or the tray icon
+toast-shortcuts-taken = Some shortcuts are taken by other apps: change them in Settings
 toast-settings-damaged = The settings file was damaged: defaults used
 toast-index-damaged = The buffer index was damaged: started empty
 toast-recorded = Recording saved ({ $seconds } s)

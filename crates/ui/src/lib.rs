@@ -15,10 +15,10 @@ pub use countdown::show_countdown;
 pub use editor::{Editor, EditorResult};
 pub use overlay::{Overlay, OverlayResult};
 pub use place::points_for_pixel;
-pub use settings::{SettingsOutput, SettingsWindow};
+pub use settings::{record_key, Recorded, SettingsOutput, SettingsWindow};
 
 use cb_buffer::{Buffer, BufferItem, ItemId, ItemKind, ItemState, Selection};
-use cb_core::{CaptureMode, Command};
+use cb_core::{CaptureMode, Command, Shortcut};
 use chrono::{DateTime, Local};
 use egui::{
     emath::RectAlign, vec2, Align2, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions,
@@ -43,6 +43,8 @@ pub mod palette {
     pub const RECORD: Color32 = Color32::from_rgb(0xFF, 0x5A, 0x36);
     pub const RECORD_BG: Color32 = Color32::from_rgb(0x3A, 0x1A, 0x14);
     pub const ACCENT: Color32 = Color32::from_rgb(0x3B, 0x82, 0xF6);
+    /// A setting that is not in effect, such as a shortcut another app holds.
+    pub const WARNING: Color32 = Color32::from_rgb(0xF5, 0xA5, 0x24);
     /// The microphone level meter.
     pub const LEVEL: Color32 = Color32::from_rgb(0x34, 0xC7, 0x59);
     /// Behind a thumbnail that does not fill its slot.
@@ -167,13 +169,42 @@ pub fn mode_name(mode: CaptureMode) -> String {
     }
 }
 
-/// A default shortcut as shown to the user (FR-28, mockup M3).
-pub fn shortcut(key: &str) -> String {
-    if cfg!(target_os = "macos") {
-        format!("⌥⇧{key}")
-    } else {
-        format!("Ctrl+Shift+{key}")
+static SHORTCUTS: std::sync::RwLock<std::collections::BTreeMap<Shortcut, String>> =
+    std::sync::RwLock::new(std::collections::BTreeMap::new());
+
+/// Show the bindings of `settings` in tooltips from the next frame on (US-3.2).
+pub fn set_shortcuts(settings: &cb_core::Settings) {
+    *SHORTCUTS.write().unwrap_or_else(|e| e.into_inner()) = settings.shortcuts.clone();
+}
+
+/// A shortcut as shown to the user (FR-28, mockup M3): its keys as set now.
+pub fn shortcut(action: Shortcut) -> String {
+    let keys = SHORTCUTS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&action)
+        .cloned()
+        .unwrap_or_else(|| action.default_keys());
+    keys_label(&keys)
+}
+
+/// `Ctrl+Shift+S` as the OS writes it: `⌃⇧S` on macOS. Empty is "no shortcut".
+pub fn keys_label(keys: &str) -> String {
+    if keys.is_empty() {
+        return tr!("shortcut-none");
     }
+    if !cfg!(target_os = "macos") {
+        return keys.to_owned();
+    }
+    keys.split('+')
+        .map(|token| match token {
+            "Ctrl" => "⌃",
+            "Alt" => "⌥",
+            "Shift" => "⇧",
+            "Cmd" => "⌘",
+            key => key,
+        })
+        .collect()
 }
 
 fn is_light(fill: Color32) -> bool {
@@ -546,7 +577,7 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                     divider(ui);
                 }
 
-                let capture_key = shortcut("S");
+                let capture_key = shortcut(Shortcut::Capture);
                 if chip(
                     ui,
                     &[Piece::Icon(Icon::Camera), Piece::Text(&tr!("bar-capture"))],
@@ -562,14 +593,14 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                         ui,
                         &[Piece::Icon(Icon::Repeat)],
                         &ChipStyle::new(CHIP, TEXT),
-                        &tr!("bar-repeat-tip", key = shortcut("A")),
+                        &tr!("bar-repeat-tip", key = shortcut(Shortcut::Repeat)),
                     );
                     if again.clicked() {
                         out.commands.push(Command::RepeatLastRegion);
                     }
                 }
 
-                let record_key = shortcut("R");
+                let record_key = shortcut(Shortcut::Record);
                 if state.recording {
                     let time = fmt_time(state.elapsed_secs);
                     if vertical {
@@ -597,7 +628,7 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                     {
                         out.commands.push(Command::ToggleRecording);
                     }
-                    let pause_key = shortcut("P");
+                    let pause_key = shortcut(Shortcut::Pause);
                     let (icon, label, tip) = if state.paused {
                         (
                             Icon::Play,
@@ -663,7 +694,7 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                         Piece::Icon(arrow),
                     ],
                     &ChipStyle::new(CHIP, TEXT),
-                    &tr!("bar-buffer-tip", key = shortcut("B")),
+                    &tr!("bar-buffer-tip", key = shortcut(Shortcut::Buffer)),
                 );
                 if vertical && !buffer.is_empty() {
                     // The count stays visible as a corner badge on the icon-only chip.
@@ -756,10 +787,10 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
     out
 }
 
-const MODES: [(CaptureMode, Icon, &str); 3] = [
-    (CaptureMode::Region, Icon::Region, "1"),
-    (CaptureMode::Window, Icon::Window, "2"),
-    (CaptureMode::Screen, Icon::Screen, "3"),
+const MODES: [(CaptureMode, Icon, Shortcut); 3] = [
+    (CaptureMode::Region, Icon::Region, Shortcut::Region),
+    (CaptureMode::Window, Icon::Window, Shortcut::Window),
+    (CaptureMode::Screen, Icon::Screen, Shortcut::Screen),
 ];
 
 /// Region / Window / Screen: three icons in a track, with a highlight that slides to the
@@ -913,7 +944,7 @@ fn destination_line(ui: &mut Ui, destination: &mut Destination, out: &mut TrayOu
         let tip = tr!(
             "folder-tip",
             folder = destination.folder.display().to_string(),
-            key = shortcut("L"),
+            key = shortcut(Shortcut::Prefix),
         );
         let label = shorten(&name, 18);
         if chip(
@@ -1412,8 +1443,8 @@ pub fn tray(
                 ui.label(
                     RichText::new(tr!(
                         "tray-empty",
-                        capture = shortcut("S"),
-                        record = shortcut("R"),
+                        capture = shortcut(Shortcut::Capture),
+                        record = shortcut(Shortcut::Record),
                     ))
                     .color(MUTED),
                 );
@@ -1494,7 +1525,7 @@ mod tests {
         } else {
             "Ctrl+Shift+S"
         };
-        assert_eq!(shortcut("S"), expected);
+        assert_eq!(shortcut(Shortcut::Capture), expected);
     }
 
     fn bar_size(state: &BarState, window_width: f32) -> Vec2 {

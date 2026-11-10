@@ -4,6 +4,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod config;
+mod hotkeys;
 mod output;
 
 use std::collections::HashMap;
@@ -23,8 +24,7 @@ use cb_ui::{
     SettingsWindow, ToastAction, TooltipSide,
 };
 use eframe::egui;
-use global_hotkey::hotkey::{Code, HotKey, Modifiers};
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 
 /// Only for the first frame: after that the window follows its content.
 const INITIAL_SIZE: [f32; 2] = [900.0, 54.0];
@@ -197,46 +197,11 @@ fn saved_mode(storage: Option<&dyn eframe::Storage>) -> CaptureMode {
         .unwrap_or_default()
 }
 
-/// Default shortcut map (mockup M3). ⌥⇧ on macOS, Ctrl+Shift elsewhere.
-fn shortcut_modifiers() -> Modifiers {
-    if cfg!(target_os = "macos") {
-        Modifiers::ALT | Modifiers::SHIFT
-    } else {
-        Modifiers::CONTROL | Modifiers::SHIFT
-    }
-}
-
 /// The command a hotkey event asks for. A shortcut fires once, on the press.
 fn shortcut_command(map: &HashMap<u32, Command>, ev: &GlobalHotKeyEvent) -> Option<Command> {
     (ev.state == HotKeyState::Pressed)
         .then(|| map.get(&ev.id).cloned())
         .flatten()
-}
-
-fn default_shortcuts() -> Vec<(HotKey, Command)> {
-    let m = Some(shortcut_modifiers());
-    vec![
-        (HotKey::new(m, Code::Space), Command::ToggleBar),
-        (HotKey::new(m, Code::KeyS), Command::Capture),
-        (HotKey::new(m, Code::KeyR), Command::ToggleRecording),
-        (HotKey::new(m, Code::KeyP), Command::TogglePause),
-        (
-            HotKey::new(m, Code::Digit1),
-            Command::CaptureWith(CaptureMode::Region),
-        ),
-        (
-            HotKey::new(m, Code::Digit2),
-            Command::CaptureWith(CaptureMode::Window),
-        ),
-        (
-            HotKey::new(m, Code::Digit3),
-            Command::CaptureWith(CaptureMode::Screen),
-        ),
-        (HotKey::new(m, Code::KeyA), Command::RepeatLastRegion),
-        (HotKey::new(m, Code::KeyB), Command::ToggleBuffer),
-        (HotKey::new(m, Code::KeyC), Command::CopyNewest),
-        (HotKey::new(m, Code::KeyL), Command::EditPrefix),
-    ]
 }
 
 /// A short message beside the bar, for `TOAST_TIME` (FR-12).
@@ -453,8 +418,12 @@ struct App {
     output_done: mpsc::Receiver<output::Done>,
     /// What Copy puts on the clipboard (M3).
     newest_frame: Option<(ItemId, Arc<Frame>)>,
-    // Kept alive for the lifetime of the app; dropping it unregisters the keys.
-    _hotkeys: Option<GlobalHotKeyManager>,
+    /// Global shortcuts; dropping them unregisters the keys. `None` when the OS gives none.
+    hotkeys: Option<hotkeys::Hotkeys>,
+    /// The shortcuts not in effect, and why (US-3.2).
+    shortcut_conflicts: std::collections::BTreeMap<cb_core::Shortcut, cb_core::ShortcutConflict>,
+    /// Shortcuts are off while Settings records new keys.
+    shortcuts_suspended: bool,
     _tray: Option<cb_platform::Tray>,
     /// From global shortcuts and the tray icon.
     commands: mpsc::Receiver<Command>,
@@ -518,26 +487,19 @@ impl App {
             }
         }
 
-        let mut shortcut_map = HashMap::new();
-        let hotkeys = match GlobalHotKeyManager::new() {
-            Ok(manager) => {
-                for (hk, cmd) in default_shortcuts() {
-                    match manager.register(hk) {
-                        Ok(()) => {
-                            shortcut_map.insert(hk.id(), cmd);
-                        }
-                        // US-3.2: surface conflicts in the UI instead of the log.
-                        Err(e) => tracing::warn!(?cmd, error = %e, "shortcut unavailable"),
-                    }
-                }
-                Some(manager)
-            }
-            Err(e) => {
-                // Wayland without the GlobalShortcuts portal lands here (US-3.1).
-                tracing::warn!(error = %e, "global shortcuts unavailable");
-                None
-            }
-        };
+        cb_ui::set_shortcuts(loaded.settings());
+        let mut hotkeys = hotkeys::Hotkeys::new()
+            // Wayland without the GlobalShortcuts portal lands here (US-3.1).
+            .inspect_err(|e| tracing::warn!(error = %e, "global shortcuts unavailable"))
+            .ok();
+        let shortcut_conflicts = hotkeys
+            .as_mut()
+            .map(|h| h.apply(loaded.settings()))
+            .unwrap_or_default();
+        let shortcut_map = hotkeys.as_ref().map(hotkeys::Hotkeys::fired);
+        let shortcuts_work = shortcut_map
+            .as_ref()
+            .is_some_and(|m| !m.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
 
         // With a handler set, the crate no longer fills `GlobalHotKeyEvent::receiver()`.
         // Waking the UI here makes shortcuts work even if it is idle.
@@ -551,11 +513,22 @@ impl App {
         };
         let ctx = cc.egui_ctx.clone();
         let tx = commands_tx.clone();
-        let toast = shortcut_map
-            .is_empty()
-            .then(|| Toast::new(tr!("toast-no-shortcuts"), None));
+        let toast = if !shortcuts_work {
+            Some(Toast::new(tr!("toast-no-shortcuts"), None))
+        } else if shortcut_conflicts
+            .values()
+            .any(|c| *c == cb_core::ShortcutConflict::Taken)
+        {
+            Some(Toast::new(tr!("toast-shortcuts-taken"), None))
+        } else {
+            None
+        };
         GlobalHotKeyEvent::set_event_handler(Some(move |ev: GlobalHotKeyEvent| {
-            if let Some(cmd) = shortcut_command(&shortcut_map, &ev) {
+            let Some(map) = &shortcut_map else {
+                return;
+            };
+            let cmd = shortcut_command(&map.lock().unwrap_or_else(|e| e.into_inner()), &ev);
+            if let Some(cmd) = cmd {
                 tracing::debug!(?cmd, "shortcut");
                 restore();
                 let _ = tx.send(cmd);
@@ -697,7 +670,9 @@ impl App {
             output,
             output_done,
             newest_frame: None,
-            _hotkeys: hotkeys,
+            hotkeys,
+            shortcut_conflicts,
+            shortcuts_suspended: false,
             _tray: tray,
             commands,
             window_size: INITIAL_SIZE.into(),
@@ -1311,10 +1286,27 @@ impl App {
                 tray.set_labels(tray_labels().each_ref().map(String::as_str));
             }
         }
+        let rebind = settings.shortcuts != self.prefs.shortcuts;
         self.captures_dir = settings.folder.clone();
         self.bar.prefix = output::clean_prefix(&settings.prefix);
         self.bar.mic_on = settings.microphone;
         self.prefs = settings;
+        if rebind {
+            cb_ui::set_shortcuts(&self.prefs);
+            self.rebind_shortcuts();
+        }
+    }
+
+    /// Register the shortcuts as set now, unless Settings is recording new keys (US-3.2).
+    fn rebind_shortcuts(&mut self) {
+        let Some(hotkeys) = &mut self.hotkeys else {
+            return;
+        };
+        if self.shortcuts_suspended {
+            hotkeys.suspend();
+        } else {
+            self.shortcut_conflicts = hotkeys.apply(&self.prefs);
+        }
     }
 
     fn show_settings(&mut self, ctx: &egui::Context) {
@@ -1324,7 +1316,19 @@ impl App {
             return;
         };
         let mut autostart = self.autostart;
-        let out = window.show(ctx, &mut settings, &self.settings_file, &mut autostart);
+        let out = window.show(
+            ctx,
+            &mut settings,
+            &self.settings_file,
+            &mut autostart,
+            &self.shortcut_conflicts,
+        );
+        if out.recording_keys != self.shortcuts_suspended {
+            self.shortcuts_suspended = out.recording_keys;
+            if settings == before {
+                self.rebind_shortcuts();
+            }
+        }
         if settings != before {
             self.apply_settings(settings);
         }
@@ -1334,6 +1338,10 @@ impl App {
         self.folder_requested |= out.choose_folder;
         if out.closed {
             self.settings_window = None;
+            if self.shortcuts_suspended {
+                self.shortcuts_suspended = false;
+                self.rebind_shortcuts();
+            }
         }
     }
 
@@ -2504,33 +2512,6 @@ mod tests {
         assert_eq!(fire(7, HotKeyState::Pressed), Some(Command::Capture));
         assert_eq!(fire(7, HotKeyState::Released), None);
         assert_eq!(fire(8, HotKeyState::Pressed), None);
-    }
-
-    /// FR-11, FR-14, FR-22, FR-4, FR-28: each action has one key, on the platform's modifiers.
-    #[test]
-    fn default_map_covers_every_action_once() {
-        let map = default_shortcuts();
-        let keys = |code| {
-            map.iter()
-                .find(|(hk, _)| hk.key == code)
-                .map(|(hk, cmd)| (hk.mods, cmd.clone()))
-        };
-        let mods = shortcut_modifiers();
-        for (code, cmd) in [
-            (Code::Space, Command::ToggleBar),
-            (Code::KeyS, Command::Capture),
-            (Code::KeyR, Command::ToggleRecording),
-            (Code::KeyP, Command::TogglePause),
-            (Code::Digit1, Command::CaptureWith(CaptureMode::Region)),
-            (Code::Digit2, Command::CaptureWith(CaptureMode::Window)),
-            (Code::Digit3, Command::CaptureWith(CaptureMode::Screen)),
-            (Code::KeyB, Command::ToggleBuffer),
-            (Code::KeyL, Command::EditPrefix),
-        ] {
-            assert_eq!(keys(code), Some((mods, cmd)));
-        }
-        let ids: std::collections::HashSet<_> = map.iter().map(|(hk, _)| hk.id()).collect();
-        assert_eq!(ids.len(), map.len(), "two actions share a key");
     }
 
     #[test]
