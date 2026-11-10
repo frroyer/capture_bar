@@ -979,6 +979,8 @@ pub enum ItemAction {
     Annotate,
     /// Open a recording in the system's video player.
     Play,
+    /// Make a GIF of a recording, next to it (US-6.7).
+    ExportGif,
     Delete,
     /// The picture is being dragged: hand the file to the OS drag and drop.
     DragOut,
@@ -1034,6 +1036,7 @@ fn tray_card(
     thumbnail: Option<&TextureHandle>,
     preview: &[TextureHandle],
     selected: bool,
+    export: Option<Option<u8>>,
 ) -> Option<ItemAction> {
     use palette::*;
     let kind = match item.kind {
@@ -1046,10 +1049,14 @@ fn tray_card(
         || format!("#{}", item.id.0),
         |name| name.to_string_lossy().into_owned(),
     );
-    let (status, status_color) = match &item.state {
-        ItemState::Ready => (String::new(), MUTED),
-        ItemState::Encoding { .. } => (tr!("card-saving"), MUTED),
-        ItemState::Failed(_) => (tr!("card-failed"), RECORD),
+    let (status, status_color) = match (&item.state, export) {
+        (ItemState::Ready, Some(None)) => (tr!("card-gif-waiting"), TEXT),
+        (ItemState::Ready, Some(Some(percent))) => {
+            (tr!("card-gif-progress", percent = percent), TEXT)
+        }
+        (ItemState::Ready, None) => (String::new(), MUTED),
+        (ItemState::Encoding { .. }, _) => (tr!("card-saving"), MUTED),
+        (ItemState::Failed(_), _) => (tr!("card-failed"), RECORD),
     };
     let hover = match &item.state {
         ItemState::Failed(error) => error.clone(),
@@ -1153,7 +1160,33 @@ fn tray_card(
                         action = Some(ItemAction::TogglePin);
                     }
                 }
+                // A GIF on its way: a bar along the bottom of the picture (US-6.2).
+                if let Some(percent) = export {
+                    let track = egui::Rect::from_min_max(
+                        slot.left_bottom() + vec2(6.0, -10.0),
+                        slot.right_bottom() + vec2(-6.0, -6.0),
+                    );
+                    let done = f32::from(percent.unwrap_or(0)) / 100.0;
+                    let mut filled = track;
+                    filled.set_width(track.width() * done);
+                    ui.painter().rect_filled(track, CornerRadius::same(2), BAR);
+                    ui.painter()
+                        .rect_filled(filled, CornerRadius::same(2), ACCENT);
+                }
                 if !status.is_empty() {
+                    if export.is_some() {
+                        // Readable over any picture.
+                        let galley = ui.painter().layout_no_wrap(
+                            status.clone(),
+                            FontId::new(12.0, FontFamily::Proportional),
+                            status_color,
+                        );
+                        let back = egui::Rect::from_center_size(
+                            slot.center(),
+                            galley.size() + vec2(12.0, 6.0),
+                        );
+                        ui.painter().rect_filled(back, CornerRadius::same(4), BAR);
+                    }
                     ui.painter().text(
                         slot.center(),
                         Align2::CENTER_CENTER,
@@ -1179,26 +1212,52 @@ fn tray_card(
                         color: TEXT,
                         height: 26.0,
                     };
-                    let buttons = [
-                        (Icon::Copy, tr!("card-copy"), ItemAction::Copy, has_file),
-                        (Icon::Save, tr!("card-save"), ItemAction::Save, has_file),
-                        match item.kind {
-                            ItemKind::Image => (
-                                Icon::Pen,
-                                tr!("card-annotate"),
-                                ItemAction::Annotate,
-                                has_file,
-                            ),
-                            ItemKind::Video { .. } => {
-                                (Icon::Play, tr!("card-play"), ItemAction::Play, has_file)
-                            }
-                        },
-                        (Icon::Trash, tr!("card-delete"), ItemAction::Delete, true),
+                    let mut buttons = vec![
+                        (
+                            Piece::Icon(Icon::Copy),
+                            tr!("card-copy"),
+                            ItemAction::Copy,
+                            has_file,
+                        ),
+                        (
+                            Piece::Icon(Icon::Save),
+                            tr!("card-save"),
+                            ItemAction::Save,
+                            has_file,
+                        ),
                     ];
-                    for (icon, tooltip, what, enabled) in buttons {
+                    match item.kind {
+                        ItemKind::Image => buttons.push((
+                            Piece::Icon(Icon::Pen),
+                            tr!("card-annotate"),
+                            ItemAction::Annotate,
+                            has_file,
+                        )),
+                        ItemKind::Video { .. } => {
+                            buttons.push((
+                                Piece::Icon(Icon::Play),
+                                tr!("card-play"),
+                                ItemAction::Play,
+                                has_file,
+                            ));
+                            buttons.push((
+                                Piece::Text("GIF"),
+                                tr!("card-gif"),
+                                ItemAction::ExportGif,
+                                has_file && export.is_none(),
+                            ));
+                        }
+                    }
+                    buttons.push((
+                        Piece::Icon(Icon::Trash),
+                        tr!("card-delete"),
+                        ItemAction::Delete,
+                        true,
+                    ));
+                    for (piece, tooltip, what, enabled) in buttons {
                         let clicked = ui
                             .add_enabled_ui(enabled, |ui| {
-                                chip(ui, &[Piece::Icon(icon)], &style, &tooltip).clicked()
+                                chip(ui, &[piece], &style, &tooltip).clicked()
                             })
                             .inner;
                         if clicked {
@@ -1314,12 +1373,14 @@ fn batch_row(ui: &mut Ui, selected: usize) -> Option<BatchAction> {
 
 /// The buffer tray (M1, FR-22), `width` points wide. Cards in `selection` are highlighted.
 /// A recording with `previews` frames plays them while the cursor is on its picture.
+#[allow(clippy::too_many_arguments)] // what each card shows, from three maps
 pub fn tray(
     ui: &mut Ui,
     buffer: &Buffer,
     selection: &Selection,
     thumbnails: &HashMap<ItemId, TextureHandle>,
     previews: &HashMap<ItemId, Vec<TextureHandle>>,
+    exports: &HashMap<ItemId, Option<u8>>,
     mut destination: Destination,
     width: f32,
 ) -> TrayOutput {
@@ -1364,7 +1425,14 @@ pub fn tray(
                         let selected = selection.contains(item.id);
                         let thumbnail = thumbnails.get(&item.id);
                         let preview = previews.get(&item.id).map_or(&[][..], Vec::as_slice);
-                        if let Some(what) = tray_card(ui, item, thumbnail, preview, selected) {
+                        if let Some(what) = tray_card(
+                            ui,
+                            item,
+                            thumbnail,
+                            preview,
+                            selected,
+                            exports.get(&item.id).copied(),
+                        ) {
                             out.item = Some((item.id, what));
                         }
                     }
@@ -1385,6 +1453,7 @@ mod tests {
         buffer: &Buffer,
         selection: &Selection,
         thumbnails: &HashMap<ItemId, TextureHandle>,
+        exports: &HashMap<ItemId, Option<u8>>,
         width: f32,
     ) -> TrayOutput {
         let mut prefix = String::new();
@@ -1401,6 +1470,7 @@ mod tests {
             selection,
             thumbnails,
             &HashMap::new(),
+            exports,
             destination,
             width,
         )
@@ -1532,7 +1602,11 @@ mod tests {
     }
 
     /// The tray's meshes and texts, run until its layout has settled.
-    fn tray_shapes(buffer: &Buffer, thumbnails: &HashMap<ItemId, TextureHandle>) -> Vec<String> {
+    fn tray_shapes(
+        buffer: &Buffer,
+        thumbnails: &HashMap<ItemId, TextureHandle>,
+        exports: &HashMap<ItemId, Option<u8>>,
+    ) -> Vec<String> {
         let ctx = egui::Context::default();
         install_fonts(&ctx, None);
         let mut seen = Vec::new();
@@ -1545,7 +1619,14 @@ mod tests {
                 ..Default::default()
             };
             let mut output = ctx.run_ui(input, |ui| {
-                tray_plain(ui, buffer, &Selection::default(), thumbnails, 800.0);
+                tray_plain(
+                    ui,
+                    buffer,
+                    &Selection::default(),
+                    thumbnails,
+                    exports,
+                    800.0,
+                );
             });
             output.textures_delta.clear();
             seen = output
@@ -1578,11 +1659,29 @@ mod tests {
         let (old_pic, new_pic) = (texture("older"), texture("newer"));
         let thumbnails = HashMap::from([(older, old_pic.clone()), (newer, new_pic.clone())]);
 
-        let shapes = tray_shapes(&buffer, &thumbnails);
+        let shapes = tray_shapes(&buffer, &thumbnails, &HashMap::new());
         let at = |wanted: String| shapes.iter().position(|s| *s == wanted).unwrap();
         assert!(shapes[0].contains("3 captures"), "{shapes:?}");
         assert!(at("Saving…".into()) < at(format!("{:?}", new_pic.id())));
         assert!(at(format!("{:?}", new_pic.id())) < at(format!("{:?}", old_pic.id())));
+    }
+
+    /// GIF exports in the queue show on their recording's card (US-6.2).
+    #[test]
+    fn exporting_recordings_show_their_progress() {
+        let mut buffer = Buffer::new();
+        let video = ItemKind::Video { duration_ms: 3000 };
+        let (waiting, running) = (
+            buffer.push(video, CaptureMode::Screen),
+            buffer.push(video, CaptureMode::Screen),
+        );
+        for item in [waiting, running] {
+            buffer.get_mut(item).unwrap().state = ItemState::Ready;
+        }
+        let exports = HashMap::from([(waiting, None), (running, Some(42))]);
+        let shapes = tray_shapes(&buffer, &HashMap::new(), &exports);
+        assert!(shapes.iter().any(|s| s == "GIF waiting…"), "{shapes:?}");
+        assert!(shapes.iter().any(|s| s == "GIF 42%"), "{shapes:?}");
     }
 
     /// Runs the tray with the keyboard in the prefix, types `typed`, then presses `key`.
@@ -1729,6 +1828,7 @@ mod tests {
                     &Selection::default(),
                     &HashMap::new(),
                     &HashMap::new(),
+                    &HashMap::new(),
                     destination,
                     800.0,
                 );
@@ -1819,6 +1919,7 @@ mod tests {
                         &Selection::default(),
                         &thumbnails,
                         &HashMap::new(),
+                        &HashMap::new(),
                         destination,
                         800.0,
                     );
@@ -1849,7 +1950,7 @@ mod tests {
 
     #[test]
     fn empty_tray_explains_itself() {
-        let shapes = tray_shapes(&Buffer::new(), &HashMap::new());
+        let shapes = tray_shapes(&Buffer::new(), &HashMap::new(), &HashMap::new());
         assert!(shapes.iter().any(|s| s.starts_with("Empty")), "{shapes:?}");
     }
 

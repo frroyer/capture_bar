@@ -382,6 +382,9 @@ struct App {
     thumbnails: HashMap<ItemId, egui::TextureHandle>,
     /// The frames a recording's card plays while the cursor is on it.
     previews: HashMap<ItemId, Vec<egui::TextureHandle>>,
+    /// Recordings with a GIF on its way, and how far it is: `None` while it waits its
+    /// turn (US-6.2).
+    exports: HashMap<ItemId, Option<u8>>,
     capture: CaptureService,
     pending: HashMap<u64, ItemId>,
     /// The desktop grab an overlay is waiting for, and that overlay's mode.
@@ -652,6 +655,7 @@ impl App {
             selection: Selection::default(),
             thumbnails: HashMap::new(),
             previews: HashMap::new(),
+            exports: HashMap::new(),
             capture,
             pending: HashMap::new(),
             overlay_request: None,
@@ -1079,6 +1083,11 @@ impl App {
             (ItemAction::Play, Some(path)) => {
                 let _ = self.output.send(output::Job::Play(path));
             }
+            (ItemAction::ExportGif, Some(from)) => {
+                if self.exports.insert(item, None).is_none() {
+                    let _ = self.output.send(output::Job::ExportGif { item, from });
+                }
+            }
             (ItemAction::Save, Some(path)) => self.save_copy(frame, path),
             (ItemAction::DragOut, Some(path)) => {
                 // Blocks this thread until the drop, as every OS drag loop does.
@@ -1090,7 +1099,11 @@ impl App {
             }
             // The tray only offers these once the file is on disk.
             (
-                ItemAction::Copy | ItemAction::Save | ItemAction::DragOut | ItemAction::Play,
+                ItemAction::Copy
+                | ItemAction::Save
+                | ItemAction::DragOut
+                | ItemAction::Play
+                | ItemAction::ExportGif,
                 None,
             ) => {}
         }
@@ -1457,6 +1470,14 @@ impl App {
                     self.previews.insert(item, textures);
                 }
                 output::Done::Message(message) => self.flash(message),
+                output::Done::Exporting { item, percent } => match percent {
+                    Some(_) => {
+                        self.exports.insert(item, percent);
+                    }
+                    None => {
+                        self.exports.remove(&item);
+                    }
+                },
                 output::Done::Loaded { item, result } => {
                     if self.editor_loading.take_if(|i| *i == item).is_none() {
                         continue;
@@ -2034,7 +2055,7 @@ impl App {
                 self.bar_size.x
             };
             let (buffer, selection) = (&self.buffer, &self.selection);
-            let (thumbnails, previews) = (&self.thumbnails, &self.previews);
+            let (thumbnails, previews, exports) = (&self.thumbnails, &self.previews, &self.exports);
             let mut asked = cb_ui::TrayOutput::default();
             self.tray_size = content_size(ui, |ui| {
                 asked = cb_ui::tray(
@@ -2043,6 +2064,7 @@ impl App {
                     selection,
                     thumbnails,
                     previews,
+                    exports,
                     destination,
                     width,
                 );

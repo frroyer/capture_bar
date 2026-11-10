@@ -67,7 +67,7 @@ only if a spike shows a need.
   folder. The buffer shows it as saving until the file is complete. A warm-up thread at launch loads the GPU
   device and encoder so the first recording starts in ~240 ms, not ~650. A recording's card shows its first
   frame and plays 12 frames spread over it while hovered (`cb_platform::video_frames`, decoded on the output
-  worker); its Play button opens the system player, and Copy puts the file on the clipboard. While recording, the
+  worker); its Play button opens the system player, Copy puts the file on the clipboard, and GIF exports it next to the MP4 (US-6.7: `cb_platform::video_clip` decodes at 15 fps, `cb_encode::write_gif` encodes, on the output worker's export thread, one at a time in order; the card shows the queue and progress, US-6.2). While recording, the
   bar shows the M2.2 layout (US-5.2): Stop with the timer, Pause / Resume (Ctrl+Shift+P; the timer and the
   video skip the pause) and Discard, which Esc also triggers when the bar has the keyboard; both ask once
   before throwing the file away. Sound (US-5.3): the bar's mic toggle and Settings' system sound pick the sources when a recording starts; WASAPI

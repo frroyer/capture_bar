@@ -22,6 +22,10 @@ const THUMBNAIL_PIXELS: (u32, u32) = (
 /// Frames in a recording's hover preview: 3 s at the tray's 4 per second.
 const PREVIEW_FRAMES: u32 = 12;
 
+/// A GIF's frame rate and largest size: 10 s of it fit in 15 MB (US-6.7).
+const GIF_FPS: u32 = 15;
+const GIF_PIXELS: (u32, u32) = (1280, 720);
+
 pub enum Job {
     /// Copy to the clipboard, then write the file.
     Store {
@@ -90,9 +94,20 @@ pub enum Job {
     /// Delete files nobody will see again, such as the original of a capture that left the
     /// buffer. Says nothing.
     Remove(PathBuf),
+    /// Make a GIF of the recording at `from`, next to it (US-6.7). Exports queue and run
+    /// one at a time, in order, reporting progress (US-6.2).
+    ExportGif {
+        item: ItemId,
+        from: PathBuf,
+    },
 }
 
 pub enum Done {
+    /// How far a recording's GIF export is, in percent; `None` once it is over.
+    Exporting {
+        item: ItemId,
+        percent: Option<u8>,
+    },
     /// A recording's preview, thumbnail-sized, the first frame its thumbnail.
     Preview {
         item: ItemId,
@@ -339,6 +354,44 @@ fn export_pdf(files: &[PathBuf], to: &Path) -> Result<usize, String> {
     })
 }
 
+/// Write the recording at `from` as a GIF beside it, never overwriting, telling `progress`
+/// each new percent. Decodes on a second thread while this one encodes. A failure leaves
+/// no half-written GIF behind. Returns where it went.
+fn export_gif(from: &Path, progress: &mut dyn FnMut(u8)) -> Result<PathBuf, String> {
+    let (file, to) = create_unique(&from.with_extension("gif")).map_err(|e| e.to_string())?;
+    let (frames_tx, frames) = mpsc::sync_channel::<(Frame, f32)>(2);
+    let (decoded, written) = std::thread::scope(|scope| {
+        let decoder = scope.spawn(move || {
+            cb_platform::video_clip(from, GIF_FPS, &mut |frame, done| {
+                let frame = cb_encode::thumbnail(&frame, GIF_PIXELS.0, GIF_PIXELS.1);
+                // Stop when the encoder has given up.
+                frame.is_ok_and(|frame| frames_tx.send((frame, done)).is_ok())
+            })
+        });
+        let mut shown = None;
+        let frames = frames.iter().map(|(frame, done)| {
+            let percent = (done * 100.0) as u8;
+            if shown != Some(percent) {
+                shown = Some(percent);
+                progress(percent);
+            }
+            frame
+        });
+        let written = cb_encode::write_gif(frames, GIF_FPS, std::io::BufWriter::new(file));
+        (decoder.join().expect("GIF decoder panicked"), written)
+    });
+    match decoded
+        .map_err(|e| e.to_string())
+        .and(written.map_err(|e| e.to_string()))
+    {
+        Ok(_) => Ok(to),
+        Err(e) => {
+            let _ = std::fs::remove_file(&to);
+            Err(e)
+        }
+    }
+}
+
 /// Copy `from` into `dir` under its own name, or `-2`, `-3`… when that is taken.
 fn save_into(from: &Path, dir: &Path) -> std::io::Result<PathBuf> {
     let name = from.file_name().ok_or(ErrorKind::InvalidInput)?;
@@ -355,13 +408,16 @@ fn save_into(from: &Path, dir: &Path) -> std::io::Result<PathBuf> {
 }
 
 /// Runs a job that works on existing files and says how it went.
+/// The last part of `path`, to name it in a toast.
+fn file_name_of(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
 fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
-    let file_name = |path: &Path| {
-        path.file_name().map_or_else(
-            || path.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        )
-    };
+    let file_name = file_name_of;
     match job {
         Job::CopyFile(path) => {
             let copied = File::open(&path)
@@ -434,7 +490,8 @@ fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
         | Job::Rename { .. }
         | Job::Load { .. }
         | Job::Annotate { .. }
-        | Job::Remove(_) => {
+        | Job::Remove(_)
+        | Job::ExportGif { .. } => {
             unreachable!("not a one-off job")
         }
     }
@@ -460,6 +517,31 @@ pub fn spawn(wake: impl Fn() + Send + Sync + 'static) -> (mpsc::Sender<Job>, mps
             }
         })
         .expect("spawn preview thread");
+    // A GIF takes as long as its clip or more: on its own thread too, one at a time so
+    // they finish in the order asked (US-6.2).
+    let (export_tx, exports) = mpsc::channel::<(ItemId, PathBuf)>();
+    let (export_done, export_wake) = (done_tx.clone(), wake.clone());
+    std::thread::Builder::new()
+        .name("export".into())
+        .spawn(move || {
+            for (item, from) in exports {
+                let send = |percent| {
+                    let _ = export_done.send(Done::Exporting { item, percent });
+                    export_wake();
+                };
+                let result = export_gif(&from, &mut |percent| send(Some(percent)));
+                let message = match result {
+                    Ok(to) => tr!("toast-gif-exported", file = file_name_of(&to)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, ?from, "GIF export");
+                        tr!("toast-gif-failed", error = e)
+                    }
+                };
+                let _ = export_done.send(Done::Message(message));
+                send(None);
+            }
+        })
+        .expect("spawn export thread");
     std::thread::Builder::new()
         .name("output".into())
         .spawn(move || {
@@ -495,6 +577,10 @@ pub fn spawn(wake: impl Fn() + Send + Sync + 'static) -> (mpsc::Sender<Job>, mps
                     }
                     Job::Preview { item, path } => {
                         let _ = preview_tx.send((*item, path.clone()));
+                        continue;
+                    }
+                    Job::ExportGif { item, from } => {
+                        let _ = export_tx.send((*item, from.clone()));
                         continue;
                     }
                     Job::Play(path) => {
@@ -721,7 +807,8 @@ mod tests {
                 | Done::Preview { .. }
                 | Done::Renamed { .. }
                 | Done::Loaded { .. }
-                | Done::Annotated { .. } => None,
+                | Done::Annotated { .. }
+                | Done::Exporting { .. } => None,
             })
             .unwrap();
         assert_eq!(stored.0, ItemId(item));
@@ -873,6 +960,19 @@ mod tests {
         let unreadable = message_of(Job::CopyFile(from));
         assert!(unreadable.starts_with("Could not copy"), "{unreadable}");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_gif_export_leaves_no_file() {
+        let dir = std::env::temp_dir().join(format!("cb-gif-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("not-a-video.mp4");
+        std::fs::write(&clip, b"nothing to decode").unwrap();
+        let mut seen = Vec::new();
+        assert!(export_gif(&clip, &mut |percent| seen.push(percent)).is_err());
+        assert!(!dir.join("not-a-video.gif").exists());
+        assert!(seen.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
