@@ -91,6 +91,11 @@ impl CameraBubble {
         }
         if response.hovered() {
             ui.ctx().set_cursor_icon(CursorIcon::Grab);
+            // Ctrl + scroll (or a pinch) resizes it.
+            let zoom = ui.input(|i| i.zoom_delta());
+            if zoom != 1.0 {
+                resize(ui.ctx(), zoom);
+            }
         }
         let center = area.center();
         let radius = area.width().min(area.height()) / 2.0 - 1.0;
@@ -109,6 +114,27 @@ impl CameraBubble {
         }
         painter.circle_stroke(center, radius - 2.0, Stroke::new(4.0, Color32::WHITE));
     }
+}
+
+/// Smallest and largest diameter the user can resize it to, in points.
+const MIN_SIZE: f32 = 80.0;
+const MAX_SIZE: f32 = 480.0;
+
+/// Scale the bubble's window by `zoom` around its centre, within the size limits.
+fn resize(ctx: &Context, zoom: f32) {
+    let Some((outer, inner)) = ctx.input(|i| {
+        let v = i.viewport();
+        v.outer_rect.zip(v.inner_rect)
+    }) else {
+        return;
+    };
+    let side = (inner.width() * zoom).clamp(MIN_SIZE, MAX_SIZE);
+    let grow = (side - inner.width()) / 2.0;
+    if grow == 0.0 {
+        return;
+    }
+    ctx.send_viewport_cmd(ViewportCommand::OuterPosition(outer.min - vec2(grow, grow)));
+    ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(side, side)));
 }
 
 /// The centre square of the picture, mirrored, as a disc: a triangle fan.

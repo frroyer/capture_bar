@@ -75,7 +75,7 @@ only if a spike shows a need.
   packet on the video's timeline by its capture time (re-synced past 20 ms of clock drift), into an AAC track of the same MP4. The recording
   never waits for the devices: the track is silent until they run. Webcam (US-5.4): the cam toggle starts the first camera (`windows_camera.rs`, a
   global behind `cb_platform::set_camera`) and shows a round, mirrored, draggable bubble window (`crates/ui/src/bubble.rs`), kept out of
-  captures; the app reports its rect with `set_camera_bubble`, and the recording loop draws the camera there on each frame with a D3D11
+  captures, resized with Ctrl+scroll and reopened where it was, at its size (eframe storage). It ignores WM_DPICHANGED while dragged (winit's resize looped at a monitor border) and rescales to the new monitor when dropped (`cb_platform::keep_pixel_size`); the app reports its rect with `set_camera_bubble`, and the recording loop draws the camera there on each frame with a D3D11
   shader (`windows_bubble.rs`). A separate camera file (a setting) is not done; while recording, Capture (bar button, Ctrl+Shift+S, 1/2/3/A) takes a still of what is recorded from the recording's own frames (US-5.5, `StreamHandle::still`): no second capture session, no overlay in the video. The US-1.2 CPU-path spike stays in
   `windows_spike`; results in `docs/spikes/us-1.2-windows.md`.
 - macOS and Linux backends are still **stubs**: captures appear in the buffer, then show

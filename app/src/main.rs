@@ -31,6 +31,7 @@ const INITIAL_SIZE: [f32; 2] = [900.0, 54.0];
 const PLACEMENTS_STORAGE_KEY: &str = "bar_placements";
 const MODE_STORAGE_KEY: &str = "capture_mode";
 const REGION_STORAGE_KEY: &str = "last_region";
+const BUBBLE_STORAGE_KEY: &str = "camera_bubble";
 /// Where the prefix and folder were kept before the settings file: read once, to move them.
 const PREFIX_STORAGE_KEY: &str = "file_prefix";
 const FOLDER_STORAGE_KEY: &str = "captures_dir";
@@ -372,6 +373,9 @@ struct App {
     recording: Option<ActiveRecording>,
     countdown: Option<Countdown>,
     camera: Camera,
+    /// Where the camera bubble last was and its size, global physical pixels: it
+    /// reopens there.
+    bubble_rect: Option<Rect>,
     /// Finished recordings, sent from their own threads.
     recorded: (mpsc::Sender<Recorded>, mpsc::Receiver<Recorded>),
     stills: (mpsc::Sender<Still>, mpsc::Receiver<Still>),
@@ -645,6 +649,9 @@ impl App {
             recording: None,
             countdown: None,
             camera: Camera::default(),
+            bubble_rect: cc
+                .storage
+                .and_then(|s| eframe::get_value(s, BUBBLE_STORAGE_KEY)),
             recorded: mpsc::channel(),
             stills: mpsc::channel(),
             repaint: cc.egui_ctx.clone(),
@@ -1763,9 +1770,17 @@ impl App {
             self.camera.bubble.set_picture(ctx, &frame);
             self.camera.seen = Some(seq);
         }
+        // Where it last was, if that is still on a screen.
+        let saved = self.bubble_rect.filter(|r| {
+            let centre = (r.x + r.width as i32 / 2, r.y + r.height as i32 / 2);
+            cb_core::display_at(centre, &self.displays).is_some()
+        });
         let start = *self.camera.start.get_or_insert_with(|| {
-            // The bottom-right corner of the screen under the cursor, clear of its edges,
-            // at that screen's scale.
+            if let Some(saved) = saved {
+                return saved;
+            }
+            // Else the bottom-right corner of the screen under the cursor, clear of its
+            // edges, at that screen's scale.
             let display = cb_platform::cursor_position()
                 .and_then(|cursor| cb_core::display_at(cursor, &self.displays))
                 .or(self.displays.first());
@@ -1790,10 +1805,20 @@ impl App {
             )
         });
         let rect = self.camera.bubble.show(ctx, start, self.camera.dressed);
+        if rect.is_some() {
+            self.bubble_rect = rect;
+        }
         // Recordings draw the camera only once there is a picture to draw.
         let running = state == cb_platform::CameraState::Running;
         cb_platform::set_camera_bubble(rect.filter(|_| running));
-        self.camera.dressed = self.camera.dressed || dress_window(&tr!("bubble-title"), true);
+        if !self.camera.dressed && dress_window(&tr!("bubble-title"), true) {
+            self.camera.dressed = true;
+            // Dragged across monitors of different scales, a resize could bounce it
+            // back and forth at the border.
+            if let Some(window) = cb_platform::own_window(&tr!("bubble-title")) {
+                let _ = cb_platform::keep_pixel_size(&window);
+            }
+        }
     }
 
     /// Draw the countdown, or start the recording once it is over. The countdown window
@@ -2286,6 +2311,7 @@ impl eframe::App for App {
         eframe::set_value(storage, PLACEMENTS_STORAGE_KEY, &self.placements);
         eframe::set_value(storage, MODE_STORAGE_KEY, &self.bar.mode);
         eframe::set_value(storage, REGION_STORAGE_KEY, &self.last_region);
+        eframe::set_value(storage, BUBBLE_STORAGE_KEY, &self.bubble_rect);
     }
 
     /// The bar has no quit button yet, so a killed process should lose little.

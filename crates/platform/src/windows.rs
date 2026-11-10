@@ -29,8 +29,8 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, HDC, HMONITOR,
-    MONITORINFO, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
+    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, MonitorFromWindow,
+    HDC, HMONITOR, MONITORINFO, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::Com::CoIncrementMTAUsage;
 use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -42,10 +42,11 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetCursorPos, GetShellWindow, GetSystemMetrics, GetWindowTextW,
+    EnumWindows, GetCursorPos, GetShellWindow, GetSystemMetrics, GetWindowRect, GetWindowTextW,
     GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SetWindowDisplayAffinity,
     SetWindowPos, SM_SWAPBUTTON, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, WDA_EXCLUDEFROMCAPTURE, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCPAINT,
+    SWP_NOZORDER, WDA_EXCLUDEFROMCAPTURE, WM_DPICHANGED, WM_EXITSIZEMOVE, WM_NCACTIVATE,
+    WM_NCCALCSIZE, WM_NCPAINT,
 };
 
 /// How long to wait for the first frame of a capture session.
@@ -158,6 +159,87 @@ unsafe extern "system" fn fill_window_proc(
     }
     // SAFETY: forwards the arguments the system passed in.
     unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+/// Answers WM_DPICHANGED itself, so winit does not resize the window when it
+/// crosses onto a monitor of another scale. While the window is dragged, that resize
+/// (around the cursor) can tip it back over the previous monitor, which resizes it
+/// again: dragged from a 125% monitor to a 100% one, the camera bubble pumped in size
+/// at the border and would not cross. Instead the window is rescaled once, around its
+/// centre, when the drag ends (WM_EXITSIZEMOVE). `dpi` is the DPI its size fits.
+unsafe extern "system" fn fixed_size_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    dpi: usize,
+) -> LRESULT {
+    match msg {
+        WM_DPICHANGED => return LRESULT(0),
+        WM_EXITSIZEMOVE => rescale_to_monitor(hwnd, dpi as u32),
+        _ => {}
+    }
+    // SAFETY: forwards the arguments the system passed in.
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+/// The effective DPI of the monitor that holds most of `hwnd`.
+fn window_dpi(hwnd: HWND) -> u32 {
+    let (mut x, mut y) = (96, 96);
+    // SAFETY: `hwnd` is live; out-pointers are valid; on failure 96 stays.
+    let _ = unsafe {
+        GetDpiForMonitor(
+            MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST),
+            MDT_EFFECTIVE_DPI,
+            &mut x,
+            &mut y,
+        )
+    };
+    x
+}
+
+/// Resize `hwnd`, whose size fits `old_dpi`, to its monitor's DPI, keeping its centre,
+/// and remember the new DPI.
+fn rescale_to_monitor(hwnd: HWND, old_dpi: u32) {
+    let new_dpi = window_dpi(hwnd);
+    let mut r = RECT::default();
+    // SAFETY: `hwnd` is live and `r` is a valid out-pointer.
+    if new_dpi == old_dpi || old_dpi == 0 || unsafe { GetWindowRect(hwnd, &mut r) }.is_err() {
+        return;
+    }
+    let scale = |v: i32| (v as f32 * new_dpi as f32 / old_dpi as f32).round() as i32;
+    let (w, h) = (scale(r.right - r.left), scale(r.bottom - r.top));
+    let (cx, cy) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+    // SAFETY: `hwnd` is live and owned by this thread (we are in its window procedure).
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            cx - w / 2,
+            cy - h / 2,
+            w,
+            h,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        let _ = SetWindowSubclass(hwnd, Some(fixed_size_proc), 2, new_dpi as usize);
+    }
+}
+
+/// Keeps the window from being resized while dragged onto a monitor of another scale;
+/// it is rescaled when dropped. Its content goes on drawing at the scale it had, filling
+/// the window. Call from the thread that owns the window.
+pub(crate) fn keep_pixel_size(
+    window: &impl raw_window_handle::HasWindowHandle,
+) -> CaptureResult<()> {
+    let hwnd = hwnd_of(window)?;
+    let dpi = window_dpi(hwnd) as usize;
+    // SAFETY: `hwnd` comes from a live window owned by this thread.
+    if unsafe { SetWindowSubclass(hwnd, Some(fixed_size_proc), 2, dpi) }.as_bool() {
+        Ok(())
+    } else {
+        Err(CaptureError::Platform("SetWindowSubclass failed".into()))
+    }
 }
 
 /// Turns off the drop shadow egui-winit requests for borderless windows, the

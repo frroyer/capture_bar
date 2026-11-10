@@ -316,6 +316,22 @@ pub fn remove_window_frame(
     }
 }
 
+/// Keep a window's size in pixels when it moves onto a monitor of another scale,
+/// instead of the OS resizing it mid-drag. Windows only; elsewhere a no-op.
+pub fn keep_pixel_size(
+    window: &impl raw_window_handle::HasWindowHandle,
+) -> cb_core::CaptureResult<()> {
+    #[cfg(windows)]
+    {
+        windows::keep_pixel_size(window)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        Ok(())
+    }
+}
+
 /// The OS interface font as `(regular, semibold)` file bytes, when it can be
 /// loaded as a file. Not bundled: NFR-15 does not allow the OFL fonts.
 pub fn system_ui_fonts() -> Option<(Vec<u8>, Vec<u8>)> {
