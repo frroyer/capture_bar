@@ -251,8 +251,8 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: a new binding is applied without restart; a binding already taken by the OS or another app is flagged.
 
-- [ ] Shortcut recorder UI in settings
-- [ ] Registration-failure detection → conflict warning
+- [x] Shortcut recorder UI in settings — a Global shortcuts section: click a binding, press the new keys (Ctrl, Alt or ⌘ required, except F1–F24); Esc keeps the old keys, Backspace removes the shortcut, Reset all goes back to M3. Global shortcuts are off while recording, so the keys reach the window. Only changed bindings go to `capture-bar.toml` (`[shortcuts]`); tooltips show the bindings as set
+- [x] Registration-failure detection → conflict warning — a binding the OS refuses is marked ⚠ with "taken by the system or another app", as are two actions on the same keys and unreadable keys in a hand-edited file; a toast says so at launch. Windows verified (test with a second window holding the keys); macOS and X11 not run
 
 ### E4 · Screenshot capture
 

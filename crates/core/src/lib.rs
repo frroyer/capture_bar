@@ -714,6 +714,92 @@ pub struct Settings {
     pub countdown_secs: u32,
     /// The language of the interface (NFR-14).
     pub language: Language,
+    /// Global shortcuts the user changed (US-3.2), as `Ctrl+Shift+S`. An empty string
+    /// turns one off; the others keep their default.
+    pub shortcuts: std::collections::BTreeMap<Shortcut, String>,
+}
+
+/// An action with a global shortcut (FR-28, mockup M3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Shortcut {
+    ToggleBar,
+    Capture,
+    Record,
+    Pause,
+    Region,
+    Window,
+    Screen,
+    Repeat,
+    Buffer,
+    Copy,
+    Prefix,
+}
+
+impl Shortcut {
+    pub const ALL: [Shortcut; 11] = [
+        Shortcut::Capture,
+        Shortcut::Record,
+        Shortcut::Pause,
+        Shortcut::Region,
+        Shortcut::Window,
+        Shortcut::Screen,
+        Shortcut::Repeat,
+        Shortcut::Buffer,
+        Shortcut::Copy,
+        Shortcut::Prefix,
+        Shortcut::ToggleBar,
+    ];
+
+    pub fn command(self) -> Command {
+        match self {
+            Shortcut::ToggleBar => Command::ToggleBar,
+            Shortcut::Capture => Command::Capture,
+            Shortcut::Record => Command::ToggleRecording,
+            Shortcut::Pause => Command::TogglePause,
+            Shortcut::Region => Command::CaptureWith(CaptureMode::Region),
+            Shortcut::Window => Command::CaptureWith(CaptureMode::Window),
+            Shortcut::Screen => Command::CaptureWith(CaptureMode::Screen),
+            Shortcut::Repeat => Command::RepeatLastRegion,
+            Shortcut::Buffer => Command::ToggleBuffer,
+            Shortcut::Copy => Command::CopyNewest,
+            Shortcut::Prefix => Command::EditPrefix,
+        }
+    }
+
+    /// The M3 binding: ⌥⇧ on macOS, Ctrl+Shift elsewhere.
+    pub fn default_keys(self) -> String {
+        let key = match self {
+            Shortcut::ToggleBar => "Space",
+            Shortcut::Capture => "S",
+            Shortcut::Record => "R",
+            Shortcut::Pause => "P",
+            Shortcut::Region => "1",
+            Shortcut::Window => "2",
+            Shortcut::Screen => "3",
+            Shortcut::Repeat => "A",
+            Shortcut::Buffer => "B",
+            Shortcut::Copy => "C",
+            Shortcut::Prefix => "L",
+        };
+        let mods = if cfg!(target_os = "macos") {
+            "Alt+Shift"
+        } else {
+            "Ctrl+Shift"
+        };
+        format!("{mods}+{key}")
+    }
+}
+
+/// Why a shortcut is not in effect (US-3.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutConflict {
+    /// The OS or another app holds these keys.
+    Taken,
+    /// Another action of the bar has the same keys, and keeps them.
+    SameAs(Shortcut),
+    /// Not keys the OS can listen for, as a hand-edited file may hold.
+    Invalid,
 }
 
 /// The language of the interface (NFR-14).
@@ -754,6 +840,23 @@ impl Settings {
         self
     }
 
+    /// The keys of `shortcut` as set now; empty when it is off.
+    pub fn keys(&self, shortcut: Shortcut) -> String {
+        self.shortcuts
+            .get(&shortcut)
+            .cloned()
+            .unwrap_or_else(|| shortcut.default_keys())
+    }
+
+    /// Bind `shortcut` to `keys`, keeping only what differs from the default.
+    pub fn set_keys(&mut self, shortcut: Shortcut, keys: String) {
+        if keys == shortcut.default_keys() {
+            self.shortcuts.remove(&shortcut);
+        } else {
+            self.shortcuts.insert(shortcut, keys);
+        }
+    }
+
     pub fn retention(&self) -> std::time::Duration {
         std::time::Duration::from_secs(u64::from(self.retention_days) * 24 * 60 * 60)
     }
@@ -771,6 +874,7 @@ impl Default for Settings {
             microphone: true,
             countdown_secs: 3,
             language: Language::Auto,
+            shortcuts: Default::default(),
         }
     }
 }

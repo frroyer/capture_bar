@@ -3,6 +3,7 @@
 
 use crate::place::{keep_at, placed};
 use crate::{palette, shortcut, tr};
+use cb_core::Shortcut;
 use egui::{
     pos2, vec2, Align2, CentralPanel, Color32, Context, FontFamily, FontId, Frame, Shape, Stroke,
     ViewportBuilder, ViewportCommand, ViewportId,
@@ -92,7 +93,7 @@ fn draw(ui: &mut egui::Ui, left: f32, total: f32) {
     );
     // On a dark pill: the screen behind may be white.
     let hint = p.layout_no_wrap(
-        tr!("countdown-cancel", key = shortcut("R")),
+        tr!("countdown-cancel", key = shortcut(Shortcut::Record)),
         FontId::new(13.0, FontFamily::Proportional),
         Color32::WHITE,
     );
