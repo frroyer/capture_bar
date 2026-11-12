@@ -16,6 +16,7 @@ use egui::{
 };
 
 use crate::icons::Icon;
+use crate::place::{centred_on, Opening};
 use crate::{chip, palette, ChipStyle, Piece, H_IN_GROUP, SEMIBOLD};
 use crate::{i18n, tr};
 
@@ -246,6 +247,8 @@ pub struct Editor {
     toolbar_width: f32,
     /// The line or arrow drawn or clicked last, with its handles to bend it.
     bending: Option<Bending>,
+    /// Where the window opens: on the bar's monitor.
+    opening: Option<Opening>,
 }
 
 impl Editor {
@@ -281,6 +284,7 @@ impl Editor {
             view: None,
             toolbar_width: MIN_WIDTH,
             bending: None,
+            opening: None,
         }
     }
 
@@ -299,26 +303,44 @@ impl Editor {
         self.focused = false;
     }
 
-    /// Draw it in its own OS window. Call each frame until it returns a result.
-    pub fn show(&mut self, ctx: &Context) -> Option<EditorResult> {
+    /// Draw it in its own OS window, opened on `monitor` (the bar's). Call each frame
+    /// until it returns a result.
+    pub fn show(
+        &mut self,
+        ctx: &Context,
+        monitor: Option<&cb_core::DisplayInfo>,
+    ) -> Option<EditorResult> {
         let ppp = ctx.pixels_per_point();
         // One image pixel per screen pixel when the screen has the room.
         let image = vec2(self.base.width as f32, self.base.height as f32) / ppp;
         let wanted = image + vec2(2.0 * CANVAS_PAD, 2.0 * CANVAS_PAD + TOOLBAR_HEIGHT);
-        let monitor = ctx
+        let screen = ctx
             .input(|i| i.viewport().monitor_size)
             .unwrap_or(vec2(1280.0, 800.0));
         let min = vec2(self.toolbar_width, 280.0);
-        let size = wanted.min(monitor * 0.85).max(vec2(min.x, 360.0));
+        let size = wanted.min(screen * 0.85).max(vec2(min.x, 360.0));
+        let opening = *self.opening.get_or_insert_with(|| {
+            Opening::at(monitor.map(|m| {
+                // One image pixel per screen pixel there, as above.
+                let image = vec2(self.base.width as f32, self.base.height as f32) / m.scale_factor;
+                let wanted = image + vec2(2.0 * CANVAS_PAD, 2.0 * CANVAS_PAD + TOOLBAR_HEIGHT);
+                centred_on(m, wanted.max(vec2(min.x, 360.0)))
+            }))
+        });
         let builder = ViewportBuilder::default()
             .with_title(&self.title)
-            .with_inner_size(size)
             .with_min_inner_size(min)
             .with_active(true);
+        let builder = opening.builder(builder, ctx, size);
         ctx.show_viewport_immediate(
             ViewportId::from_hash_of(("annotate", self.item.0)),
             builder,
-            |ui, _class| self.ui(ui),
+            |ui, _class| {
+                if let Some(opening) = &mut self.opening {
+                    opening.settle(ui.ctx());
+                }
+                self.ui(ui)
+            },
         )
     }
 

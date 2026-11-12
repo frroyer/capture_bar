@@ -10,6 +10,7 @@ use egui::{
     ViewportId,
 };
 
+use crate::place::{centred_on, Opening};
 use crate::tr;
 use crate::{chip, palette, ChipStyle, Piece};
 
@@ -44,6 +45,8 @@ pub struct Peek {
     /// From the window's centre to the picture's, in points.
     offset: Vec2,
     focused: bool,
+    /// Where the window opens: on the bar's monitor.
+    opening: Option<Opening>,
 }
 
 impl Peek {
@@ -58,6 +61,7 @@ impl Peek {
             zoom: None,
             offset: Vec2::ZERO,
             focused: false,
+            opening: None,
         }
     }
 
@@ -70,6 +74,7 @@ impl Peek {
     pub fn show_item(&mut self, item: ItemId, title: impl Into<String>, video: bool) {
         *self = Self {
             focused: self.focused,
+            opening: self.opening,
             ..Self::new(item, title, video)
         };
     }
@@ -84,22 +89,35 @@ impl Peek {
     }
 
     /// Draw it in its own OS window. `thumbnail` stands in until the image is read;
-    /// `position` is the capture's place in the buffer, from 1, and the count.
+    /// `position` is the capture's place in the buffer, from 1, and the count. It opens
+    /// on `monitor`, the bar's.
     pub fn show(
         &mut self,
         ctx: &Context,
+        monitor: Option<&cb_core::DisplayInfo>,
         thumbnail: Option<&TextureHandle>,
         position: (usize, usize),
     ) -> Option<PeekAction> {
-        let monitor = ctx
+        let fallback = ctx
             .input(|i| i.viewport().monitor_size)
-            .unwrap_or(vec2(1280.0, 800.0));
+            .unwrap_or(vec2(1280.0, 800.0))
+            * 0.75;
+        let opening = *self.opening.get_or_insert_with(|| {
+            Opening::at(monitor.map(|m| {
+                let points =
+                    vec2(m.work_area.width as f32, m.work_area.height as f32) / m.scale_factor;
+                centred_on(m, points * 0.75)
+            }))
+        });
         let builder = ViewportBuilder::default()
             .with_title(&self.title)
-            .with_inner_size(monitor * 0.75)
             .with_min_inner_size(vec2(360.0, 240.0))
             .with_active(true);
+        let builder = opening.builder(builder, ctx, fallback);
         ctx.show_viewport_immediate(ViewportId::from_hash_of("peek"), builder, |ui, _| {
+            if let Some(opening) = &mut self.opening {
+                opening.settle(ui.ctx());
+            }
             self.ui(ui, thumbnail, position)
         })
     }

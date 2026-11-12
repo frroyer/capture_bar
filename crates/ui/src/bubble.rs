@@ -27,7 +27,8 @@ impl CameraBubble {
     /// Show a new camera picture from now on.
     pub fn set_picture(&mut self, ctx: &Context, frame: &cb_core::Frame) {
         let size = [frame.width as usize, frame.height as usize];
-        let image = ColorImage::from_rgba_unmultiplied(size, &frame.rgba);
+        // Opaque: premultiplied is the same, and skips the alpha maths per pixel.
+        let image = ColorImage::from_rgba_premultiplied(size, &frame.rgba);
         self.aspect = frame.width as f32 / frame.height.max(1) as f32;
         match &mut self.texture {
             Some(texture) => texture.set(image, TextureOptions::LINEAR),
