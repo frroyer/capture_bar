@@ -10,6 +10,7 @@ use egui::{
     ViewportBuilder, ViewportCommand, ViewportId,
 };
 
+use crate::place::{centred_on, Opening};
 use crate::{keys_label, palette, shortcut, tr};
 use cb_core::Language;
 
@@ -30,6 +31,8 @@ pub struct SettingsWindow {
     focused: bool,
     /// The shortcut waiting for its new keys (US-3.2).
     recording: Option<Shortcut>,
+    /// Where the window opens: on the bar's monitor.
+    opening: Option<Opening>,
 }
 
 /// What a key press does to the shortcut being recorded.
@@ -149,24 +152,36 @@ impl SettingsWindow {
 
     /// Draw it in its own OS window, editing `settings` in place. `file` is where they are
     /// kept, shown at the bottom. `autostart` is whether the bar starts at login (US-8.3).
-    /// `conflicts` are the shortcuts not in effect, and why.
+    /// `conflicts` are the shortcuts not in effect, and why. It opens on `monitor`, the
+    /// bar's.
+    #[allow(clippy::too_many_arguments)] // what the window shows and edits
     pub fn show(
         &mut self,
         ctx: &Context,
+        monitor: Option<&cb_core::DisplayInfo>,
         settings: &mut Settings,
         file: &Path,
         autostart: &mut bool,
         conflicts: &BTreeMap<Shortcut, ShortcutConflict>,
     ) -> SettingsOutput {
+        let size = vec2(560.0, 640.0);
+        let opening = *self
+            .opening
+            .get_or_insert_with(|| Opening::at(monitor.map(|m| centred_on(m, size))));
         let builder = ViewportBuilder::default()
             .with_title(tr!("settings-title"))
-            .with_inner_size(vec2(560.0, 640.0))
             .with_resizable(false)
             .with_active(true);
+        let builder = opening.builder(builder, ctx, size);
         ctx.show_viewport_immediate(
             ViewportId::from_hash_of("settings"),
             builder,
-            |ui, _class| self.ui(ui, settings, file, autostart, conflicts),
+            |ui, _class| {
+                if let Some(opening) = &mut self.opening {
+                    opening.settle(ui.ctx());
+                }
+                self.ui(ui, settings, file, autostart, conflicts)
+            },
         )
     }
 

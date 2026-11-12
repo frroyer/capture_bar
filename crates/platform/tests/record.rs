@@ -65,7 +65,7 @@ fn records_the_camera_bubble() {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     // A camera's first pictures are black while it sets its exposure.
     let lit = |frame: &cb_core::Frame| frame.rgba.as_chunks::<4>().0.iter().any(|p| p[0] > 60);
-    while !cb_platform::camera_frame(None).is_some_and(|(_, frame)| lit(&frame)) {
+    while !cb_platform::camera_frame(None, 1).is_some_and(|(_, frame)| lit(&frame)) {
         assert!(
             std::time::Instant::now() < deadline,
             "no lit camera picture"

@@ -228,30 +228,45 @@ pub fn camera_state() -> CameraState {
     CameraState::Off
 }
 
-/// The newest webcam picture as RGBA with its number, when newer than picture `seen`.
-pub fn camera_frame(seen: Option<u64>) -> Option<(u64, cb_core::Frame)> {
+/// The newest webcam picture as opaque RGBA with its number, when newer than picture
+/// `seen`, scaled down by a whole step to no less than `min_height` pixels high: the
+/// bubble shows it small, and each pixel less is work less on the UI thread.
+pub fn camera_frame(seen: Option<u64>, min_height: u32) -> Option<(u64, cb_core::Frame)> {
     #[cfg(windows)]
     {
         let frame = windows_camera::latest().filter(|f| Some(f.seq) != seen)?;
-        let mut rgba = frame.bgra.clone();
-        for pixel in rgba.as_chunks_mut::<4>().0 {
-            pixel.swap(0, 2);
-            pixel[3] = 255;
-        }
         Some((
             frame.seq,
-            cb_core::Frame {
-                width: frame.width,
-                height: frame.height,
-                rgba,
-                captured_at: std::time::SystemTime::now(),
-            },
+            shrink_bgra(&frame.bgra, frame.width, frame.height, min_height),
         ))
     }
     #[cfg(not(windows))]
     {
-        let _ = seen;
+        let _ = (seen, min_height);
         None
+    }
+}
+
+/// `bgra` as opaque RGBA, every `step`th pixel of every `step`th row, `step` as large
+/// as keeps it `min_height` high.
+// chisle: nearest pixel, not averaged; the bubble draws it smoothed anyway.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn shrink_bgra(bgra: &[u8], width: u32, height: u32, min_height: u32) -> cb_core::Frame {
+    let step = (height / min_height.max(1)).max(1) as usize;
+    let (w, h) = (width as usize / step, height as usize / step);
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        let row = &bgra[y * step * width as usize * 4..];
+        for x in 0..w {
+            let p = &row[x * step * 4..x * step * 4 + 4];
+            rgba.extend_from_slice(&[p[2], p[1], p[0], 255]);
+        }
+    }
+    cb_core::Frame {
+        width: w as u32,
+        height: h as u32,
+        rgba,
+        captured_at: std::time::SystemTime::now(),
     }
 }
 
@@ -495,5 +510,23 @@ pub fn backend_name() -> &'static str {
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
         "unsupported"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn camera_pictures_shrink_by_whole_steps_to_rgba() {
+        // 4×2 BGRA: each pixel's blue is its index.
+        let bgra: Vec<u8> = (0..8u8).flat_map(|i| [i, 10, 20, 0]).collect();
+        let small = super::shrink_bgra(&bgra, 4, 2, 1);
+        assert_eq!((small.width, small.height), (2, 1));
+        assert_eq!(small.rgba, [20, 10, 0, 255, 20, 10, 2, 255]);
+        let same = super::shrink_bgra(&bgra, 4, 2, 360);
+        assert_eq!(
+            (same.width, same.height),
+            (4, 2),
+            "never bigger, never skipped"
+        );
     }
 }

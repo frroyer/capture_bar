@@ -63,9 +63,98 @@ pub(crate) fn keep_at(ctx: &Context, rect: Rect) -> bool {
     there
 }
 
+/// `size` points at the scale of `monitor`, at most 90% of its work area, centred on it,
+/// in global physical pixels.
+pub fn centred_on(monitor: &cb_core::DisplayInfo, size: Vec2) -> Rect {
+    let area = monitor.work_area;
+    let width = (size.x * monitor.scale_factor).min(area.width as f32 * 0.9) as u32;
+    let height = (size.y * monitor.scale_factor).min(area.height as f32 * 0.9) as u32;
+    Rect {
+        x: area.x + (area.width.saturating_sub(width) / 2) as i32,
+        y: area.y + (area.height.saturating_sub(height) / 2) as i32,
+        width,
+        height,
+    }
+}
+
+/// Frames a window may take to get in place before it is shown wherever it is.
+const SETTLE_TRIES: u8 = 30;
+
+/// Opening a window the user can then move and resize (Quick Look, Settings, the
+/// editor) on a given monitor: it stays hidden until it is there, then is left alone.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Opening {
+    rect: Option<Rect>,
+    tries: u8,
+    /// The OS places it: it gets its size in the bar's points.
+    unplaced: bool,
+}
+
+impl Opening {
+    /// At `rect`, in global physical pixels; `None` lets the OS place it.
+    pub fn at(rect: Option<Rect>) -> Self {
+        Self {
+            rect,
+            tries: 0,
+            unplaced: rect.is_none(),
+        }
+    }
+
+    /// The builder of each frame: placed and hidden until settled, then as given, its
+    /// size left to the user. `size` (points) only serves when the OS places it.
+    pub(crate) fn builder(
+        &self,
+        builder: ViewportBuilder,
+        ctx: &Context,
+        size: Vec2,
+    ) -> ViewportBuilder {
+        match self.rect {
+            Some(rect) => placed(builder, ctx, rect, false),
+            None if self.unplaced => builder.with_inner_size(size).with_visible(true),
+            None => builder.with_visible(true),
+        }
+    }
+
+    /// Inside the viewport, each frame: moves it into place, then shows and focuses it.
+    pub(crate) fn settle(&mut self, ctx: &Context) {
+        let Some(rect) = self.rect else {
+            return;
+        };
+        self.tries += 1;
+        if keep_at(ctx, rect) || self.tries >= SETTLE_TRIES {
+            self.rect = None;
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+        }
+        ctx.request_repaint();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_opens_centred_on_its_monitor_at_its_scale() {
+        let rect = |x, y, width, height| Rect {
+            x,
+            y,
+            width,
+            height,
+        };
+        let monitor = cb_core::DisplayInfo {
+            id: cb_core::DisplayId(2),
+            name: String::new(),
+            bounds: rect(-2560, 0, 2560, 1440),
+            work_area: rect(-2560, 0, 2560, 1400),
+            scale_factor: 1.5,
+        };
+        assert_eq!(
+            centred_on(&monitor, vec2(560.0, 640.0)),
+            rect(-1700, 220, 840, 960)
+        );
+        let big = centred_on(&monitor, vec2(4000.0, 4000.0));
+        assert_eq!((big.width, big.height), (2304, 1260), "kept on the monitor");
+    }
 
     #[test]
     fn points_convert_back_to_the_same_pixel_at_fractional_scales() {

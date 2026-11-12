@@ -1336,6 +1336,7 @@ impl App {
     }
 
     fn show_settings(&mut self, ctx: &egui::Context) {
+        let monitor = self.bar_display();
         let before = self.settings();
         let mut settings = before.clone();
         let Some(window) = &mut self.settings_window else {
@@ -1344,6 +1345,7 @@ impl App {
         let mut autostart = self.autostart;
         let out = window.show(
             ctx,
+            monitor.as_ref(),
             &mut settings,
             &self.settings_file,
             &mut autostart,
@@ -1490,7 +1492,10 @@ impl App {
         }
         let thumbnail = self.thumbnails.get(&peek.item());
         let item = peek.item();
-        match peek.show(ctx, thumbnail, (index + 1, images.len())) {
+        let monitor = self
+            .bar_pos
+            .and_then(|at| cb_core::display_at(at, &self.displays));
+        match peek.show(ctx, monitor, thumbnail, (index + 1, images.len())) {
             Some(PeekAction::Close) => self.close_peek(),
             Some(PeekAction::Previous) if index > 0 => self.peek(ctx, images[index - 1]),
             Some(PeekAction::Next) if index + 1 < images.len() => self.peek(ctx, images[index + 1]),
@@ -1515,10 +1520,11 @@ impl App {
     }
 
     fn show_editor(&mut self, ctx: &egui::Context) {
+        let monitor = self.bar_display();
         let Some(editor) = &mut self.editor else {
             return;
         };
-        let Some(result) = editor.show(ctx) else {
+        let Some(result) = editor.show(ctx, monitor.as_ref()) else {
             return;
         };
         let editor = self.editor.take().expect("just shown");
@@ -1892,7 +1898,9 @@ impl App {
             self.flash(tr!("toast-camera-failed", error = error));
             return;
         }
-        if let Some((seq, frame)) = cb_platform::camera_frame(self.camera.seen) {
+        // No bigger than the bubble shows it, whatever the camera gives.
+        let high = self.bubble_rect.map_or(360, |r| r.height);
+        if let Some((seq, frame)) = cb_platform::camera_frame(self.camera.seen, high) {
             self.camera.bubble.set_picture(ctx, &frame);
             self.camera.seen = Some(seq);
         }
@@ -2380,6 +2388,12 @@ impl App {
         if !self.dragging {
             self.bar.tooltip_side = self.roomy_side(ppp);
         }
+    }
+
+    /// The monitor the bar is on, where its windows open.
+    fn bar_display(&self) -> Option<cb_core::DisplayInfo> {
+        let at = self.bar_pos?;
+        cb_core::display_at(at, &self.displays).cloned()
     }
 
     /// Rect of the bar itself at `position`, without what opens beside it.
