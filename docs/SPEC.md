@@ -1,13 +1,13 @@
-# Capture Bar — Product Specification & Backlog
+# Takebox — Product Specification & Backlog
 
-Copied from the Claude Doc "Capture Bar — Product Specification & Backlog" (rev 9), Nov 6, 2026.
+Copied from the Claude Doc "Takebox — Product Specification & Backlog" (rev 9), Nov 6, 2026.
 That doc's Mockup link and the architecture diagram did not carry over. Tick tasks here as they are done.
 
 ## 1. Overview
 
-Capture Bar is a single, self-contained executable for macOS, Windows and Linux: one permanent floating bar, driven by global shortcuts, that captures screenshots and recordings into a non-blocking buffer. The user never installs a runtime, a framework or a codec pack.
+Takebox is a single, self-contained executable for macOS, Windows and Linux: one permanent floating bar, driven by global shortcuts, that captures screenshots and recordings into a non-blocking buffer. The user never installs a runtime, a framework or a codec pack.
 
-Mockup: Capture Bar design canvas. Every Epic and User Story below cites the artboard it implements:
+Mockup: Takebox design canvas. Every Epic and User Story below cites the artboard it implements:
 
 | Ref | Artboard | Shows |
 | --- | --- | --- |
@@ -71,8 +71,8 @@ Why Rust wins for this tool:
 
 ### Deliverables per OS
 
-- Windows: one signed CaptureBar.exe (portable, no installer needed). An optional MSIX/winget package comes later.
-- macOS: one signed and notarized universal Capture Bar.app, delivered as a .dmg. macOS only grants Screen Recording permission to a bundled, signed app, so a bare binary is not viable there.
+- Windows: one signed Takebox.exe (portable, no installer needed). An optional MSIX/winget package comes later.
+- macOS: one signed and notarized universal Takebox.app, delivered as a .dmg. macOS only grants Screen Recording permission to a bundled, signed app, so a bare binary is not viable there.
 - Linux: one AppImage (x86_64, aarch64), plus a raw binary for advanced users.
 
 ## 3. Functional specification
@@ -251,7 +251,7 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 - AC: a new binding is applied without restart; a binding already taken by the OS or another app is flagged.
 
-- [x] Shortcut recorder UI in settings — a Global shortcuts section: click a binding, press the new keys (Ctrl, Alt or ⌘ required, except F1–F24); Esc keeps the old keys, Backspace removes the shortcut, Reset all goes back to M3. Global shortcuts are off while recording, so the keys reach the window. Only changed bindings go to `capture-bar.toml` (`[shortcuts]`); tooltips show the bindings as set
+- [x] Shortcut recorder UI in settings — a Global shortcuts section: click a binding, press the new keys (Ctrl, Alt or ⌘ required, except F1–F24); Esc keeps the old keys, Backspace removes the shortcut, Reset all goes back to M3. Global shortcuts are off while recording, so the keys reach the window. Only changed bindings go to `takebox.toml` (`[shortcuts]`); tooltips show the bindings as set
 - [x] Registration-failure detection → conflict warning — a binding the OS refuses is marked ⚠ with "taken by the system or another app", as are two actions on the same keys and unreadable keys in a hand-edited file; a toast says so at launch. Windows verified (test with a second window holding the keys); macOS and X11 not run
 
 ### E4 · Screenshot capture
@@ -476,7 +476,7 @@ The backlog has 9 Epics and 35 User Stories. Each story names its mockup artboar
 
 ### Open questions
 
-- [ ] Final product name ("Capture Bar" is a placeholder).
+- [ ] Final product name ("Takebox" is a placeholder).
 - [ ] Software video fallback: OpenH264 on demand vs. AV1/VP9 WebM?
 - [ ] Default retention: 7 days, or a size cap (e.g. 5 GB)?
 - [ ] Open source or proprietary licence for the app itself?

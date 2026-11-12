@@ -163,7 +163,7 @@ pub(crate) fn warm_up() {
         && crate::windows::resolve_display(cb_core::DisplayId(0))
             .is_ok_and(|monitor| crate::windows::capture_item(monitor).is_ok());
     // Loading the hardware encoder is the slowest part: open one on a scratch file.
-    let scratch = std::env::temp_dir().join(format!("capture-bar-{}.mp4", std::process::id()));
+    let scratch = std::env::temp_dir().join(format!("takebox-{}.mp4", std::process::id()));
     let encoder = crate::windows::shared_gpu()
         .and_then(|gpu| Mp4Writer::new(&scratch, 64, 64, 30, Some(&gpu.device), true))
         .map(|mp4| mp4.encoder_name());
@@ -386,20 +386,27 @@ fn record(
             })
             .and_then(|screen| {
                 let out = match crate::windows_camera::bubble() {
-                    Some((bubble, picture)) => {
+                    Some((bubble, shape, picture)) => {
                         let out = copy_area(&capture, &screen, &whole(width, height))?;
                         let painter = match &mut bubble_painter {
                             Some(painter) => painter,
                             None => bubble_painter
                                 .insert(BubblePainter::new(&capture.device).map_err(platform_err)?),
                         };
-                        let place = (
-                            bubble.x - area_origin.0,
-                            bubble.y - area_origin.1,
-                            bubble.width,
-                        );
+                        let place = cb_core::Rect {
+                            x: bubble.x - area_origin.0,
+                            y: bubble.y - area_origin.1,
+                            ..bubble
+                        };
                         painter
-                            .paint(&capture.device, &capture.context, &out, place, &picture)
+                            .paint(
+                                &capture.device,
+                                &capture.context,
+                                &out,
+                                place,
+                                shape.corner(),
+                                &picture,
+                            )
                             .map_err(platform_err)?;
                         out
                     }

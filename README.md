@@ -1,4 +1,4 @@
-# Capture Bar
+# Takebox
 
 One permanent, movable bar for screenshots and screen recordings — triggered by a
 global shortcut, with a buffer so you can keep capturing without saving each shot first.
@@ -18,8 +18,8 @@ Requirements for developers only (end users need nothing):
 - Linux (Debian/Ubuntu): `sudo apt install build-essential pkg-config libx11-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libxdo-dev`
 
 ```
-cargo run -p capture-bar
-cargo build -p capture-bar --release   # -> target/release/capture-bar(.exe)
+cargo run -p takebox
+cargo build -p takebox --release   # -> target/release/takebox(.exe)
 ```
 
 ## Default shortcuts

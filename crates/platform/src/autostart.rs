@@ -3,7 +3,7 @@
 //!
 //! - Windows: a value in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 //! - macOS: `~/Library/LaunchAgents/<LABEL>.plist` with `RunAtLoad`.
-//! - Linux: `$XDG_CONFIG_HOME/autostart/capture-bar.desktop` (XDG autostart).
+//! - Linux: `$XDG_CONFIG_HOME/autostart/takebox.desktop` (XDG autostart).
 
 use std::io;
 use std::path::PathBuf;
@@ -28,7 +28,9 @@ mod imp {
     };
 
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-    const VALUE: &str = "Capture Bar";
+    const VALUE: &str = "Takebox";
+    /// The value written before the app was renamed.
+    const LEGACY_VALUE: &str = "Capture Bar";
 
     fn check(e: WIN32_ERROR) -> io::Result<()> {
         if e.is_ok() {
@@ -93,6 +95,14 @@ mod imp {
             .transpose()?;
         set(RUN_KEY, VALUE, command.as_deref())
     }
+
+    pub fn take_legacy() -> io::Result<bool> {
+        if !is_set(RUN_KEY, LEGACY_VALUE) {
+            return Ok(false);
+        }
+        set(RUN_KEY, LEGACY_VALUE, None)?;
+        Ok(true)
+    }
 }
 
 #[cfg(not(windows))]
@@ -101,7 +111,7 @@ mod imp {
     use std::path::Path;
 
     #[cfg(target_os = "macos")]
-    const LABEL: &str = "app.capturebar.CaptureBar";
+    const LABEL: &str = "app.takebox.Takebox";
 
     fn home() -> io::Result<PathBuf> {
         std::env::var_os("HOME")
@@ -116,13 +126,39 @@ mod imp {
             .join(format!("{LABEL}.plist")))
     }
 
+    /// The entry written before the app was renamed.
+    #[cfg(target_os = "macos")]
+    fn legacy_entry() -> io::Result<PathBuf> {
+        Ok(home()?.join("Library/LaunchAgents/app.capturebar.CaptureBar.plist"))
+    }
+
     #[cfg(not(target_os = "macos"))]
-    fn entry() -> io::Result<PathBuf> {
+    fn autostart_dir() -> io::Result<PathBuf> {
         let config = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
             Some(dir) => PathBuf::from(dir),
             None => home()?.join(".config"),
         };
-        Ok(config.join("autostart").join("capture-bar.desktop"))
+        Ok(config.join("autostart"))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn entry() -> io::Result<PathBuf> {
+        Ok(autostart_dir()?.join("takebox.desktop"))
+    }
+
+    /// The entry written before the app was renamed.
+    #[cfg(not(target_os = "macos"))]
+    fn legacy_entry() -> io::Result<PathBuf> {
+        Ok(autostart_dir()?.join("capture-bar.desktop"))
+    }
+
+    pub fn take_legacy() -> io::Result<bool> {
+        let legacy = legacy_entry()?;
+        if !legacy.is_file() {
+            return Ok(false);
+        }
+        std::fs::remove_file(legacy)?;
+        Ok(true)
     }
 
     #[cfg(target_os = "macos")]
@@ -164,7 +200,7 @@ mod imp {
             quoted.push(c);
         }
         format!(
-            "[Desktop Entry]\nType=Application\nName=Capture Bar\nExec=\"{quoted}\"\nX-GNOME-Autostart-enabled=true\n"
+            "[Desktop Entry]\nType=Application\nName=Takebox\nExec=\"{quoted}\"\nX-GNOME-Autostart-enabled=true\n"
         )
     }
 
@@ -196,15 +232,24 @@ pub fn set_enabled(on: bool) -> io::Result<()> {
     imp::set_enabled(on)
 }
 
+/// Replace an entry left under the app's former name (Capture Bar) with the current one,
+/// so the login setting survives the rename. Does nothing when there is none.
+pub fn migrate_legacy() -> io::Result<()> {
+    if imp::take_legacy()? {
+        imp::set_enabled(true)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
     #[test]
     fn a_registry_value_is_set_and_removed() {
         use super::imp::{is_set, set};
-        let key = r"Software\Capture Bar tests";
+        let key = r"Software\Takebox tests";
         let value = format!("autostart {}", std::process::id());
-        set(key, &value, Some(r#""C:\a b\capture-bar.exe""#)).unwrap();
+        set(key, &value, Some(r#""C:\a b\takebox.exe""#)).unwrap();
         assert!(is_set(key, &value));
         set(key, &value, None).unwrap();
         assert!(!is_set(key, &value));
@@ -217,8 +262,8 @@ mod tests {
     #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn the_desktop_entry_quotes_the_path() {
-        let entry = super::imp::contents(std::path::Path::new("/home/a b/$x/capture-bar"));
-        assert!(entry.contains("Exec=\"/home/a b/\\$x/capture-bar\"\n"));
+        let entry = super::imp::contents(std::path::Path::new("/home/a b/$x/takebox"));
+        assert!(entry.contains("Exec=\"/home/a b/\\$x/takebox\"\n"));
     }
 
     #[cfg(target_os = "macos")]

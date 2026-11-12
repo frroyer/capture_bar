@@ -1,6 +1,6 @@
 [package]
 name = "cb-core"
-description = "Shared types, commands and platform traits for Capture Bar"
+description = "Shared types, commands and platform traits for Takebox"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,4 +1,4 @@
-# Capture Bar — English. Each message here must also be in fr.ftl (a test checks it).
+# Takebox — English. Each message here must also be in fr.ftl (a test checks it).
 # Variables: $key is a shortcut such as Ctrl+Shift+S; $count a number.
 
 ## Bar (M2.1, M2.2, M2.3)
@@ -115,11 +115,11 @@ batch-deselect-tip = Act on every capture again
 batch-ask = { $label }?
 batch-confirm = Click again to confirm
 tray-menu-toggle = Show or hide the bar
-tray-menu-quit = Quit Capture Bar
+tray-menu-quit = Quit Takebox
 
 ## Selection overlay
 
-overlay-title = Capture Bar selection
+overlay-title = Takebox selection
 overlay-record = Record
 overlay-capture = Capture
 overlay-cancel = Cancel
@@ -129,7 +129,10 @@ overlay-cancel = Cancel
 editor-title = Annotate
 editor-title-file = Annotate · { $name }
 tool-arrow = Arrow
+tool-line = Line
 tool-box = Box
+tool-circle = Circle
+tool-eraser = Eraser: click or drag over what to remove
 tool-pen = Pen
 tool-text = Text
 tool-highlight = Highlight
@@ -141,6 +144,10 @@ color-green = Green
 color-blue = Blue
 color-black = Black
 color-white = White
+editor-fill-tip = Fill of boxes and circles
+editor-width-tip = Line width ([ and ])
+editor-width = { $percent } %
+editor-fill-none = No fill
 editor-discard-question = Discard your changes?
 editor-discard = Discard
 editor-discard-tip = Close without saving
@@ -157,7 +164,7 @@ editor-cancel-tip = Close without saving (Esc)
 
 ## Settings (US-8.2)
 
-settings-title = Capture Bar settings
+settings-title = Takebox settings
 settings-output = Output
 settings-folder = Folder
 settings-choose = Choose…
@@ -171,8 +178,14 @@ settings-system-audio = System sound
 settings-microphone = Microphone
 settings-countdown = Countdown
 settings-countdown-tip = Seconds shown on screen before a recording starts; 0 starts at once
+settings-webcam = Webcam shape
+settings-webcam-circle = Circle
+settings-webcam-square = Square
+settings-webcam-portrait = Portrait
 settings-general = General
-settings-autostart = Start Capture Bar when I log in
+settings-autostart = Start Takebox when I log in
+settings-fade = See-through bar when the cursor is away
+settings-tooltips = Show tooltips on the buttons
 settings-language = Language
 settings-language-auto = Same as the system
 settings-buffer = Buffer
@@ -268,3 +281,9 @@ countdown-cancel = Press { $key } to cancel
 bubble-title = Camera
 bubble-starting = Starting camera…
 toast-camera-failed = Camera unavailable: { $error }
+
+# Quick Look on the buffer
+peek-previous = Newer capture (←)
+peek-next = Older capture (→)
+peek-hint = Scroll to zoom · drag to move · double-click: 100% / fit · Space or Esc closes
+card-peek-tip = Space or double-click: look at it full size

@@ -1,4 +1,4 @@
-# Capture Bar — français. Mêmes messages que en.ftl (un test le vérifie).
+# Takebox — français. Mêmes messages que en.ftl (un test le vérifie).
 # Ponctuation : espace insécable avant « ? », « : » et « ; ».
 
 ## Barre (M2.1, M2.2, M2.3)
@@ -118,11 +118,11 @@ batch-deselect-tip = Agir de nouveau sur toutes les captures
 batch-ask = { $label } ?
 batch-confirm = Cliquer encore pour confirmer
 tray-menu-toggle = Afficher ou masquer la barre
-tray-menu-quit = Quitter Capture Bar
+tray-menu-quit = Quitter Takebox
 
 ## Sélection à l'écran
 
-overlay-title = Sélection Capture Bar
+overlay-title = Sélection Takebox
 overlay-record = Enregistrer
 overlay-capture = Capturer
 overlay-cancel = Annuler
@@ -132,7 +132,10 @@ overlay-cancel = Annuler
 editor-title = Annoter
 editor-title-file = Annoter · { $name }
 tool-arrow = Flèche
+tool-line = Ligne
 tool-box = Cadre
+tool-circle = Cercle
+tool-eraser = Gomme : cliquer ou glisser sur ce qu'il faut enlever
 tool-pen = Crayon
 tool-text = Texte
 tool-highlight = Surligner
@@ -144,6 +147,10 @@ color-green = Vert
 color-blue = Bleu
 color-black = Noir
 color-white = Blanc
+editor-fill-tip = Remplissage des cadres et cercles
+editor-width-tip = Épaisseur du trait ([ et ])
+editor-width = { $percent } %
+editor-fill-none = Sans remplissage
 editor-discard-question = Abandonner vos modifications ?
 editor-discard = Abandonner
 editor-discard-tip = Fermer sans enregistrer
@@ -160,7 +167,7 @@ editor-cancel-tip = Fermer sans enregistrer (Échap)
 
 ## Réglages (US-8.2)
 
-settings-title = Réglages de Capture Bar
+settings-title = Réglages de Takebox
 settings-output = Sortie
 settings-folder = Dossier
 settings-choose = Choisir…
@@ -174,8 +181,14 @@ settings-system-audio = Son du système
 settings-microphone = Microphone
 settings-countdown = Compte à rebours
 settings-countdown-tip = Secondes affichées à l’écran avant le début d’un enregistrement ; 0 démarre aussitôt
+settings-webcam = Forme de la webcam
+settings-webcam-circle = Cercle
+settings-webcam-square = Carré
+settings-webcam-portrait = Portrait
 settings-general = Général
-settings-autostart = Lancer Capture Bar à l'ouverture de session
+settings-autostart = Lancer Takebox à l'ouverture de session
+settings-fade = Barre transparente quand le curseur est ailleurs
+settings-tooltips = Afficher les infobulles des boutons
 settings-language = Langue
 settings-language-auto = Celle du système
 settings-buffer = Tampon
@@ -286,3 +299,9 @@ countdown-cancel = { $key } pour annuler
 bubble-title = Caméra
 bubble-starting = Démarrage de la caméra…
 toast-camera-failed = Caméra indisponible : { $error }
+
+# Quick Look on the buffer
+peek-previous = Capture plus récente (←)
+peek-next = Capture plus ancienne (→)
+peek-hint = Molette pour zoomer · glisser pour déplacer · double-clic : 100 % / ajusté · Espace ou Échap ferme
+card-peek-tip = Espace ou double-clic : voir en grand

@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use cb_core::{Settings, Shortcut, ShortcutConflict};
+use cb_core::{BubbleShape, Settings, Shortcut, ShortcutConflict};
 use egui::{
     vec2, CentralPanel, Context, Frame, Grid, Key, Margin, Modifiers, RichText, ScrollArea, Ui,
     ViewportBuilder, ViewportCommand, ViewportId,
@@ -297,10 +297,23 @@ impl SettingsWindow {
                             )
                             .on_hover_text(tr!("settings-countdown-tip"));
                             ui.end_row();
+                            ui.label(tr!("settings-webcam"));
+                            ui.horizontal(|ui| {
+                                for (shape, name) in [
+                                    (BubbleShape::Circle, tr!("settings-webcam-circle")),
+                                    (BubbleShape::Square, tr!("settings-webcam-square")),
+                                    (BubbleShape::Portrait, tr!("settings-webcam-portrait")),
+                                ] {
+                                    ui.selectable_value(&mut settings.bubble_shape, shape, name);
+                                }
+                            });
+                            ui.end_row();
                         });
 
                     section(ui, &tr!("settings-general"));
                     ui.checkbox(autostart, tr!("settings-autostart"));
+                    ui.checkbox(&mut settings.fade_when_away, tr!("settings-fade"));
+                    ui.checkbox(&mut settings.tooltips, tr!("settings-tooltips"));
                     ui.horizontal(|ui| {
                         ui.label(tr!("settings-language"));
                         let name = |language| match language {

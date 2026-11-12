@@ -81,7 +81,7 @@ fn records_the_camera_bubble() {
         width: 300,
         height: 300,
     };
-    cb_platform::set_camera_bubble(Some(bubble));
+    cb_platform::set_camera_bubble(Some((bubble, cb_core::BubbleShape::Circle)));
     let path = std::env::temp_dir().join("cb-bubble.mp4");
     let (sender, done) = mpsc::channel();
     let handle = cb_platform::screen_source()

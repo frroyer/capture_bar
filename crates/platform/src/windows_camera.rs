@@ -36,8 +36,8 @@ struct Camera {
     /// Raised to end the running camera thread.
     stop: Option<Arc<AtomicBool>>,
     latest: Option<Arc<CamFrame>>,
-    /// Where recordings draw the bubble, in global physical pixels.
-    bubble: Option<Rect>,
+    /// Where recordings draw the bubble, in global physical pixels, and its outline.
+    bubble: Option<(Rect, cb_core::BubbleShape)>,
 }
 
 static CAMERA: Mutex<Camera> = Mutex::new(Camera {
@@ -94,14 +94,15 @@ pub(crate) fn latest() -> Option<Arc<CamFrame>> {
     lock().latest.clone()
 }
 
-pub(crate) fn set_bubble(rect: Option<Rect>) {
-    lock().bubble = rect;
+pub(crate) fn set_bubble(bubble: Option<(Rect, cb_core::BubbleShape)>) {
+    lock().bubble = bubble;
 }
 
-/// Where to draw the camera in recordings, with the picture to draw.
-pub(crate) fn bubble() -> Option<(Rect, Arc<CamFrame>)> {
+/// Where to draw the camera in recordings and its outline, with the picture to draw.
+pub(crate) fn bubble() -> Option<(Rect, cb_core::BubbleShape, Arc<CamFrame>)> {
     let camera = lock();
-    Some((camera.bubble?, camera.latest.clone()?))
+    let (rect, shape) = camera.bubble?;
+    Some((rect, shape, camera.latest.clone()?))
 }
 
 fn run(stop: &AtomicBool) -> CaptureResult<()> {
