@@ -4,6 +4,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod config;
+mod demo;
 mod hotkeys;
 mod output;
 mod peek_video;
@@ -402,6 +403,10 @@ struct App {
     settings_file: PathBuf,
     settings_writer: mpsc::Sender<Settings>,
     settings_window: Option<SettingsWindow>,
+    /// The demo session setup, while open (US-10.1).
+    demo_setup: Option<cb_ui::DemoSetup>,
+    /// The demo session being recorded, or about to be once what to record is picked.
+    demo: Option<demo::DemoSession>,
     /// Give the bar's window the keyboard on the next frame.
     focus_bar: bool,
     /// Whether the bar starts at login, as the OS had it when Settings opened (US-8.3).
@@ -674,6 +679,8 @@ impl App {
             settings_file,
             settings_writer,
             settings_window: None,
+            demo_setup: None,
+            demo: None,
             focus_bar: false,
             autostart: false,
             autostart_done: None,
@@ -887,7 +894,57 @@ impl App {
                 self.bar.tray_open = true;
                 self.focus_prefix = true;
             }
+            Command::ToggleDemo => self.toggle_demo(),
             Command::Cancel => {}
+        }
+    }
+
+    /// Open the demo session setup, or stop the session being recorded (US-10.1).
+    fn toggle_demo(&mut self) {
+        if !self.prefs.plus() {
+            return self.flash(tr!("toast-demo-needs-plus"));
+        }
+        match &self.demo {
+            Some(d) if d.item.is_some() || self.countdown.is_some() => {
+                return self.toggle_recording();
+            }
+            // Waiting for the overlay: Esc there cancels.
+            Some(_) => return,
+            None => {}
+        }
+        if self.recording.is_some() || self.countdown.is_some() {
+            return self.flash(tr!("toast-demo-busy"));
+        }
+        self.hidden = false;
+        let (mode, mic) = (self.bar.mode, self.bar.mic_on);
+        self.demo_setup
+            .get_or_insert_with(|| cb_ui::DemoSetup::new(mode, mic))
+            .focus();
+    }
+
+    fn show_demo_setup(&mut self, ctx: &egui::Context) {
+        let monitor = self.bar_display();
+        let Some(setup) = &mut self.demo_setup else {
+            return;
+        };
+        match setup.show(ctx, monitor.as_ref()) {
+            cb_ui::DemoSetupOutput::Open => {}
+            cb_ui::DemoSetupOutput::Cancel => self.demo_setup = None,
+            cb_ui::DemoSetupOutput::Start => {
+                let setup = self.demo_setup.take().expect("checked above");
+                if self.recording.is_some() || self.countdown.is_some() {
+                    return self.flash(tr!("toast-demo-busy"));
+                }
+                self.bar.mode = setup.mode;
+                self.bar.mic_on = setup.mic;
+                self.demo = Some(demo::DemoSession::new(
+                    &setup.title,
+                    setup.language,
+                    &self.captures_dir,
+                    SystemTime::now(),
+                ));
+                self.toggle_recording();
+            }
         }
     }
 
@@ -1311,7 +1368,8 @@ impl App {
                 tray.set_labels(tray_labels().each_ref().map(String::as_str));
             }
         }
-        let rebind = settings.shortcuts != self.prefs.shortcuts;
+        let rebind =
+            settings.shortcuts != self.prefs.shortcuts || settings.plus() != self.prefs.plus();
         self.captures_dir = settings.folder.clone();
         self.bar.prefix = output::clean_prefix(&settings.prefix);
         self.bar.mic_on = settings.microphone;
@@ -1564,8 +1622,14 @@ impl App {
         if self.buffer.get(item).is_none() {
             return;
         }
-        let name = output::file_name(&self.bar.prefix, frame.captured_at);
-        let path = self.captures_dir.join(name);
+        // Stills of a demo session go into its folder (US-10.1, DR-3).
+        let recording = self.recording.is_some();
+        let path = match self.demo.as_mut().filter(|d| recording && d.item.is_some()) {
+            Some(demo) => demo.next_still(),
+            None => self
+                .captures_dir
+                .join(output::file_name(&self.bar.prefix, frame.captured_at)),
+        };
         let frame = Arc::new(frame);
         self.newest_frame = Some((item, frame.clone()));
         let _ = self.output.send(output::Job::Store { item, frame, path });
@@ -1988,8 +2052,14 @@ impl App {
 
     /// The recording shows in the buffer at once, as "saving" until its file is complete.
     fn record_now(&mut self, mode: CaptureMode, target: CaptureTarget) {
-        let name = output::file_name(&self.bar.prefix, SystemTime::now());
-        let path = self.captures_dir.join(name).with_extension("mp4");
+        let demo = self.demo.as_ref().is_some_and(|d| d.item.is_none());
+        let path = match &self.demo {
+            Some(d) if demo => d.screen_path(),
+            _ => {
+                let name = output::file_name(&self.bar.prefix, SystemTime::now());
+                self.captures_dir.join(name).with_extension("mp4")
+            }
+        };
         let item = self.buffer.push(ItemKind::Video { duration_ms: 0 }, mode);
         let (sender, repaint) = (self.recorded.0.clone(), self.repaint.clone());
         let done = Box::new(move |result| {
@@ -2013,8 +2083,15 @@ impl App {
                     clock: Stopwatch::start(Instant::now()),
                 });
                 self.bar.recording = true;
+                if let Some(d) = self.demo.as_mut().filter(|_| demo) {
+                    d.item = Some(item);
+                    d.started_at = SystemTime::now();
+                }
             }
             Err(error) => {
+                if demo {
+                    self.demo = None;
+                }
                 self.buffer.remove(item);
                 self.flash(tr!("toast-record-failed", error = error.to_string()));
             }
@@ -2023,6 +2100,7 @@ impl App {
 
     fn poll_recordings(&mut self) {
         while let Ok((item, result)) = self.recorded.1.try_recv() {
+            let demo = self.demo.take_if(|d| d.item == Some(item));
             // A recording that failed while running has nothing left to stop.
             if self.recording.as_ref().is_some_and(|r| r.item == item) {
                 self.recording = None;
@@ -2049,11 +2127,25 @@ impl App {
                     found.kind = ItemKind::Video { duration_ms };
                     found.path = Some(recording.path.clone());
                     found.state = ItemState::Ready;
+                    if let Some(demo) = &demo {
+                        let _ = self.output.send(output::Job::Write {
+                            path: demo.dir.join("manifest.json"),
+                            bytes: demo.manifest(&recording.path, duration_ms),
+                        });
+                    }
                     let _ = self.output.send(output::Job::Preview {
                         item,
                         path: recording.path,
                     });
-                    self.flash(tr!("toast-recorded", seconds = duration_ms.div_ceil(1000)));
+                    match &demo {
+                        Some(demo) => self.flash(tr!(
+                            "toast-demo-saved",
+                            folder = demo.dir.display().to_string()
+                        )),
+                        None => {
+                            self.flash(tr!("toast-recorded", seconds = duration_ms.div_ceil(1000)))
+                        }
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(%error, "recording");
@@ -2494,6 +2586,15 @@ impl eframe::App for App {
         while let Ok(cmd) = self.commands.try_recv() {
             self.handle(cmd);
         }
+        // A demo session whose recording never started: its overlay or countdown was
+        // cancelled.
+        let waiting = self.recording.is_some()
+            || self.countdown.is_some()
+            || self.overlay.is_some()
+            || self.overlay_request.is_some();
+        if !waiting && self.demo.as_ref().is_some_and(|d| d.item.is_none()) {
+            self.demo = None;
+        }
         self.poll_captures();
         self.poll_recordings();
         self.poll_stills();
@@ -2537,6 +2638,8 @@ impl eframe::App for App {
             self.bar.tray_open = false;
         }
         self.bar.has_last_region = self.last_region.is_some();
+        self.bar.plus = self.prefs.plus();
+        self.bar.demo = self.demo.as_ref().is_some_and(|d| d.item.is_some());
         let (shown, fade) =
             animated_opacity(ctx, self.hidden, cursor_near || !self.prefs.fade_when_away);
         self.bar_fade = fade;
@@ -2557,6 +2660,7 @@ impl eframe::App for App {
         self.show_peek(ctx);
         self.show_editor(ctx);
         self.show_settings(ctx);
+        self.show_demo_setup(ctx);
         if std::mem::take(&mut self.folder_requested) {
             self.choose_folder(ctx, frame);
         }

@@ -3,6 +3,7 @@
 
 mod bubble;
 mod countdown;
+mod demo;
 mod editor;
 pub mod i18n;
 mod icons;
@@ -13,6 +14,7 @@ mod settings;
 
 pub use bubble::{CameraBubble, BUBBLE_SIZE};
 pub use countdown::show_countdown;
+pub use demo::{DemoSetup, DemoSetupOutput};
 pub use editor::{Editor, EditorResult};
 pub use overlay::{Overlay, OverlayResult};
 pub use peek::{Peek, PeekAction};
@@ -82,6 +84,10 @@ pub struct BarState {
     pub prefix: String,
     /// A region was captured before: the bar offers to capture it again.
     pub has_last_region: bool,
+    /// Takebox+ is unlocked: the bar offers a demo session (Demo Mode PRD §0).
+    pub plus: bool,
+    /// The recording is a demo session: the bar wears a Demo badge (US-10.1).
+    pub demo: bool,
 }
 
 /// Which side of the bar has room for tooltips, reserved by the host.
@@ -613,6 +619,17 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                 }
 
                 let record_key = shortcut(Shortcut::Record);
+                if state.recording && state.demo {
+                    chip(
+                        ui,
+                        &[
+                            Piece::Icon(Icon::Clapper),
+                            Piece::Text(&tr!("bar-demo-badge")),
+                        ],
+                        &ChipStyle::new(ACCENT, Color32::WHITE),
+                        &tr!("bar-demo-badge-tip"),
+                    );
+                }
                 if state.recording {
                     let time = fmt_time(state.elapsed_secs);
                     if vertical {
@@ -686,6 +703,18 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                 .clicked()
                 {
                     out.commands.push(Command::ToggleRecording);
+                }
+                if !state.recording
+                    && state.plus
+                    && chip(
+                        ui,
+                        &[Piece::Icon(Icon::Clapper)],
+                        &ChipStyle::new(Color32::TRANSPARENT, TEXT),
+                        &tr!("bar-demo-tip", key = shortcut(Shortcut::Demo)),
+                    )
+                    .clicked()
+                {
+                    out.commands.push(Command::ToggleDemo);
                 }
 
                 divider(ui);

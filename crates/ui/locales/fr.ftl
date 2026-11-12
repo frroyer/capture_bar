@@ -308,3 +308,21 @@ peek-previous = Capture plus récente (←)
 peek-next = Capture plus ancienne (→)
 peek-hint = Molette pour zoomer · glisser pour déplacer · double-clic : 100 % / ajusté · Espace ou Échap ferme
 card-peek-tip = Espace ou double-clic : voir en grand
+
+# Session démo (Takebox+, US-10.1)
+demo-setup-title = Session démo
+demo-setup-name = Titre
+demo-setup-name-hint = Onboarding v2
+demo-setup-language = Langue parlée
+demo-setup-language-auto = Détecter
+demo-setup-area = Enregistrer
+demo-setup-audio = Audio
+demo-setup-start = Démarrer (Entrée)
+demo-setup-cancel = Annuler
+shortcut-demo = Session démo
+bar-demo-tip = Session démo ({ $key })
+bar-demo-badge = Démo
+bar-demo-badge-tip = Session démo en cours
+toast-demo-needs-plus = Les sessions démo font partie de Takebox+ (voir Réglages)
+toast-demo-busy = Arrêtez d'abord l'enregistrement
+toast-demo-saved = Session démo enregistrée dans { $folder }

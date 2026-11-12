@@ -94,6 +94,12 @@ pub enum Job {
     /// Delete files nobody will see again, such as the original of a capture that left the
     /// buffer. Says nothing.
     Remove(PathBuf),
+    /// Write `bytes` to `path`, making its folder, such as a demo session's manifest
+    /// (US-10.1). Says nothing.
+    Write {
+        path: PathBuf,
+        bytes: Vec<u8>,
+    },
     /// Make a GIF of the recording at `from`, next to it (US-6.7). Exports queue and run
     /// one at a time, in order, reporting progress (US-6.2).
     ExportGif {
@@ -491,6 +497,7 @@ fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
         | Job::Load { .. }
         | Job::Annotate { .. }
         | Job::Remove(_)
+        | Job::Write { .. }
         | Job::ExportGif { .. } => {
             unreachable!("not a one-off job")
         }
@@ -615,6 +622,16 @@ pub fn spawn(wake: impl Fn() + Send + Sync + 'static) -> (mpsc::Sender<Job>, mps
                     Job::Remove(path) => {
                         if let Err(e) = std::fs::remove_file(path) {
                             tracing::warn!(error = %e, ?path, "not removed");
+                        }
+                        continue;
+                    }
+                    Job::Write { path, bytes } => {
+                        let written = path
+                            .parent()
+                            .map_or(Ok(()), std::fs::create_dir_all)
+                            .and_then(|()| std::fs::write(path, bytes));
+                        if let Err(e) = written {
+                            tracing::warn!(error = %e, ?path, "not written");
                         }
                         continue;
                     }

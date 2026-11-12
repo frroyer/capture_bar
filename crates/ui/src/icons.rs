@@ -22,6 +22,8 @@ pub enum Icon {
     Layers,
     Mic,
     Video,
+    /// A demo session (Takebox+): a clapperboard.
+    Clapper,
     Sliders,
     Minus,
     Folder,
@@ -165,6 +167,13 @@ pub fn paint(p: &Painter, center: Pos2, icon: Icon, color: Color32) {
                 vec![at(3.0, -1.0), at(7.0, -3.5), at(7.0, 3.5), at(3.0, 1.0)],
                 s,
             );
+        }
+        Icon::Clapper => {
+            frame(-7.0, -2.0, 7.0, 6.5, 1);
+            // The clapstick, hinged on the left, raised.
+            seg(-7.0, -2.5, 6.5, -6.5);
+            seg(-3.0, -3.7, -1.5, -2.0);
+            seg(1.5, -4.9, 3.0, -2.0);
         }
         Icon::Sliders => {
             seg(-7.0, -3.5, 0.0, -3.5);
