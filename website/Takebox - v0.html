@@ -1,0 +1,1271 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Takebox</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="Takebox: one floating bar for screenshots and screen recordings. Every capture lands in a buffer in under 100 ms.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&family=Inter+Tight:wght@500;600;700&family=Inter:wght@400;500;600&display=swap">
+<style>
+/* Layout: one 1180px column on a black canvas; full-bleed glow bands; live product stage as the hero; bento grid; sticky nav.
+   Single dark world (Framer-like night), committed on purpose. */
+:root{
+  --bg:#060608; --bg2:#0b0b10; --card:#0f0f15; --line:rgba(255,255,255,.08); --line2:rgba(255,255,255,.14);
+  --fg:#f5f5f7; --muted:#9b9ca8; --dim:#80818d;
+  --blue:#2f7bff; --violet:#8b5cff; --rec:#ff3d57; --ok:#3ddc97; --mark:#ff4d6d;
+  --f-display:"Inter Tight","Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-body:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"Geist Mono",ui-monospace,"SFMono-Regular",Consolas,monospace;
+  --ease:cubic-bezier(.2,.8,.2,1);
+  color-scheme:dark;
+}
+[hidden]{display:none!important}
+html{background:var(--bg);scroll-behavior:smooth}
+body{background:var(--bg);color:var(--fg);font:400 16px/1.55 var(--f-body);-webkit-font-smoothing:antialiased;overflow-x:clip}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:60;background:rgba(6,6,8,.8)}
+a{color:inherit;text-decoration:none}
+::selection{background:var(--blue);color:#fff}
+.wrap{max-width:1180px;margin-inline:auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+h1,h2,h3{font-family:var(--f-display);font-weight:600;letter-spacing:-.04em;line-height:1;margin:0;text-wrap:balance}
+p{margin:0}
+kbd{font:500 .78em/1 var(--f-mono);display:inline-grid;place-items:center;min-width:1.9em;height:1.9em;padding:0 .45em;border-radius:.45em;background:#1a1b22;border:1px solid var(--line2);border-bottom-width:2px;color:var(--fg)}
+.eyebrow{font:500 12px/1 var(--f-mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+:focus-visible{outline:2px solid var(--blue);outline-offset:3px;border-radius:6px}
+
+/* ---------- nav ---------- */
+.nav{position:sticky;top:env(safe-area-inset-top,0px);z-index:50;backdrop-filter:blur(16px) saturate(1.4);background:rgba(6,6,8,.62);border-bottom:1px solid var(--line)}
+.nav .wrap{display:flex;align-items:center;gap:28px;height:60px}
+.logo{display:flex;align-items:center;gap:10px;font:600 18px/1 var(--f-display);letter-spacing:-.03em}
+.logo svg{width:26px;height:26px}
+.nav ul{display:flex;gap:24px;list-style:none;margin:0 0 0 8px;padding:0;font-size:14px;color:var(--muted)}
+.nav ul a:hover{color:var(--fg)}
+.nav .cta{margin-left:auto}
+.pill{display:inline-flex;align-items:center;gap:8px;height:40px;padding:0 18px;border-radius:999px;font:500 14px/1 var(--f-body);transition:transform .2s var(--ease),background .2s,box-shadow .2s;cursor:pointer;border:0}
+.pill.white{background:var(--fg);color:#000}
+.pill.white:hover{transform:translateY(-1px);box-shadow:0 8px 30px rgba(255,255,255,.18)}
+.pill.glass{background:rgba(255,255,255,.07);color:var(--fg);box-shadow:inset 0 0 0 1px var(--line2)}
+.pill.glass:hover{background:rgba(255,255,255,.12)}
+.pill svg{width:16px;height:16px}
+.pill.big{height:50px;padding:0 24px;font-size:15px}
+
+/* ---------- hero ---------- */
+.hero{position:relative;padding-block:84px 40px;isolation:isolate}
+.hero::before{content:"";position:absolute;inset:-120px 0 auto;height:900px;z-index:-1;pointer-events:none;
+  background:radial-gradient(40% 50% at 30% 30%,rgba(47,123,255,.32),transparent 70%),radial-gradient(35% 45% at 72% 26%,rgba(139,92,255,.30),transparent 70%),radial-gradient(30% 40% at 50% 60%,rgba(255,61,87,.10),transparent 70%);
+  filter:blur(20px);animation:drift 14s ease-in-out infinite alternate}
+.hero::after{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;
+  background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);background-size:64px 64px;
+  -webkit-mask:radial-gradient(60% 50% at 50% 20%,#000,transparent 75%);mask:radial-gradient(60% 50% at 50% 20%,#000,transparent 75%);opacity:.55}
+@keyframes drift{to{transform:translate3d(0,40px,0) scale(1.08)}}
+.hero-copy{display:flex;flex-direction:column;align-items:center;text-align:center;gap:26px}
+.badge{display:inline-flex;align-items:center;gap:10px;padding:6px 14px 6px 6px;border-radius:999px;font-size:13px;color:var(--muted);background:rgba(255,255,255,.04);position:relative}
+.badge::before{content:"";position:absolute;inset:0;border-radius:inherit;padding:1px;background:conic-gradient(from var(--a,0deg),transparent 0 70%,var(--blue),var(--violet),transparent);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;animation:spin 4s linear infinite}
+@property --a{syntax:"<angle>";inherits:false;initial-value:0deg}
+@keyframes spin{to{--a:360deg}}
+.badge b{font:600 11px/1 var(--f-mono);letter-spacing:.08em;background:var(--blue);color:#fff;padding:6px 9px;border-radius:999px}
+.hero h1{font-size:clamp(46px,9vw,118px);letter-spacing:-.058em;line-height:.9;font-weight:600}
+.hero h1 .l{display:block}
+.hero h1 .l2{padding-bottom:.16em;margin-bottom:-.12em;background:linear-gradient(92deg,#fff 10%,#9fc1ff 40%,#b79bff 70%,#fff 95%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:sheen 6s linear infinite}
+@keyframes sheen{to{background-position:-200% 0}}
+.hero h1 .word{display:inline-block;animation:rise .9s var(--ease) backwards}
+@keyframes rise{from{opacity:0;transform:translateY(.35em);filter:blur(10px)}}
+.lede{max-width:600px;font-size:clamp(17px,1.6vw,20px);color:var(--muted);animation:rise .9s .25s var(--ease) backwards}
+.lede b{color:var(--fg);font-weight:500}
+.ctas{display:flex;gap:12px;flex-wrap:wrap;justify-content:center;animation:rise .9s .35s var(--ease) backwards}
+.os{font:400 12px/1.4 var(--f-mono);color:var(--dim);letter-spacing:.04em}
+
+/* ---------- stage (live demo) ---------- */
+.stage-wrap{margin-top:56px;perspective:1800px;animation:rise 1.1s .45s var(--ease) backwards}
+.stage{position:relative;aspect-ratio:16/10;max-width:100%;border-radius:22px;overflow:hidden;container-type:inline-size;
+  border:1px solid var(--line2);background:#0a0c1a;
+  box-shadow:0 0 0 1px rgba(0,0,0,.6),0 40px 120px -20px rgba(47,123,255,.35),0 30px 80px rgba(0,0,0,.6);
+  transform:rotateX(calc(var(--tilt,0)*16deg)) scale(calc(1 - var(--tilt,0)*.05));transform-origin:50% 0;transition:transform .12s linear;user-select:none;-webkit-user-select:none}
+.stage.recording{box-shadow:0 0 0 1px rgba(255,61,87,.5),0 40px 120px -20px rgba(255,61,87,.45),0 30px 80px rgba(0,0,0,.6)}
+.desk{position:absolute;inset:0;overflow:hidden;font-size:clamp(7px,1.05cqw,13px);touch-action:none;
+  background:radial-gradient(60% 80% at 12% 18%,#1d3b8f 0%,transparent 60%),radial-gradient(50% 70% at 88% 26%,#5b2a9c 0%,transparent 62%),radial-gradient(70% 60% at 50% 115%,#0e6a77 0%,transparent 60%),#0a0c1a}
+.stage[data-mode=region] .desk{cursor:crosshair}
+.stage[data-mode=window] .desk .win{cursor:pointer}
+.topbar{position:absolute;inset:0 0 auto;height:2.4em;display:flex;align-items:center;justify-content:space-between;padding:0 1.4em;color:rgba(255,255,255,.72);background:rgba(0,0,0,.28);font:500 .95em/1 var(--f-mono)}
+.topbar span:first-child{display:flex;gap:1.4em}
+.win{position:absolute;border-radius:.9em;background:rgba(17,18,27,.86);border:1px solid rgba(255,255,255,.1);box-shadow:0 1.5em 4em rgba(0,0,0,.45);overflow:hidden;outline:2px solid transparent;outline-offset:3px;transition:outline-color .2s}
+.stage[data-mode=window] .win.hov{outline-color:var(--blue)}
+.win .tb{height:2.5em;display:flex;align-items:center;gap:.45em;padding:0 .9em;border-bottom:1px solid rgba(255,255,255,.06);color:#9fa1b6;font-size:.95em}
+.win .tb i{width:.75em;height:.75em;border-radius:50%;background:#353746}
+.win .tb span{margin-left:.6em}
+.w-code{left:4%;top:9%;width:47%;height:58%}
+.w-chart{left:37%;top:20%;width:35%;height:50%}
+.w-chat{left:70%;top:10%;width:26%;height:52%}
+.code{padding:1.1em 1.3em;font:400 1.08em/1.75 var(--f-mono);color:#c9cbe0;white-space:pre}
+.code .k{color:#c79bff}.code .f{color:#7fb1ff}.code .t{color:#6fe0c4}.code .c{color:#5e6178}.code .nu{color:#ffb86b}
+.chart{padding:1.2em 1.3em;display:flex;flex-direction:column;gap:.5em;height:calc(100% - 2.5em);box-sizing:border-box}
+.chart small{color:#8d8fa6;font-size:.95em}
+.chart .num{font:600 2.6em/1 var(--f-display);letter-spacing:-.03em;display:flex;align-items:baseline;gap:.4em}
+.chart .num em{font:500 .38em/1 var(--f-mono);color:var(--ok);font-style:normal}
+.bars{flex:1;display:flex;align-items:flex-end;gap:5%;padding-top:.8em}
+.bars i{flex:1;border-radius:.25em .25em 0 0;background:linear-gradient(#6aa1ff,#2f5fd0);height:var(--h);transform-origin:bottom;animation:grow 3.6s var(--d) ease-in-out infinite alternate}
+.bars i:last-child{background:linear-gradient(#c3a6ff,#7b4ef0)}
+@keyframes grow{from{transform:scaleY(.82)}}
+.chat{display:flex;flex-direction:column;justify-content:flex-end;gap:.6em;padding:1em;height:calc(100% - 2.5em);box-sizing:border-box;overflow:hidden}
+.msg{max-width:88%;padding:.6em .8em;border-radius:1em;font-size:1em;line-height:1.35;animation:pop .35s var(--ease) backwards}
+.msg.in{background:#262838;color:#e3e4f0;border-bottom-left-radius:.3em;align-self:flex-start}
+.msg.out{background:var(--blue);color:#fff;border-bottom-right-radius:.3em;align-self:flex-end;padding:.35em}
+.msg.out .shot{border-radius:.6em}
+.msg.typing{display:flex;gap:.3em}
+.msg.typing i{width:.45em;height:.45em;border-radius:50%;background:#9fa1b6;animation:blink 1s infinite}
+.msg.typing i:nth-child(2){animation-delay:.15s}.msg.typing i:nth-child(3){animation-delay:.3s}
+@keyframes pop{from{opacity:0;transform:translateY(.6em) scale(.96)}}
+@keyframes blink{50%{opacity:.25}}
+.cam{position:absolute;right:4%;bottom:26%;width:12cqw;aspect-ratio:1;border-radius:50%;overflow:hidden;cursor:grab;z-index:3;
+  background:#3a3f55;box-shadow:0 0 0 3px #fff,0 12px 40px rgba(0,0,0,.5);animation:bubble .45s cubic-bezier(.3,1.5,.5,1) backwards}
+.cam svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.person{animation:breathe 4s ease-in-out infinite;transform-origin:50% 100%}
+.lids{animation:lids 5s infinite;transform-box:fill-box;transform-origin:center}
+.cam::after{content:"";position:absolute;inset:0;border-radius:50%;background:radial-gradient(circle at 50% 45%,transparent 55%,rgba(0,0,0,.35))}
+@keyframes bubble{from{transform:scale(0)}}
+@keyframes breathe{50%{transform:translateY(1.2%) rotate(-1deg)}}
+@keyframes lids{0%,93%,100%{transform:scaleY(0)}95.5%{transform:scaleY(1)}}
+.flash{position:absolute;background:#fff;opacity:0;pointer-events:none;z-index:8}
+.sel{position:absolute;z-index:7;pointer-events:none;opacity:0;border:1.5px solid #fff;border-radius:2px;box-shadow:0 0 0 9999px rgba(3,4,12,.5);transition:opacity .18s}
+.sel.on{opacity:1}
+.sel.anim{transition:opacity .18s,left .45s var(--ease),top .45s var(--ease),width .45s var(--ease),height .45s var(--ease)}
+.sel.win{border-color:var(--blue);box-shadow:0 0 0 9999px rgba(3,4,12,.35),0 0 0 4px rgba(47,123,255,.3)}
+.sel span{position:absolute;right:-1px;top:calc(100% + 6px);font:500 11px/1 var(--f-mono);background:#fff;color:#000;padding:5px 7px;border-radius:5px;white-space:nowrap}
+.sel.win span{display:none}
+.rec-frame{position:absolute;z-index:6;pointer-events:none;border:2px solid var(--rec);border-radius:4px;animation:recp 1.6s ease-in-out infinite}
+@keyframes recp{50%{border-color:rgba(255,61,87,.35)}}
+.countdown{position:absolute;z-index:9;display:grid;place-items:center;pointer-events:none;font:600 clamp(48px,11cqw,140px)/1 var(--f-display);color:#fff;text-shadow:0 10px 50px rgba(0,0,0,.6)}
+.countdown b{display:block;animation:cd .7s var(--ease) both}
+@keyframes cd{0%{opacity:0;transform:scale(1.6)}30%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(.8)}}
+
+/* the bar */
+.bar{position:absolute;left:0;top:0;z-index:10;display:flex;align-items:center;padding:5px;border-radius:16px;
+  background:rgba(20,21,29,.8);border:1px solid rgba(255,255,255,.13);box-shadow:0 12px 40px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.07);
+  backdrop-filter:blur(18px) saturate(1.5);-webkit-backdrop-filter:blur(18px) saturate(1.5);transition:opacity .35s;font:500 13px/1 var(--f-body);touch-action:none;visibility:hidden}
+.bar.ready{visibility:visible}
+.bar.snap{transition:opacity .35s,left .42s cubic-bezier(.25,1.25,.4,1),top .42s cubic-bezier(.25,1.25,.4,1)}
+.bar.dim{opacity:.4}.bar.gone{opacity:0;pointer-events:none}
+.bar-idle,.bar-rec{display:flex;align-items:center;gap:4px}
+.bar.vert .bar-idle,.bar.vert .bar-rec,.bar.vert .modes{flex-direction:column}
+.bar.vert .lbl{display:none}
+.bar.vert .sep{width:20px;height:1px}
+.bar.vert .timer{font-size:11px;padding:4px 0}
+.bar button{all:unset;box-sizing:border-box;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:7px;height:34px;min-width:34px;border-radius:10px;color:#d6d7e2;transition:background .15s,color .15s,transform .12s;position:relative}
+.bar button:hover{background:rgba(255,255,255,.09)}
+.bar button:active{transform:scale(.93)}
+.bar button:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.bar svg{width:18px;height:18px;flex:none}
+.bar .grip{min-width:22px;color:#6b6d80;cursor:grab}
+.bar.dragging .grip{cursor:grabbing}
+.modes{position:relative;display:flex;gap:2px;padding:2px;border-radius:12px;background:rgba(0,0,0,.38)}
+.bar .modes button{height:30px;min-width:32px;color:#8a8ca1;z-index:1}
+.bar .modes button.on{color:#fff}
+.bar .modes button:hover{background:transparent;color:#fff}
+.mode-hl{position:absolute;left:0;top:0;border-radius:9px;background:rgba(255,255,255,.13);box-shadow:inset 0 0 0 1px rgba(255,255,255,.1);transition:transform .38s cubic-bezier(.3,1.35,.5,1),width .3s,height .3s}
+.bar .b-cap{background:#1f66e5;color:#fff;padding:0 13px}
+.bar .b-cap:hover{background:#4a8dff}
+.bar .b-rec{padding:0 13px;background:rgba(255,61,87,.13)}
+.bar .b-rec:hover{background:rgba(255,61,87,.22)}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--rec);box-shadow:0 0 0 3px rgba(255,61,87,.25)}
+.sep{width:1px;height:20px;background:rgba(255,255,255,.12);margin:0 3px}
+.bar .tog[aria-pressed=true]{color:#fff;background:rgba(47,123,255,.22)}
+.lvl{display:none;gap:2px;align-items:center;height:14px}
+.tog[aria-pressed=true] .lvl{display:flex}
+.lvl i{width:2px;height:100%;background:var(--ok);border-radius:2px;animation:lv .5s ease-in-out infinite alternate}
+.lvl i:nth-child(2){animation-delay:-.2s}.lvl i:nth-child(3){animation-delay:-.35s}
+@keyframes lv{from{transform:scaleY(.25)}}
+.count{position:absolute;top:1px;right:0;min-width:16px;height:16px;padding:0 4px;box-sizing:border-box;border-radius:8px;background:var(--fg);color:#000;font:600 10px/16px var(--f-mono);text-align:center}
+.count.zero{display:none}
+.rec-dot{width:10px;height:10px;border-radius:50%;background:var(--rec);margin:0 4px 0 8px;animation:blink 1s infinite}
+.bar.vert .rec-dot{margin:8px 0 2px}
+.bar-rec.paused .rec-dot{animation:none;background:#ffb547}
+.bar-rec.paused .timer{animation:blink 1s infinite}
+.timer{font:500 13px/1 var(--f-mono);font-variant-numeric:tabular-nums;padding:0 6px 0 2px;color:#fff}
+.bar .b-stop{background:var(--rec);color:#fff;padding:0 12px}
+.bar .b-stop:hover{background:#ff5a70}
+.bar .danger.confirm{background:rgba(255,61,87,.25);color:#fff}
+@container (max-width:640px){.bar .lbl,.bar .x-sm{display:none}.bar .b-cap,.bar .b-rec,.bar .b-stop{padding:0}}
+
+.toast{position:absolute;z-index:11;left:50%;top:3.4em;transform:translate(-50%,-8px);opacity:0;pointer-events:none;display:flex;align-items:center;flex-wrap:wrap;justify-content:center;gap:6px 12px;max-width:calc(100% - 24px);box-sizing:border-box;padding:8px 8px 8px 14px;border-radius:14px;background:rgba(18,19,26,.92);border:1px solid var(--line2);box-shadow:0 14px 40px rgba(0,0,0,.5);font:500 13px/1.3 var(--f-body);transition:opacity .25s,transform .35s var(--ease);backdrop-filter:blur(14px)}
+.toast.on{opacity:1;transform:translate(-50%,0);pointer-events:auto}
+.toast .ok{color:var(--ok)}
+.toast .fn{font:400 11.5px/1.3 var(--f-mono);color:var(--muted);overflow-wrap:anywhere}
+.toast button{all:unset;cursor:pointer;padding:6px 10px;border-radius:8px;background:rgba(255,255,255,.08);font-size:12.5px}
+.toast button:hover{background:rgba(255,255,255,.15)}
+.toast button:focus-visible{outline:2px solid var(--blue)}
+
+.tray{position:absolute;z-index:12;width:min(420px,calc(100% - 24px));box-sizing:border-box;padding:10px;border-radius:16px;background:rgba(15,16,23,.94);border:1px solid var(--line2);box-shadow:0 20px 60px rgba(0,0,0,.6);backdrop-filter:blur(18px)}
+.tray-h{display:flex;align-items:center;gap:8px;padding:2px 4px 10px;font:500 13px/1 var(--f-body)}
+.tray-h .eyebrow{font-size:10.5px}
+.tray-h b{font:500 11px/1 var(--f-mono);color:var(--muted)}
+.tray-h button{all:unset;cursor:pointer;margin-left:auto;font-size:12px;color:var(--muted);padding:5px 8px;border-radius:7px}
+.tray-h button+button{margin-left:0}
+.tray-h button:hover{color:var(--fg);background:rgba(255,255,255,.08)}
+.tlist{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;scrollbar-width:thin}
+.card{flex:0 0 176px;display:flex;flex-direction:column;gap:7px;animation:pop .35s var(--ease) backwards}
+.card .th{position:relative;width:176px;height:110px;border-radius:9px;overflow:hidden;background:#000;box-shadow:inset 0 0 0 1px var(--line2)}
+.card .tag{position:absolute;left:6px;top:6px;font:600 9.5px/1 var(--f-mono);letter-spacing:.06em;padding:4px 6px;border-radius:5px;background:rgba(0,0,0,.65);color:#fff}
+.card .tag.mp4{background:var(--rec)}
+.card .prog{position:absolute;left:8px;right:8px;bottom:8px;height:4px;border-radius:2px;background:rgba(255,255,255,.2);overflow:hidden}
+.card .prog i{display:block;height:100%;background:#fff;width:var(--p)}
+.card .meta{display:flex;align-items:center;justify-content:space-between;font:400 11px/1 var(--f-mono);color:var(--muted)}
+.card .acts{display:flex;gap:2px}
+.card .acts button{all:unset;cursor:pointer;width:24px;height:24px;display:grid;place-items:center;border-radius:6px;color:#c9cad6}
+.card .acts button:hover{background:rgba(255,255,255,.1)}
+.card .acts svg{width:14px;height:14px}
+.card.out{animation:out .25s ease-in forwards}
+@keyframes out{to{opacity:0;transform:scale(.85)}}
+.empty{color:var(--muted);font-size:13px;padding:14px 4px 10px}
+.shot{position:relative;overflow:hidden;pointer-events:none}
+.fly{position:fixed;z-index:100;pointer-events:none;border-radius:4px;box-shadow:0 0 0 2px #fff,0 20px 60px rgba(0,0,0,.6);transform-origin:center}
+
+.hints{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:8px 10px;margin-top:22px;font-size:13px;color:var(--muted)}
+.hints button{all:unset;cursor:pointer;display:inline-flex;align-items:center;gap:8px;padding:6px 12px 6px 6px;border-radius:999px;background:rgba(255,255,255,.04);box-shadow:inset 0 0 0 1px var(--line);transition:background .2s}
+.hints button:hover{background:rgba(255,255,255,.09);color:var(--fg)}
+.hints button:focus-visible{outline:2px solid var(--blue)}
+.hints .note{font:400 12px/1.4 var(--f-mono);color:var(--dim);width:100%;text-align:center}
+.hints .snd[aria-pressed=false]{opacity:.55}
+
+/* ---------- marquee ---------- */
+.marquee{overflow:hidden;border-block:1px solid var(--line);padding-block:20px;-webkit-mask:linear-gradient(90deg,transparent,#000 10%,#000 90%,transparent);mask:linear-gradient(90deg,transparent,#000 10%,#000 90%,transparent)}
+.track{display:flex;gap:44px;width:max-content;animation:slide 38s linear infinite}
+.track.rev{animation-direction:reverse;animation-duration:46s}
+.track span{display:flex;align-items:center;gap:44px;font:500 15px/1 var(--f-display);color:var(--muted);white-space:nowrap;letter-spacing:-.01em}
+.track span::after{content:"";width:6px;height:6px;border-radius:2px;background:var(--line2);transform:rotate(45deg)}
+@keyframes slide{to{transform:translateX(-50%)}}
+
+/* ---------- statement ---------- */
+.statement{padding-block:140px 120px}
+.statement p{font:600 clamp(30px,4.6vw,60px)/1.08 var(--f-display);letter-spacing:-.04em;max-width:1000px;text-wrap:balance}
+.statement .w{transition:opacity .25s linear}
+.statement em{font-style:normal;background:linear-gradient(90deg,#7fb1ff,#c3a6ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+.statement .eyebrow{margin-bottom:26px}
+
+/* ---------- sections ---------- */
+.sec{padding-block:110px}
+.sec-head{display:flex;flex-direction:column;gap:18px;max-width:720px;margin-bottom:54px}
+.sec-head h2{font-size:clamp(36px,5.4vw,68px);letter-spacing:-.05em}
+.sec-head p{color:var(--muted);font-size:18px;max-width:600px}
+
+.bento{display:grid;grid-template-columns:repeat(6,1fr);gap:14px}
+.tile{position:relative;grid-column:span 2;min-width:0;display:flex;flex-direction:column;gap:10px;padding:26px;border-radius:22px;background:var(--card);border:1px solid var(--line);overflow:hidden;isolation:isolate;transition:border-color .3s,transform .4s var(--ease)}
+.tile::before{content:"";position:absolute;inset:0;z-index:-1;background:radial-gradient(420px circle at var(--mx,50%) var(--my,-30%),rgba(47,123,255,.16),transparent 60%);opacity:0;transition:opacity .3s}
+.tile:hover{border-color:var(--line2)}
+.tile:hover::before{opacity:1}
+.tile.s4{grid-column:span 4}.tile.s3{grid-column:span 3}
+.tile h3{font-size:22px;letter-spacing:-.03em;line-height:1.15}
+.tile p{color:var(--muted);font-size:15px;line-height:1.5}
+.viz{height:150px;margin:-4px -4px 14px;border-radius:14px;background:var(--bg2);border:1px solid var(--line);position:relative;overflow:hidden;display:grid;place-items:center}
+.tile.s4 .viz,.tile.s3 .viz{height:170px}
+/* viz: modes */
+.vm{position:relative;display:flex;gap:4px;padding:5px;border-radius:14px;background:#15161e;border:1px solid var(--line2)}
+.vm span{position:relative;z-index:1;width:56px;height:44px;display:grid;place-items:center;color:#b9bbcc}
+.vm span svg{width:22px;height:22px}
+.vm::before{content:"";position:absolute;left:5px;top:5px;width:56px;height:44px;border-radius:10px;background:rgba(255,255,255,.12);animation:vm 4.5s cubic-bezier(.3,1.35,.5,1) infinite}
+@keyframes vm{0%,28%{transform:translateX(0)}33%,61%{transform:translateX(60px)}66%,94%{transform:translateX(120px)}100%{transform:translateX(0)}}
+.vm-k{position:absolute;bottom:14px;display:flex;gap:6px;font-size:13px}
+/* viz: buffer stack */
+.vb{position:relative;width:150px;height:96px}
+.vb i{position:absolute;inset:0;border-radius:10px;border:1px solid var(--line2);background:linear-gradient(135deg,#1f3d8f,#5b2a9c);box-shadow:0 10px 30px rgba(0,0,0,.5);animation:vb 4s var(--ease) infinite;animation-delay:var(--d)}
+@keyframes vb{0%{transform:translateY(-90px) rotate(-6deg);opacity:0}15%,100%{transform:translateY(var(--y)) scale(var(--s));opacity:1}}
+.vb-c{position:absolute;right:16px;top:14px;font:600 12px/1 var(--f-mono);background:var(--fg);color:#000;border-radius:999px;padding:5px 9px}
+/* viz: waveform */
+.vw{display:flex;align-items:center;gap:4px;height:60px}
+.vw i{width:5px;height:100%;border-radius:3px;background:linear-gradient(var(--violet),var(--blue));animation:lv .6s ease-in-out infinite alternate;animation-delay:var(--d)}
+.vrec{position:absolute;top:14px;left:14px;display:flex;align-items:center;gap:8px;font:500 12px/1 var(--f-mono);padding:6px 10px;border-radius:999px;background:rgba(255,61,87,.14);color:#ffc6ce}
+.vrec .rec-dot{margin:0}
+/* viz: cam */
+.vc{position:absolute;width:76px;height:76px;border-radius:50%;overflow:hidden;box-shadow:0 0 0 2px #fff,0 10px 30px rgba(0,0,0,.5);animation:vc 7s ease-in-out infinite}
+.vc svg{width:100%;height:100%;display:block}
+@keyframes vc{0%,100%{transform:translate(-80px,20px)}33%{transform:translate(70px,26px)}66%{transform:translate(40px,-30px)}}
+.vlines{position:absolute;inset:24px 30px;display:flex;flex-direction:column;gap:9px}
+.vlines i{height:7px;border-radius:4px;background:#1c1d27;width:var(--w)}
+/* viz: annotate */
+.va svg{width:200px;height:120px;overflow:visible}
+.va .p{stroke:var(--mark);stroke-width:4;fill:none;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:1;stroke-dashoffset:1;animation:dash 3.2s var(--ease) infinite}
+.va .p2{animation-delay:.5s}
+@keyframes dash{40%,85%{stroke-dashoffset:0;opacity:1}100%{stroke-dashoffset:0;opacity:0}}
+/* viz: gif */
+.vg{position:absolute;inset:0;display:flex;align-items:center;overflow:hidden}
+.vg .strip{display:flex;gap:8px;animation:slide 6s linear infinite;width:max-content}
+.vg .strip i{width:74px;height:50px;border-radius:6px;background:linear-gradient(135deg,#1f3d8f,#5b2a9c);border:1px solid var(--line2);position:relative}
+.vg .strip i::after{content:"";position:absolute;width:12px;height:12px;border-radius:50%;background:#fff;top:18px;left:var(--x)}
+.vg-b{position:absolute;right:16px;bottom:14px;font:600 13px/1 var(--f-mono);padding:7px 11px;border-radius:8px;background:var(--fg);color:#000}
+/* viz: dock */
+.vd{position:relative;width:240px;height:130px;border-radius:10px;border:1px solid var(--line2);background:radial-gradient(70% 90% at 20% 20%,#1d3b8f,transparent),#0d0f1c}
+.vd i{position:absolute;border-radius:6px;background:#2a2c3a;box-shadow:0 0 0 1px rgba(255,255,255,.2);animation:dock 5s cubic-bezier(.3,1.2,.4,1) infinite}
+@keyframes dock{0%,20%{left:80px;top:104px;width:80px;height:16px}45%,70%{left:220px;top:25px;width:16px;height:80px}90%,100%{left:80px;top:104px;width:80px;height:16px}}
+/* viz: monitors */
+.vmo{display:flex;align-items:flex-end;gap:14px}
+.vmo div{border-radius:8px;border:1px solid var(--line2);background:#121420;display:grid;place-items:center;font:500 12px/1 var(--f-mono);color:var(--muted)}
+.vmo div:first-child{width:150px;height:92px}.vmo div:last-child{width:100px;height:64px}
+/* viz: a11y */
+.vx{display:flex;gap:10px;position:relative}
+.vx i{width:36px;height:36px;border-radius:10px;background:#1a1b25;border:1px solid var(--line2)}
+.vx::after{content:"";position:absolute;left:-4px;top:-4px;width:44px;height:44px;border-radius:13px;box-shadow:0 0 0 2px var(--blue);animation:fx 5s steps(1) infinite}
+@keyframes fx{0%{transform:translateX(0)}20%{transform:translateX(46px)}40%{transform:translateX(92px)}60%{transform:translateX(138px)}80%{transform:translateX(184px)}}
+.vx-l{position:absolute;bottom:14px;font:500 12px/1 var(--f-mono);color:var(--muted);display:flex;gap:10px}
+.vx-l b{color:var(--fg);font-weight:500}
+/* viz: privacy */
+.vp{font:400 13px/1.9 var(--f-mono);color:var(--muted)}
+.vp b{color:var(--ok);font-weight:500}
+
+/* ---------- annotate ---------- */
+.ann-grid{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:56px;align-items:center}
+.ann-copy{display:flex;flex-direction:column;gap:22px}
+.ann-copy h2{font-size:clamp(36px,5vw,62px);letter-spacing:-.05em}
+.ann-copy p{color:var(--muted);font-size:17px}
+.tools{display:flex;flex-wrap:wrap;gap:6px}
+.tools button{all:unset;cursor:pointer;display:inline-flex;align-items:center;gap:7px;padding:8px 12px;border-radius:10px;font-size:13.5px;background:rgba(255,255,255,.05);box-shadow:inset 0 0 0 1px var(--line);color:var(--muted);transition:background .2s,color .2s}
+.tools button[aria-pressed=true]{color:var(--fg);background:rgba(255,77,109,.13);box-shadow:inset 0 0 0 1px rgba(255,77,109,.4)}
+.tools button:hover{color:var(--fg)}
+.tools button:focus-visible{outline:2px solid var(--blue)}
+.tools .sw{width:9px;height:9px;border-radius:3px;background:var(--mark)}
+.tools .act{background:transparent}
+.tools .save{background:var(--fg);color:#000;box-shadow:none}
+.tools .save:hover{color:#000}
+.ann-status{font:400 12.5px/1.5 var(--f-mono);color:var(--dim);min-height:1.5em}
+.ann-frame{padding:14px;border-radius:24px;background:linear-gradient(160deg,rgba(47,123,255,.25),rgba(139,92,255,.18) 50%,rgba(255,77,109,.14));border:1px solid var(--line2)}
+.ann-canvas{position:relative;aspect-ratio:10/7;border-radius:14px;overflow:hidden;background:#f6f6f9;container-type:inline-size;color:#14151c;font-size:2.15cqw;view-timeline-name:--ann}
+.inv>*{position:absolute;left:8%;right:8%;display:flex;justify-content:space-between;align-items:center}
+.inv-h{top:6%;height:12%;border-bottom:1px solid #e3e4ea}
+.inv-h b{font:700 1.35em/1 var(--f-display);letter-spacing:-.03em}
+.inv-h span{font:500 .85em/1 var(--f-mono);color:#6b6d7a}
+.inv .r{color:#6b6d7a}
+.inv .r b{color:#14151c;font-weight:500}
+.inv .r1{top:23%;height:6%}.inv .r2{top:33%;height:6%}
+.inv .li{font-size:.92em;color:#44465a}
+.inv .l1{top:45%}.inv .l2{top:52%}.inv .l3{top:59%}
+.inv .tot{top:71%;height:10%;border-top:1px solid #e3e4ea;font-weight:600}
+.inv .tot b{font:700 1.5em/1 var(--f-display);letter-spacing:-.02em}
+.inv .pay{top:85%;height:8%;left:60%;justify-content:center;border-radius:.6em;background:#14151c;color:#fff;font-weight:600}
+.ly{position:absolute;pointer-events:none}
+[data-layer].off,.ann-canvas.orig .ly{visibility:hidden}
+.ann-svg{inset:0;width:100%;height:100%}
+.ann-svg path,.ann-svg rect{fill:none;stroke:var(--mark);stroke-width:5;stroke-linecap:round;stroke-linejoin:round}
+.hl{left:57.5%;top:33%;width:28%;height:6%;background:rgba(255,214,0,.55);mix-blend-mode:multiply;border-radius:.2em;transform-origin:left}
+.px{left:56%;top:23%;width:36%;height:6%;display:grid;grid-template-columns:repeat(14,1fr);border-radius:.15em;overflow:hidden}
+.px i{background:hsl(232 10% var(--l))}
+.txt{left:5%;top:79%;font:700 1.55em/1 var(--f-display);color:var(--mark);transform:rotate(-4deg);letter-spacing:-.02em}
+.crop{inset:2.5%}
+.crop i{position:absolute;width:6%;height:8.5%;border:0 solid #14151c}
+.crop i:nth-child(1){left:0;top:0;border-width:.35em 0 0 .35em}
+.crop i:nth-child(2){right:0;top:0;border-width:.35em .35em 0 0}
+.crop i:nth-child(3){left:0;bottom:0;border-width:0 0 .35em .35em}
+.crop i:nth-child(4){right:0;bottom:0;border-width:0 .35em .35em 0}
+@supports (animation-timeline:view()){
+  .ann-svg .draw{stroke-dasharray:1;animation:draw linear both;animation-timeline:--ann}
+  .ann-svg .a1{animation-range:entry 70% cover 45%}
+  .ann-svg .a2{animation-range:entry 90% cover 50%}
+  .hl{animation:sx linear both;animation-timeline:--ann;animation-range:entry 80% cover 42%}
+  .px{animation:fade linear both;animation-timeline:--ann;animation-range:entry 60% cover 36%}
+  .txt{animation:fade linear both;animation-timeline:--ann;animation-range:cover 42% cover 52%}
+  .crop{animation:cropin linear both;animation-timeline:--ann;animation-range:entry 40% cover 30%}
+}
+@keyframes draw{from{stroke-dashoffset:1}to{stroke-dashoffset:0}}
+@keyframes sx{from{transform:scaleX(0)}}
+@keyframes fade{from{opacity:0;transform:translateY(.4em)}}
+@keyframes cropin{from{opacity:0;transform:scale(1.06)}}
+
+/* ---------- shortcuts ---------- */
+.keys-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:56px;align-items:start}
+.seg{display:inline-flex;padding:4px;border-radius:12px;background:rgba(255,255,255,.05);box-shadow:inset 0 0 0 1px var(--line);gap:2px}
+.seg button{all:unset;cursor:pointer;padding:8px 14px;border-radius:9px;font-size:13.5px;color:var(--muted)}
+.seg button[aria-pressed=true]{background:rgba(255,255,255,.12);color:var(--fg)}
+.seg button:focus-visible{outline:2px solid var(--blue)}
+.klist{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
+.klist li{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:15px 4px;border-bottom:1px solid var(--line);transition:background .3s}
+.klist li span:first-child{color:#d6d7e2}
+.klist .combo{display:flex;gap:5px}
+.klist li.hit{background:linear-gradient(90deg,rgba(47,123,255,.16),transparent)}
+.klist li.hit kbd{background:var(--blue);border-color:#7fb1ff;transform:translateY(1px)}
+.klist kbd{transition:background .2s,transform .1s}
+.kside{display:flex;flex-direction:column;gap:22px}
+.kside p{color:var(--muted);font-size:17px}
+
+/* ---------- numbers ---------- */
+.nums{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border-top:1px solid var(--line);border-left:1px solid var(--line)}
+.n{padding:34px 28px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:12px}
+.n strong{font:500 clamp(44px,5.6vw,76px)/1 var(--f-display);letter-spacing:-.02em;display:flex;align-items:baseline;gap:6px}
+.n strong small{font:500 .3em/1 var(--f-mono);letter-spacing:0;color:var(--muted)}
+.n>span{color:var(--muted);font-size:15px}
+
+/* ---------- engine ---------- */
+.engine{display:flex;flex-direction:column;gap:14px}
+.engine .marquee{border:0;padding-block:8px}
+.chip{display:inline-flex;align-items:center;gap:10px;padding:12px 18px;border-radius:999px;background:var(--card);border:1px solid var(--line);font:500 14px/1 var(--f-mono);color:#cfd0dc;white-space:nowrap}
+.chip i{width:8px;height:8px;border-radius:50%;background:var(--c)}
+.engine .track{gap:12px}
+
+/* ---------- final ---------- */
+.final{position:relative;padding-block:120px 80px;text-align:center;overflow:hidden;isolation:isolate}
+.final::before{content:"";position:absolute;left:50%;top:40%;width:900px;height:600px;transform:translate(-50%,-50%);z-index:-1;background:radial-gradient(closest-side,rgba(47,123,255,.35),rgba(139,92,255,.18) 50%,transparent);filter:blur(30px);animation:drift 10s ease-in-out infinite alternate}
+.final .wrap{display:flex;flex-direction:column;align-items:center;gap:28px}
+.giant{font:700 clamp(72px,19vw,260px)/.82 var(--f-display);letter-spacing:-.075em;background:linear-gradient(180deg,#fff 30%,rgba(255,255,255,.18));-webkit-background-clip:text;background-clip:text;color:transparent;padding-bottom:.08em}
+.final p{color:var(--muted);font-size:18px;max-width:520px}
+.dl{display:flex;flex-wrap:wrap;gap:12px;justify-content:center}
+.soon{font:400 12.5px/1.5 var(--f-mono);color:var(--dim)}
+footer{border-top:1px solid var(--line);padding-block:28px;color:var(--dim);font-size:13px}
+footer .wrap{display:flex;flex-wrap:wrap;gap:12px 28px;justify-content:space-between}
+
+/* ---------- responsive ---------- */
+@media (max-width:900px){
+  .nav ul{display:none}
+  .bento{grid-template-columns:1fr}
+  .tile,.tile.s4,.tile.s3{grid-column:auto}
+  .ann-grid,.keys-grid{grid-template-columns:1fr;gap:36px}
+  .nums{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:640px){
+  .stage{aspect-ratio:4/5}
+  .w-code{left:4%;top:8%;width:84%;height:34%}
+  .w-chart{left:12%;top:31%;width:80%;height:30%}
+  .w-chat{left:5%;top:55%;width:62%;height:24%}
+  .cam{width:22cqw;bottom:22%}
+  .desk{font-size:clamp(7px,2.1cqw,12px)}
+  .hero{padding-block:56px 24px}
+  .nums{grid-template-columns:1fr}
+  .sec{padding-block:80px}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}
+  .stage{transform:none!important}
+}
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b82ff"/><stop offset="1" stop-color="#8b5cff"/></linearGradient>
+  <radialGradient id="cSkin" cx="45%" cy="40%" r="60%"><stop offset="0" stop-color="#f1c7a6"/><stop offset=".7" stop-color="#d9a17c"/><stop offset="1" stop-color="#b97d5a"/></radialGradient>
+    <linearGradient id="cRoom" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4b5470"/><stop offset="1" stop-color="#262a3b"/></linearGradient>
+    <linearGradient id="cShirt" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4a6ee0"/><stop offset="1" stop-color="#2b44a8"/></linearGradient>
+    <linearGradient id="cHair" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4a3326"/><stop offset="1" stop-color="#2a1b13"/></linearGradient>
+  </defs>
+  <symbol id="i-person" viewBox="0 0 100 100">
+                <rect width="100" height="100" fill="url(#cRoom)"/>
+                <rect x="66" y="8" width="30" height="40" rx="2" fill="#2d3247" opacity=".8"/>
+                <g opacity=".7"><rect x="69" y="13" width="4" height="12" fill="#c9785a"/><rect x="74" y="11" width="3" height="14" fill="#7aa3d8"/><rect x="78" y="14" width="5" height="11" fill="#e2c46b"/><rect x="69" y="30" width="6" height="13" fill="#6fbf9d"/><rect x="76" y="32" width="3" height="11" fill="#b07ad6"/></g>
+                <ellipse cx="18" cy="20" rx="14" ry="10" fill="#fff6dd" opacity=".12"/>
+                <g class="person">
+                  <path d="M10 104C12 82 28 74 50 74s38 8 40 30z" fill="url(#cShirt)"/>
+                  <path d="M41 63h18v14c-3 4-15 4-18 0z" fill="#c98d68"/>
+                  <path d="M40 76c3 6 17 6 20 0" fill="none" stroke="#1e2f78" stroke-width="2.5"/>
+                  <ellipse cx="25.5" cy="46" rx="4" ry="6" fill="#d39874"/><ellipse cx="74.5" cy="46" rx="4" ry="6" fill="#d39874"/>
+                  <path d="M27 40c0-16 10-25 23-25s23 9 23 25v6c0 13-10 24-23 24S27 59 27 46z" fill="url(#cSkin)"/>
+                  <path d="M25 42c-2-18 9-30 25-30 15 0 27 10 25 28-3-7-6-11-10-13-8 3-20 4-31 1-4 3-7 8-9 14z" fill="url(#cHair)"/>
+                  <path d="M36 37.5c3-2 7-2 9 0M55 37.5c2-2 6-2 9 0" stroke="#3a2619" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+                  <ellipse cx="40.5" cy="43" rx="2.6" ry="2" fill="#fff"/><ellipse cx="59.5" cy="43" rx="2.6" ry="2" fill="#fff"/>
+                  <circle cx="41" cy="43" r="1.5" fill="#3b2a1e"/><circle cx="60" cy="43" r="1.5" fill="#3b2a1e"/>
+                  <circle cx="41.5" cy="42.5" r=".45" fill="#fff"/><circle cx="60.5" cy="42.5" r=".45" fill="#fff"/>
+                  <g class="lids" fill="#d9a17c"><ellipse cx="40.5" cy="43" rx="3" ry="2.4"/><ellipse cx="59.5" cy="43" rx="3" ry="2.4"/></g>
+                  <path d="M50 44v8.5c-1.4.8-3 .6-3.5-.3" stroke="#b77654" stroke-width="1.3" fill="none" stroke-linecap="round"/>
+                  <path d="M43.5 58c3.5 3 9.5 3 13 0" stroke="#a5513f" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+                  <ellipse cx="35" cy="52" rx="4" ry="2.4" fill="#e88f7c" opacity=".25"/><ellipse cx="65" cy="52" rx="4" ry="2.4" fill="#e88f7c" opacity=".25"/>
+                </g>
+  </symbol>
+  <symbol id="i-logo" viewBox="0 0 32 32"><rect x="1" y="1" width="30" height="30" rx="9" fill="url(#lg)"/><path d="M8 13V9a1 1 0 0 1 1-1h4M24 19v4a1 1 0 0 1-1 1h-4" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round"/><rect x="13" y="13" width="6" height="6" rx="1.6" fill="#fff"/></symbol>
+  <symbol id="i-grip" viewBox="0 0 24 24"><g fill="currentColor"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></g></symbol>
+  <symbol id="i-region" viewBox="0 0 24 24"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><path d="M12 9.5v5M9.5 12h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+  <symbol id="i-window" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M3 9.5h18" stroke="currentColor" stroke-width="1.9"/><circle cx="6.2" cy="7.3" r=".9" fill="currentColor"/></symbol>
+  <symbol id="i-screen" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12.5" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M8.5 20h7M12 16.5V20" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
+  <symbol id="i-shot" viewBox="0 0 24 24"><path d="M4 8.5a2 2 0 0 1 2-2h2.2L9.8 4.5h4.4l1.6 2H18a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/><circle cx="12" cy="12.7" r="3.4" fill="none" stroke="currentColor" stroke-width="1.9"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
+  <symbol id="i-cam" viewBox="0 0 24 24"><rect x="3" y="6" width="12.5" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M15.5 10.5 21 7.5v9l-5.5-3z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/></symbol>
+  <symbol id="i-stack" viewBox="0 0 24 24"><path d="M12 3.5 3.5 8 12 12.5 20.5 8z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/><path d="m3.5 12.2 8.5 4.5 8.5-4.5M3.5 16.2l8.5 4.5 8.5-4.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M18 7h2M4 17h3M11 17h9" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="15.5" cy="7" r="2.3" fill="none" stroke="currentColor" stroke-width="1.9"/><circle cx="8.5" cy="17" r="2.3" fill="none" stroke="currentColor" stroke-width="1.9"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 6v12M15 6v12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="currentColor"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l1 12.5h9l1-12.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11.5" height="11.5" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M15.5 8.5V5.5a1.5 1.5 0 0 0-1.5-1.5H5.5A1.5 1.5 0 0 0 4 5.5V14a1.5 1.5 0 0 0 1.5 1.5h3" fill="none" stroke="currentColor" stroke-width="1.9"/></symbol>
+  <symbol id="i-pen" viewBox="0 0 24 24"><path d="m4.5 19.5 1-4.5L16 4.5l3.5 3.5L9 18.5z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 4v12M6.5 11 12 16.5 17.5 11M5 20h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-win" viewBox="0 0 24 24"><path d="M3 5.5 10.5 4.4v7.1H3zM12 4.2 21 3v8.5h-9zM3 12.8h7.5v7.1L3 18.8zM12 12.8h9V21l-9-1.2z" fill="currentColor"/></symbol>
+</svg>
+
+<header class="nav">
+  <div class="wrap">
+    <a class="logo" href="#top" aria-label="Takebox home"><svg><use href="#i-logo"/></svg>Takebox</a>
+    <ul>
+      <li><a href="#features">Features</a></li>
+      <li><a href="#annotate">Annotate</a></li>
+      <li><a href="#shortcuts">Shortcuts</a></li>
+      <li><a href="#engine">Under the hood</a></li>
+    </ul>
+    <a class="pill white cta" href="#get">Download</a>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero">
+    <div class="wrap">
+      <div class="hero-copy">
+        <span class="badge"><b>NEW</b>Recording with mic, system sound and webcam</span>
+        <h1><span class="l"><span class="word">Take</span> <span class="word" style="animation-delay:.06s">the</span> <span class="word" style="animation-delay:.12s">shot.</span></span><span class="l l2"><span class="word" style="animation-delay:.2s">Keep</span> <span class="word" style="animation-delay:.26s">going.</span></span></h1>
+        <p class="lede">Takebox is <b>one floating bar</b> for screenshots and screen recordings. Every capture drops into a buffer in under 100&nbsp;ms, so the next one is already possible. No save dialog, ever.</p>
+        <div class="ctas">
+          <a class="pill white big" href="#get"><svg><use href="#i-win"/></svg>Download for Windows</a>
+          <a class="pill glass big" href="#demo">Try the bar <svg><use href="#i-arrow"/></svg></a>
+        </div>
+        <span class="os">ONE FILE · NO INSTALLER · NO ACCOUNT · OFFLINE</span>
+      </div>
+
+      <div class="stage-wrap" id="demo">
+        <div class="stage" id="stage" data-mode="region">
+          <div class="desk" id="desk">
+            <div class="topbar"><span><b>Takebox demo</b><span>Desktop 1 · 1920 × 1200</span></span><span id="clock">14:03</span></div>
+            <div class="win w-code"><div class="tb"><i></i><i></i><i></i><span>capture.rs</span></div>
+<div class="code"><span class="k">fn</span> <span class="f">take</span>(&amp;<span class="k">mut</span> self, mode: <span class="t">Mode</span>) {
+    <span class="k">let</span> shot = self.source.<span class="f">grab</span>(mode)?;
+    self.buffer.<span class="f">push</span>(shot);   <span class="c">// &lt; 100 ms</span>
+    self.clipboard.<span class="f">set</span>(&amp;shot);
+    <span class="c">// no dialog. next.</span>
+}
+
+<span class="k">const</span> FPS: <span class="t">u32</span> = <span class="nu">60</span>;</div></div>
+            <div class="win w-chart"><div class="tb"><i></i><i></i><i></i><span>Weekly sign-ups</span></div>
+              <div class="chart"><small>This week</small><div class="num">12,480 <em>+18%</em></div>
+                <div class="bars"><i style="--h:38%;--d:-.2s"></i><i style="--h:52%;--d:-1.1s"></i><i style="--h:44%;--d:-.6s"></i><i style="--h:63%;--d:-2s"></i><i style="--h:58%;--d:-1.5s"></i><i style="--h:74%;--d:-.9s"></i><i style="--h:92%;--d:-2.6s"></i></div>
+              </div></div>
+            <div class="win w-chat"><div class="tb"><i></i><i></i><i></i><span>Sam · Design</span></div>
+              <div class="chat" id="chat"><div class="msg in">Morning! Can you send me the chart?</div></div></div>
+            <div class="cam" id="cam" hidden aria-label="Webcam bubble. Drag to move, Ctrl and scroll to resize.">
+              <svg viewBox="0 0 100 100" aria-hidden="true"><use href="#i-person"/></svg>
+            </div>
+          </div>
+          <div class="flash" id="flash"></div>
+          <div class="sel" id="sel"><span id="selDim"></span></div>
+          <div class="rec-frame" id="recFrame" hidden></div>
+          <div class="countdown" id="countdown" hidden></div>
+          <div class="toast" id="toast" role="status" aria-live="polite"></div>
+          <div class="tray" id="tray" hidden role="dialog" aria-label="Buffer">
+            <div class="tray-h"><span class="eyebrow">Buffer</span><b id="trayCount">0</b><button type="button" data-tray="copy">Copy all</button><button type="button" data-tray="clear">Clear</button></div>
+            <div class="tlist" id="tlist"></div>
+          </div>
+
+          <div class="bar" id="bar" role="toolbar" aria-label="Takebox bar">
+            <div class="bar-idle">
+              <button type="button" class="grip" aria-label="Move the bar. Arrow keys move it, double-click docks it." title="Drag me to an edge"><svg><use href="#i-grip"/></svg></button>
+              <div class="modes" role="radiogroup" aria-label="Capture mode">
+                <span class="mode-hl" id="modeHl"></span>
+                <button type="button" role="radio" data-mode="region" aria-checked="true" class="on" aria-label="Region" title="Region · 1"><svg><use href="#i-region"/></svg></button>
+                <button type="button" role="radio" data-mode="window" aria-checked="false" aria-label="Window" title="Window · 2"><svg><use href="#i-window"/></svg></button>
+                <button type="button" role="radio" data-mode="screen" aria-checked="false" aria-label="Screen" title="Screen · 3"><svg><use href="#i-screen"/></svg></button>
+              </div>
+              <button type="button" class="b-cap" data-act="capture" title="Capture · S"><svg><use href="#i-shot"/></svg><span class="lbl">Capture</span></button>
+              <button type="button" class="b-rec" data-act="record" title="Record · R"><i class="dot"></i><span class="lbl">Record</span></button>
+              <span class="sep x-sm"></span>
+              <button type="button" class="tog x-sm" data-act="mic" aria-pressed="false" aria-label="Microphone" title="Microphone"><svg><use href="#i-mic"/></svg><span class="lvl"><i></i><i></i><i></i></span></button>
+              <button type="button" class="tog x-sm" data-act="cam" aria-pressed="false" aria-label="Webcam bubble" title="Webcam"><svg><use href="#i-cam"/></svg></button>
+              <button type="button" class="buf" data-act="buffer" aria-label="Buffer" title="Buffer · B"><svg><use href="#i-stack"/></svg><b class="count zero">0</b></button>
+              <button type="button" class="x-sm" data-act="settings" aria-label="Settings" title="Settings"><svg><use href="#i-sliders"/></svg></button>
+            </div>
+            <div class="bar-rec" hidden>
+              <button type="button" class="grip" aria-label="Move the bar"><svg><use href="#i-grip"/></svg></button>
+              <span class="rec-dot"></span><span class="timer" id="timer">00:00</span>
+              <button type="button" class="b-stop" data-act="record" title="Stop · R"><svg><use href="#i-stop"/></svg><span class="lbl">Stop</span></button>
+              <button type="button" data-act="pause" aria-label="Pause" title="Pause · P"><svg><use href="#i-pause"/></svg></button>
+              <button type="button" data-act="capture" aria-label="Take a still" title="Still from the recording · S"><svg><use href="#i-shot"/></svg></button>
+              <button type="button" class="buf" data-act="buffer" aria-label="Buffer" title="Buffer · B"><svg><use href="#i-stack"/></svg><b class="count zero">0</b></button>
+              <button type="button" class="danger" data-act="discard" aria-label="Discard" title="Discard · Esc"><svg><use href="#i-trash"/></svg></button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="hints" role="group" aria-label="Try the bar">
+        <button type="button" data-run="capture"><kbd>S</kbd>Capture</button>
+        <button type="button" data-run="record"><kbd>R</kbd>Record</button>
+        <button type="button" data-run="cycle"><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd>Mode + shot</button>
+        <button type="button" data-run="buffer"><kbd>B</kbd>Buffer</button>
+        <button type="button" class="snd" data-run="sound" aria-pressed="true"><kbd>♪</kbd>Sound</button>
+        <span class="note">This is the real layout. Drag across the desktop for a region · drag the grip to a screen edge to dock it.</span>
+      </div>
+    </div>
+  </section>
+
+  <div class="marquee" aria-hidden="true">
+    <div class="track">
+      <span>Screenshots</span><span>Screen recording</span><span>Region · Window · Screen</span><span>Instant buffer</span><span>Clipboard on capture</span><span>Webcam bubble</span><span>Mic + system sound</span><span>GIF export</span><span>Annotate &amp; blur</span><span>Docks to any edge</span><span>Multi-monitor</span>
+      <span>Screenshots</span><span>Screen recording</span><span>Region · Window · Screen</span><span>Instant buffer</span><span>Clipboard on capture</span><span>Webcam bubble</span><span>Mic + system sound</span><span>GIF export</span><span>Annotate &amp; blur</span><span>Docks to any edge</span><span>Multi-monitor</span>
+    </div>
+  </div>
+
+  <section class="statement">
+    <div class="wrap">
+      <p class="eyebrow">Why Takebox</p>
+      <p id="statement">Most capture tools stop you to ask where the file should go. <em>Takebox never asks.</em> It takes the shot, puts it on your clipboard, keeps it in the buffer, and is ready for the next one before you are.</p>
+    </div>
+  </section>
+
+  <section class="sec" id="features">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">Features</span>
+        <h2>Everything on one bar.</h2>
+        <p>Takebox stays on top of every app, out of the way, and out of your captures. Every button is also a shortcut.</p>
+      </div>
+      <div class="bento" id="bento">
+        <article class="tile s4">
+          <div class="viz"><div class="vm"><span><svg><use href="#i-region"/></svg></span><span><svg><use href="#i-window"/></svg></span><span><svg><use href="#i-screen"/></svg></span></div><div class="vm-k"><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd></div></div>
+          <h3>Region, window or screen</h3>
+          <p>Pick a mode once and it stays picked. Region reopens on the last selection, Window takes the one under your cursor, Screen takes the monitor you are on.</p>
+        </article>
+        <article class="tile">
+          <div class="viz"><div class="vb"><i style="--d:0s;--y:24px;--s:.86"></i><i style="--d:.3s;--y:12px;--s:.93"></i><i style="--d:.6s;--y:0px;--s:1"></i></div><span class="vb-c">+3</span></div>
+          <h3>A buffer, not a dialog</h3>
+          <p>Captures stack up as thumbnails. It survives restarts and cleans itself after 7 days.</p>
+        </article>
+        <article class="tile">
+          <div class="viz"><span class="vrec"><span class="rec-dot"></span>REC 00:42</span><div class="vw">
+            <i style="--d:-.1s"></i><i style="--d:-.4s"></i><i style="--d:-.2s"></i><i style="--d:-.55s"></i><i style="--d:-.3s"></i><i style="--d:-.05s"></i><i style="--d:-.45s"></i><i style="--d:-.25s"></i><i style="--d:-.5s"></i><i style="--d:-.15s"></i><i style="--d:-.35s"></i></div></div>
+          <h3>Recording, in sync</h3>
+          <p>Hardware H.264 to MP4, with your mic and system sound in one track. Pause skips cleanly.</p>
+        </article>
+        <article class="tile">
+          <div class="viz"><div class="vlines"><i style="--w:70%"></i><i style="--w:90%"></i><i style="--w:55%"></i><i style="--w:80%"></i><i style="--w:40%"></i></div><span class="vc"><svg viewBox="0 0 100 100" aria-hidden="true"><use href="#i-person"/></svg></span></div>
+          <h3>You, in a bubble</h3>
+          <p>A round webcam bubble you drag anywhere and resize. It is drawn into the video, never into your stills.</p>
+        </article>
+        <article class="tile">
+          <div class="viz va"><svg viewBox="0 0 200 120"><path class="p" pathLength="1" d="M20 96C60 110 120 100 160 50"/><path class="p" pathLength="1" d="M138 48l24-2-6 23"/><path class="p p2" pathLength="1" d="M30 18h70v34H30z"/></svg></div>
+          <h3>Mark it up</h3>
+          <p>Arrows, boxes, pen, text, highlights, pixelate and crop. Layers stay editable with unlimited undo.</p>
+        </article>
+        <article class="tile">
+          <div class="viz"><div class="vg"><div class="strip"><i style="--x:8px"></i><i style="--x:20px"></i><i style="--x:32px"></i><i style="--x:44px"></i><i style="--x:56px"></i><i style="--x:44px"></i><i style="--x:32px"></i><i style="--x:20px"></i><i style="--x:8px"></i><i style="--x:20px"></i><i style="--x:32px"></i><i style="--x:44px"></i><i style="--x:56px"></i><i style="--x:44px"></i><i style="--x:32px"></i><i style="--x:20px"></i></div></div><span class="vg-b">.GIF</span></div>
+          <h3>GIF in one click</h3>
+          <p>Turn any recording into a GIF from its card. Exports queue in the background with live progress.</p>
+        </article>
+        <article class="tile s3">
+          <div class="viz"><div class="vd"><i></i></div></div>
+          <h3>Docks to any edge</h3>
+          <p>Drop the bar near an edge and it snaps there, vertical on the sides. It fades to 40% when your cursor is elsewhere and remembers its spot per monitor layout.</p>
+        </article>
+        <article class="tile s3">
+          <div class="viz"><div class="vmo"><div>100%</div><div>150%</div></div></div>
+          <h3>Every monitor, every scale</h3>
+          <p>Mixed DPI, screens plugged in mid-session, a picker when you have several. Captures stay at full native resolution.</p>
+        </article>
+        <article class="tile s3">
+          <div class="viz"><div class="vx"><i></i><i></i><i></i><i></i><i></i></div><div class="vx-l"><b>EN</b>·<b>FR</b>· screen readers</div></div>
+          <h3>Keyboard first, labelled everywhere</h3>
+          <p>Every control is reachable with Tab and named for Narrator, VoiceOver and Orca. English and French switch without a restart.</p>
+        </article>
+        <article class="tile s3">
+          <div class="viz"><div class="vp">telemetry ........ <b>off</b><br>account .......... <b>none</b><br>network calls .... <b>0</b><br>runtime to install <b>none</b></div></div>
+          <h3>Private by design</h3>
+          <p>Takebox works fully offline. Your captures stay on your disk, in a folder you choose, named the way you like.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="annotate">
+    <div class="wrap ann-grid">
+      <div class="ann-copy">
+        <span class="eyebrow">Annotate</span>
+        <h2>Point at it. Blur the rest.</h2>
+        <p>Open any capture from its toast or its card. Shapes stay as layers until you save, and the original is kept, so you can always roll back.</p>
+        <div class="tools" id="tools" role="group" aria-label="Annotation layers">
+          <button type="button" data-ly="arrow" aria-pressed="true"><i class="sw"></i>Arrow</button>
+          <button type="button" data-ly="box" aria-pressed="true"><i class="sw"></i>Box</button>
+          <button type="button" data-ly="text" aria-pressed="true"><i class="sw"></i>Text</button>
+          <button type="button" data-ly="hl" aria-pressed="true"><i class="sw" style="background:#ffd600"></i>Highlight</button>
+          <button type="button" data-ly="px" aria-pressed="true"><i class="sw" style="background:#8b8d9c"></i>Pixelate</button>
+          <button type="button" data-ly="crop" aria-pressed="true"><i class="sw" style="background:#fff"></i>Crop</button>
+          <button type="button" class="act" data-ann="undo">Undo</button>
+          <button type="button" class="act" data-ann="orig">Original</button>
+          <button type="button" class="save" data-ann="save">Save</button>
+        </div>
+        <p class="ann-status" id="annStatus" aria-live="polite">Toggle a layer, then undo it. History has no limit.</p>
+      </div>
+      <div class="ann-frame">
+        <div class="ann-canvas" id="annCanvas">
+          <div class="inv">
+            <div class="inv-h"><b>Northwind Studio</b><span>INVOICE #4821</span></div>
+            <div class="r r1"><span>Billed to</span><b>lea.martin@example.com</b></div>
+            <div class="r r2"><span>Due</span><b>Nov 30, 2026</b></div>
+            <div class="li l1"><span>Brand workshop · 2 days</span><span>€900.00</span></div>
+            <div class="li l2"><span>Icon set</span><span>€240.00</span></div>
+            <div class="li l3"><span>Revisions</span><span>€100.00</span></div>
+            <div class="tot"><span>Total</span><b>€1,240.00</b></div>
+            <div class="pay">Pay invoice</div>
+          </div>
+          <div class="ly px" data-layer="px" id="px"></div>
+          <div class="ly hl" data-layer="hl"></div>
+          <svg class="ly ann-svg" viewBox="0 0 1000 700" aria-hidden="true">
+            <g data-layer="box"><rect class="draw a2" pathLength="1" x="545" y="488" width="395" height="85" rx="10"/></g>
+            <g data-layer="arrow"><path class="draw a1" pathLength="1" d="M300 590C380 650 480 660 585 628"/><path class="draw a1" pathLength="1" d="M552 600l36 27-40 22"/></g>
+          </svg>
+          <div class="ly txt" data-layer="text">Pay from here</div>
+          <div class="ly crop" data-layer="crop"><i></i><i></i><i></i><i></i></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="shortcuts">
+    <div class="wrap keys-grid">
+      <div class="kside">
+        <span class="eyebrow">Shortcuts</span>
+        <h2 style="font-size:clamp(36px,5vw,62px);letter-spacing:-.05em">Your hands never leave the keys.</h2>
+        <p>The same map on Windows, macOS and Linux. Every shortcut works from any app and can be remapped; clashes with other apps are flagged on the spot.</p>
+        <div class="seg" role="group" aria-label="Keyboard layout">
+          <button type="button" data-os="pc" aria-pressed="true">Windows · Linux</button>
+          <button type="button" data-os="mac" aria-pressed="false">macOS</button>
+        </div>
+        <p class="os">Press the letters on your keyboard. The rows light up.</p>
+      </div>
+      <ul class="klist" id="klist">
+        <li data-code="KeyS"><span>Capture in the current mode</span><span class="combo"><kbd class="m1">Ctrl</kbd><kbd class="m2">Shift</kbd><kbd>S</kbd></span></li>
+        <li data-code="KeyR"><span>Start or stop recording</span><span class="combo"><kbd class="m1">Ctrl</kbd><kbd class="m2">Shift</kbd><kbd>R</kbd></span></li>
+        <li data-code="KeyP"><span>Pause or resume</span><span class="combo"><kbd class="m1">Ctrl</kbd><kbd class="m2">Shift</kbd><kbd>P</kbd></span></li>
+        <li data-code="Digit1"><span>Region, then capture</span><span class="combo"><kbd class="m1">Ctrl</kbd><kbd class="m2">Shift</kbd><kbd>1</kbd></span></li>
+        <li data-code="Digit2"><span>Window, then capture</span><span class="combo"><kbd class="m1">Ctrl</kbd><kbd class="m2">Shift</kbd><kbd>2</kbd></span></li>
+        <li data-code="Digit3"><span>Screen, then capture</span><span class="combo"><kbd class="m1">Ctrl</kbd><kbd class="m2">Shift</kbd><kbd>3</kbd></span></li>
+        <li data-code="KeyB"><span>Open the buffer</span><span class="combo"><kbd class="m1">Ctrl</kbd><kbd class="m2">Shift</kbd><kbd>B</kbd></span></li>
+        <li data-code="KeyL"><span>Folder and file prefix</span><span class="combo"><kbd class="m1">Ctrl</kbd><kbd class="m2">Shift</kbd><kbd>L</kbd></span></li>
+        <li data-code="Space"><span>Show or hide the bar</span><span class="combo"><kbd class="m1">Ctrl</kbd><kbd class="m2">Shift</kbd><kbd>Space</kbd></span></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="wrap">
+      <div class="sec-head"><span class="eyebrow">By the numbers</span><h2>Fast enough to forget.</h2></div>
+      <div class="nums">
+        <div class="n"><strong>&lt;<span data-to="100">100</span><small>ms</small></strong><span>from shortcut to a capture in the buffer</span></div>
+        <div class="n"><strong><span data-to="240">240</span><small>ms</small></strong><span>to the first recorded frame, GPU warmed up at launch</span></div>
+        <div class="n"><strong><span data-to="60">60</span><small>fps</small></strong><span>hardware-encoded recording, cropped on the GPU</span></div>
+        <div class="n"><strong><span data-to="1">1</span><small>file</small></strong><span>to download. No installer, runtime or codec pack</span></div>
+        <div class="n"><strong><span data-to="7">7</span><small>days</small></strong><span>in the buffer by default; pinned captures stay</span></div>
+        <div class="n"><strong><span data-to="0">0</span><small>calls</small></strong><span>to the network. No telemetry, no account</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="engine">
+    <div class="wrap"><div class="sec-head"><span class="eyebrow">Under the hood</span><h2>Rust, all the way down.</h2><p>No WebView, no Electron, no garbage collector. Takebox talks straight to each system's own capture and encoder APIs, and never blocks the bar while it writes to disk.</p></div></div>
+    <div class="engine" aria-hidden="true">
+      <div class="marquee"><div class="track">
+        <span class="chip"><i style="--c:#ff8a3d"></i>Rust</span><span class="chip"><i style="--c:#2f7bff"></i>Windows.Graphics.Capture</span><span class="chip"><i style="--c:#2f7bff"></i>Media Foundation H.264</span><span class="chip"><i style="--c:#2f7bff"></i>WASAPI loopback</span><span class="chip"><i style="--c:#2f7bff"></i>Direct3D 11 shaders</span><span class="chip"><i style="--c:#c79bff"></i>ScreenCaptureKit</span><span class="chip"><i style="--c:#c79bff"></i>VideoToolbox</span><span class="chip"><i style="--c:#3ddc97"></i>PipeWire</span><span class="chip"><i style="--c:#3ddc97"></i>X11 · Wayland</span>
+        <span class="chip"><i style="--c:#ff8a3d"></i>Rust</span><span class="chip"><i style="--c:#2f7bff"></i>Windows.Graphics.Capture</span><span class="chip"><i style="--c:#2f7bff"></i>Media Foundation H.264</span><span class="chip"><i style="--c:#2f7bff"></i>WASAPI loopback</span><span class="chip"><i style="--c:#2f7bff"></i>Direct3D 11 shaders</span><span class="chip"><i style="--c:#c79bff"></i>ScreenCaptureKit</span><span class="chip"><i style="--c:#c79bff"></i>VideoToolbox</span><span class="chip"><i style="--c:#3ddc97"></i>PipeWire</span><span class="chip"><i style="--c:#3ddc97"></i>X11 · Wayland</span>
+      </div></div>
+      <div class="marquee"><div class="track rev">
+        <span class="chip"><i style="--c:#f5f5f7"></i>egui + OpenGL</span><span class="chip"><i style="--c:#f5f5f7"></i>AccessKit</span><span class="chip"><i style="--c:#f5f5f7"></i>Fluent i18n</span><span class="chip"><i style="--c:#ff8a3d"></i>Fragmented MP4</span><span class="chip"><i style="--c:#ff8a3d"></i>AAC audio</span><span class="chip"><i style="--c:#ff8a3d"></i>PNG · GIF · PDF</span><span class="chip"><i style="--c:#f5f5f7"></i>Write-ahead buffer index</span><span class="chip"><i style="--c:#f5f5f7"></i>MIT · Apache-2.0 deps only</span>
+        <span class="chip"><i style="--c:#f5f5f7"></i>egui + OpenGL</span><span class="chip"><i style="--c:#f5f5f7"></i>AccessKit</span><span class="chip"><i style="--c:#f5f5f7"></i>Fluent i18n</span><span class="chip"><i style="--c:#ff8a3d"></i>Fragmented MP4</span><span class="chip"><i style="--c:#ff8a3d"></i>AAC audio</span><span class="chip"><i style="--c:#ff8a3d"></i>PNG · GIF · PDF</span><span class="chip"><i style="--c:#f5f5f7"></i>Write-ahead buffer index</span><span class="chip"><i style="--c:#f5f5f7"></i>MIT · Apache-2.0 deps only</span>
+      </div></div>
+    </div>
+  </section>
+
+  <section class="final" id="get">
+    <div class="wrap">
+      <svg width="64" height="64" aria-hidden="true"><use href="#i-logo"/></svg>
+      <div class="giant" aria-hidden="true">Takebox</div>
+      <h2 class="sr" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">Get Takebox</h2>
+      <p>Download one file, run it, and the bar is there. Start it at login from Settings if you like it.</p>
+      <div class="dl">
+        <a class="pill white big" href="#get"><svg><use href="#i-down"/></svg>Download for Windows</a>
+        <a class="pill glass big" href="#demo">Play with the bar again</a>
+      </div>
+      <span class="soon">Windows 10 1903+ and 11 · macOS and Linux builds are in development</span>
+    </div>
+  </section>
+</main>
+<footer><div class="wrap"><span>© 2026 Takebox · Made in Rust</span><span>Offline. No telemetry. Your captures stay yours.</span></div></footer>
+
+<script>
+(() => {
+const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const wait = ms => new Promise(r => setTimeout(r, reduce ? Math.min(ms, 40) : ms));
+const pad = n => String(n).padStart(2, '0');
+const stage = $('#stage'), desk = $('#desk'), bar = $('#bar'), sel = $('#sel'), selDim = $('#selDim'),
+      flashEl = $('#flash'), toastEl = $('#toast'), tray = $('#tray'), tlist = $('#tlist'), cdEl = $('#countdown'),
+      cam = $('#cam'), recFrame = $('#recFrame'), chat = $('#chat');
+const S = { mode: 'region', items: [], rec: false, paused: false, elapsed: 0, busy: false, cd: null,
+            last: { x: .2, y: .16, w: .5, h: .5 }, front: $('.w-chart'), sound: true, replied: false, recRect: null };
+const full = { x: 0, y: 0, w: 1, h: 1 };
+
+/* ---------- helpers ---------- */
+const fname = ext => { const d = new Date(); return `takebox_${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}.${ext}`; };
+const hms = d => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+const mmss = s => `${pad(Math.floor(s / 60))}:${pad(Math.floor(s % 60))}`;
+const tick = () => { const d = new Date(); $('#clock').textContent = `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+tick(); setInterval(tick, 15000);
+
+function winRect(w) { return { x: w.offsetLeft / desk.clientWidth, y: w.offsetTop / desk.clientHeight, w: w.offsetWidth / desk.clientWidth, h: w.offsetHeight / desk.clientHeight }; }
+function place(el, r) { Object.assign(el.style, { left: r.x * 100 + '%', top: r.y * 100 + '%', width: r.w * 100 + '%', height: r.h * 100 + '%' }); }
+
+// A capture is a scaled clone of the desktop. The bar is not inside it, so it never shows up (like the app).
+function snap(r, tw, th) {
+  const W = desk.clientWidth, H = desk.clientHeight;
+  const box = document.createElement('div'); box.className = 'shot';
+  box.style.width = tw + 'px'; box.style.height = th + 'px';
+  const s = Math.max(tw / (r.w * W), th / (r.h * H));
+  const c = desk.cloneNode(true);
+  c.removeAttribute('id'); $$('[id]', c).forEach(n => n.removeAttribute('id'));
+  c.style.cssText = `position:absolute;left:0;top:0;width:${W}px;height:${H}px;font-size:${getComputedStyle(desk).fontSize};transform-origin:0 0;transform:translate(${(tw - r.w * W * s) / 2 - r.x * W * s}px,${(th - r.h * H * s) / 2 - r.y * H * s}px) scale(${s})`;
+  box.append(c); return box;
+}
+
+/* ---------- sound ---------- */
+let ac;
+function audio() { if (!S.sound) return null; try { ac = ac || new (window.AudioContext || window.webkitAudioContext)(); return ac; } catch { return null; } }
+function shutter() {
+  const a = audio(); if (!a) return;
+  try {
+    const t = a.currentTime;
+    [[0, 3800], [.075, 2200]].forEach(([d, f]) => {
+      const len = .06, buf = a.createBuffer(1, Math.floor(a.sampleRate * len), a.sampleRate), ch = buf.getChannelData(0);
+      for (let j = 0; j < ch.length; j++) ch[j] = (Math.random() * 2 - 1) * Math.pow(1 - j / ch.length, 3);
+      const src = a.createBufferSource(), bp = a.createBiquadFilter(), g = a.createGain();
+      src.buffer = buf; bp.type = 'bandpass'; bp.frequency.value = f; bp.Q.value = .8; g.gain.value = .35;
+      src.connect(bp).connect(g).connect(a.destination); src.start(t + d);
+    });
+  } catch {}
+}
+function blip(freq = 880, dur = .12) {
+  const a = audio(); if (!a) return;
+  try {
+    const o = a.createOscillator(), g = a.createGain(), t = a.currentTime;
+    o.frequency.value = freq; o.type = 'sine';
+    g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(.12, t + .01); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    o.connect(g).connect(a.destination); o.start(t); o.stop(t + dur + .02);
+  } catch {}
+}
+
+/* ---------- mode ---------- */
+const modeBtns = $$('.modes button', bar), hl = $('#modeHl');
+function placeHl() {
+  const b = modeBtns.find(b => b.dataset.mode === S.mode);
+  hl.style.width = b.offsetWidth + 'px'; hl.style.height = b.offsetHeight + 'px';
+  hl.style.transform = `translate(${b.offsetLeft}px,${b.offsetTop}px)`;
+}
+function setMode(m) {
+  S.mode = m; stage.dataset.mode = m;
+  modeBtns.forEach(b => { const on = b.dataset.mode === m; b.classList.toggle('on', on); b.setAttribute('aria-checked', on); });
+  placeHl(); blip(m === 'region' ? 660 : m === 'window' ? 740 : 820, .06);
+}
+modeBtns.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+
+/* ---------- bar position, drag and dock ---------- */
+const pos = { x: 0, y: 0 }; let dock = null, drag = null;
+const W = () => stage.clientWidth, H = () => stage.clientHeight;
+function apply() { bar.style.left = pos.x + 'px'; bar.style.top = pos.y + 'px'; }
+function clamp(m = 8) { pos.x = Math.max(m, Math.min(W() - bar.offsetWidth - m, pos.x)); pos.y = Math.max(m, Math.min(H() - bar.offsetHeight - m, pos.y)); }
+function home() { pos.x = (W() - bar.offsetWidth) / 2; pos.y = H() - bar.offsetHeight - Math.max(14, H() * .05); apply(); }
+function redock() {
+  if (dock === 'left') pos.x = 8; else if (dock === 'right') pos.x = W() - bar.offsetWidth - 8;
+  else if (dock === 'top') pos.y = 8; else if (dock === 'bottom') pos.y = H() - bar.offsetHeight - 8;
+  clamp(); apply(); placeHl();
+}
+function setDock(d) {
+  const vert = d === 'left' || d === 'right';
+  const cx = pos.x + bar.offsetWidth / 2, cy = pos.y + bar.offsetHeight / 2;
+  bar.classList.add('snap'); dock = d;
+  if (bar.classList.contains('vert') !== vert) {
+    bar.classList.toggle('vert', vert);
+    pos.x = cx - bar.offsetWidth / 2; pos.y = cy - bar.offsetHeight / 2;
+  }
+  redock(); setTimeout(() => bar.classList.remove('snap'), 450);
+  if (d) blip(520, .08);
+}
+function nearest() {
+  const d = { left: pos.x, right: W() - pos.x - bar.offsetWidth, top: pos.y, bottom: H() - pos.y - bar.offsetHeight };
+  return Object.keys(d).reduce((a, b) => d[a] < d[b] ? a : b);
+}
+function settle() {
+  const m = 28; let d = null;
+  if (pos.x <= m) d = 'left'; else if (pos.x >= W() - bar.offsetWidth - m) d = 'right';
+  else if (pos.y <= m) d = 'top'; else if (pos.y >= H() - bar.offsetHeight - m) d = 'bottom';
+  setDock(d);
+}
+bar.addEventListener('pointerdown', e => {
+  const g = e.target.closest('.grip'); if (!g) return;
+  e.preventDefault(); closeTray();
+  if (bar.classList.contains('vert')) { bar.classList.remove('vert'); placeHl(); }
+  dock = null; bar.classList.remove('snap'); bar.classList.add('dragging');
+  drag = { dx: g.offsetLeft + g.offsetWidth / 2, dy: bar.offsetHeight / 2 };
+  g.setPointerCapture(e.pointerId); moveTo(e);
+});
+function moveTo(e) {
+  const sr = stage.getBoundingClientRect();
+  pos.x = e.clientX - sr.left - drag.dx; pos.y = e.clientY - sr.top - drag.dy; clamp(0); apply();
+}
+bar.addEventListener('pointermove', e => { if (drag) moveTo(e); });
+bar.addEventListener('pointerup', () => { if (!drag) return; drag = null; bar.classList.remove('dragging'); settle(); });
+bar.addEventListener('dblclick', e => { if (e.target.closest('.grip')) setDock(nearest()); });
+bar.addEventListener('keydown', e => {
+  if (!e.target.closest('.grip')) return;
+  const step = { ArrowLeft: [-24, 0], ArrowRight: [24, 0], ArrowUp: [0, -24], ArrowDown: [0, 24] }[e.key]; if (!step) return;
+  e.preventDefault(); e.stopPropagation();
+  if (bar.classList.contains('vert')) bar.classList.remove('vert');
+  dock = null; pos.x += step[0]; pos.y += step[1]; clamp(0); apply(); settle();
+});
+addEventListener('resize', () => { if (dock) redock(); else { clamp(); apply(); } if (!tray.hidden) placeTray(); });
+
+// Fade to 40% when the cursor is away (FR-5)
+stage.addEventListener('pointermove', e => {
+  const r = bar.getBoundingClientRect();
+  const dx = Math.max(r.left - e.clientX, 0, e.clientX - r.right), dy = Math.max(r.top - e.clientY, 0, e.clientY - r.bottom);
+  bar.classList.toggle('dim', !drag && tray.hidden && Math.hypot(dx, dy) > 150);
+});
+stage.addEventListener('pointerleave', () => bar.classList.remove('dim'));
+
+/* ---------- region drawing, window picking ---------- */
+let draw = null;
+const local = e => { const r = desk.getBoundingClientRect(); return { x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) }; };
+function showSel(r, kind) {
+  sel.className = 'sel on ' + (kind || ''); place(sel, r);
+  selDim.textContent = `${Math.round(r.w * 1920)} × ${Math.round(r.h * 1200)}`;
+}
+const hideSel = () => sel.classList.remove('on');
+desk.addEventListener('pointerdown', e => {
+  if (e.target.closest('.cam') || S.busy || S.cd) return;
+  closeTray();
+  if (S.rec) return;
+  if (S.mode === 'region') {
+    e.preventDefault(); const p = local(e); draw = p; desk.setPointerCapture(e.pointerId);
+    showSel({ x: p.x, y: p.y, w: 0, h: 0 });
+  } else if (S.mode === 'window') {
+    const w = e.target.closest('.win'); if (w) { S.front = w; w.style.zIndex = (+w.style.zIndex || 1) + 5; capture(); }
+  } else capture();
+});
+let rectNow = null;
+desk.addEventListener('pointermove', e => {
+  if (draw) {
+    const p = local(e);
+    rectNow = { x: Math.min(p.x, draw.x), y: Math.min(p.y, draw.y), w: Math.abs(p.x - draw.x), h: Math.abs(p.y - draw.y) };
+    showSel(rectNow);
+  } else if (S.mode === 'window') {
+    const w = e.target.closest('.win'); $$('.win', desk).forEach(n => n.classList.toggle('hov', n === w));
+  }
+});
+desk.addEventListener('pointerup', () => {
+  if (!draw) return; draw = null;
+  const r = rectNow; rectNow = null;
+  if (r && r.w * desk.clientWidth > 18 && r.h * desk.clientHeight > 14) { S.last = r; capture({ region: r }); }
+  else hideSel();
+});
+desk.addEventListener('pointerleave', () => $$('.win', desk).forEach(n => n.classList.remove('hov')));
+
+/* ---------- capture ---------- */
+async function capture(opts = {}) {
+  if (S.busy || S.cd) return;
+  S.busy = true; closeTray();
+  let r;
+  if (S.rec) r = S.recRect;
+  else if (S.mode === 'screen') r = full;
+  else if (S.mode === 'window') { r = winRect(S.front); sel.classList.remove('anim'); showSel(r, 'win'); await wait(380); }
+  else if (opts.region) r = opts.region;
+  else {
+    r = S.last;
+    if (!sel.classList.contains('on')) { showSel({ x: r.x + r.w / 2, y: r.y + r.h / 2, w: 0, h: 0 }); sel.getBoundingClientRect(); }
+    sel.classList.add('anim'); showSel(r, 'anim'); await wait(560);
+  }
+  place(flashEl, r); flashEl.animate([{ opacity: .92 }, { opacity: 0 }], { duration: reduce ? 1 : 460, easing: 'ease-out' });
+  shutter();
+  setTimeout(() => { if (!S.rec) hideSel(); }, 120);
+  const item = { type: 'png', r, t: new Date(), thumb: snap(r, 176, 110), name: fname('png') };
+  fly(r); add(item);
+  toast(`<span class="ok">●</span><b>${S.rec ? 'Still taken' : 'Copied and saved'}</b><span class="fn">${item.name}</span><button type="button" data-t="annotate">Annotate</button><button type="button" data-t="undo">Undo</button>`);
+  chatSend(r);
+  S.busy = false;
+}
+function fly(r) {
+  const dr = desk.getBoundingClientRect(), w = r.w * dr.width, h = r.h * dr.height;
+  const f = snap(r, w, h); f.classList.add('fly');
+  const left = dr.left + r.x * dr.width, top = dr.top + r.y * dr.height;
+  Object.assign(f.style, { left: left + 'px', top: top + 'px' });
+  document.body.append(f);
+  const t = $(S.rec ? '.bar-rec .buf' : '.bar-idle .buf', bar).getBoundingClientRect();
+  const dx = t.left + t.width / 2 - (left + w / 2), dy = t.top + t.height / 2 - (top + h / 2);
+  const sc = Math.max(24 / w, .03);
+  const a = f.animate([
+    { transform: 'translate(0,0) scale(1)', opacity: 1 },
+    { transform: `translate(${dx * .25}px,${dy * .15 - 30}px) scale(${Math.min(.8, .35 + sc)}) rotate(-4deg)`, opacity: 1, offset: .4 },
+    { transform: `translate(${dx}px,${dy}px) scale(${sc}) rotate(0deg)`, opacity: .3 }
+  ], { duration: reduce ? 1 : 780, easing: 'cubic-bezier(.6,.05,.25,1)' });
+  a.onfinish = () => { f.remove(); bump(); };
+}
+function bump() { $$('.buf', bar).forEach(b => b.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.25)' }, { transform: 'scale(1)' }], { duration: 320, easing: 'cubic-bezier(.3,1.6,.5,1)' })); }
+function add(item) { S.items.unshift(item); counts(); if (!tray.hidden) renderTray(); }
+function counts() { $$('.count', bar).forEach(c => { c.textContent = S.items.length; c.classList.toggle('zero', !S.items.length); }); }
+
+function chatSend(r) {
+  const m = document.createElement('div'); m.className = 'msg out';
+  const fs = parseFloat(getComputedStyle(desk).fontSize);
+  m.append(snap(r, fs * 9, fs * 5.6)); chat.append(m);
+  while (chat.children.length > 4) chat.firstElementChild.remove();
+  if (!S.replied) {
+    S.replied = true;
+    setTimeout(() => {
+      const t = document.createElement('div'); t.className = 'msg in typing'; t.innerHTML = '<i></i><i></i><i></i>'; chat.append(t);
+      setTimeout(() => { t.className = 'msg in'; t.textContent = 'Perfect, that was fast. Thanks!'; blip(1180, .1); }, 1300);
+    }, 600);
+  }
+}
+
+/* ---------- toast ---------- */
+let toastTimer;
+function toast(html, ms = 2800) {
+  toastEl.innerHTML = html; toastEl.classList.add('on');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.classList.remove('on'), ms);
+}
+toastEl.addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.t === 'undo') { S.items.shift(); counts(); if (!tray.hidden) renderTray(); toast('<b>Capture removed</b><span class="fn">moved to the Recycle Bin</span>', 1800); }
+  if (b.dataset.t === 'annotate') { toastEl.classList.remove('on'); $('#annotate').scrollIntoView({ behavior: reduce ? 'auto' : 'smooth' }); }
+});
+
+/* ---------- recording ---------- */
+let recTimer, discardArm;
+function swapLayout(rec) {
+  const cx = pos.x + bar.offsetWidth / 2, cy = pos.y + bar.offsetHeight / 2;
+  $('.bar-idle', bar).hidden = rec; $('.bar-rec', bar).hidden = !rec;
+  if (!dock) { pos.x = cx - bar.offsetWidth / 2; pos.y = cy - bar.offsetHeight / 2; clamp(); apply(); } else redock();
+  if (!rec) placeHl();
+  bar.animate([{ transform: 'scale(.9)', opacity: .5 }, { transform: 'scale(1)', opacity: 1 }], { duration: reduce ? 1 : 340, easing: 'cubic-bezier(.3,1.5,.5,1)' });
+}
+async function record() {
+  if (S.cd) { S.cd.cancel = true; return; }
+  if (S.rec) return stop();
+  if (S.busy) return;
+  closeTray();
+  const r = S.mode === 'screen' ? full : S.mode === 'window' ? winRect(S.front) : S.last;
+  if (S.mode !== 'screen') { sel.classList.remove('anim'); showSel(r, S.mode === 'window' ? 'win' : ''); }
+  S.cd = { cancel: false }; place(cdEl, r); cdEl.hidden = false;
+  for (const n of [3, 2, 1]) {
+    cdEl.innerHTML = `<b>${n}</b>`; blip(n === 1 ? 990 : 660, .09);
+    await wait(700);
+    if (S.cd.cancel) { S.cd = null; cdEl.hidden = true; hideSel(); toast('<b>Countdown cancelled</b>', 1400); return; }
+  }
+  S.cd = null; cdEl.hidden = true; hideSel();
+  S.rec = true; S.paused = false; S.elapsed = 0; S.recRect = r;
+  place(recFrame, r); recFrame.hidden = false; stage.classList.add('recording');
+  $('#timer').textContent = '00:00'; $('.bar-rec', bar).classList.remove('paused');
+  swapLayout(true); blip(1320, .14);
+  recTimer = setInterval(() => { if (!S.paused) { S.elapsed += .25; $('#timer').textContent = mmss(S.elapsed); } }, 250);
+}
+function endRec() {
+  clearInterval(recTimer); S.rec = false; recFrame.hidden = true; stage.classList.remove('recording');
+  const d = $('[data-act=discard]', bar); d.classList.remove('confirm'); clearTimeout(discardArm); discardArm = null;
+  swapLayout(false);
+}
+function stop() {
+  const r = S.recRect, dur = Math.max(1, S.elapsed);
+  endRec(); blip(520, .14);
+  const item = { type: 'mp4', r, t: new Date(), dur, prog: 0, thumb: snap(r, 176, 110), name: fname('mp4') };
+  fly(r); add(item);
+  toast(`<span class="ok">●</span><b>Saving recording</b><span class="fn">${item.name} · ${mmss(dur)}</span>`);
+  const iv = setInterval(() => {
+    item.prog = Math.min(100, item.prog + 7);
+    const bar_ = tlist.querySelector(`[data-name="${item.name}"] .prog i`); if (bar_) bar_.style.setProperty('--p', item.prog + '%');
+    if (item.prog >= 100) { clearInterval(iv); if (!tray.hidden) renderTray(); }
+  }, 110);
+}
+function discard() {
+  const b = $('[data-act=discard]', bar);
+  if (!discardArm) {
+    b.classList.add('confirm'); toast('<b>Discard this recording?</b><span class="fn">Press discard or Esc again</span>', 2600);
+    discardArm = setTimeout(() => { b.classList.remove('confirm'); discardArm = null; }, 2600); return;
+  }
+  endRec(); toast('<b>Recording discarded</b>', 1600);
+}
+function pause() {
+  if (!S.rec) return;
+  S.paused = !S.paused; $('.bar-rec', bar).classList.toggle('paused', S.paused);
+  const b = $('[data-act=pause]', bar); b.setAttribute('aria-label', S.paused ? 'Resume' : 'Pause');
+  toast(`<b>${S.paused ? 'Paused' : 'Recording'}</b><span class="fn">${S.paused ? 'the video skips the pause' : mmss(S.elapsed)}</span>`, 1400);
+}
+
+/* ---------- tray ---------- */
+function placeTray() {
+  const tw = tray.offsetWidth, th = tray.offsetHeight, bw = bar.offsetWidth, bh = bar.offsetHeight;
+  let x, y;
+  if (dock === 'left' || dock === 'right') {
+    x = dock === 'left' ? pos.x + bw + 10 : pos.x - tw - 10; y = pos.y + bh / 2 - th / 2;
+  } else {
+    x = pos.x + bw / 2 - tw / 2; y = pos.y + bh / 2 > H() / 2 ? pos.y - th - 10 : pos.y + bh + 10;
+  }
+  tray.style.left = Math.max(12, Math.min(W() - tw - 12, x)) + 'px';
+  tray.style.top = Math.max(12, Math.min(H() - th - 12, y)) + 'px';
+}
+function renderTray() {
+  $('#trayCount').textContent = S.items.length; tlist.innerHTML = '';
+  if (!S.items.length) { tlist.innerHTML = '<p class="empty">Nothing yet. Press <kbd>S</kbd> to take one.</p>'; placeTray(); return; }
+  S.items.forEach((it, i) => {
+    const c = document.createElement('div'); c.className = 'card'; c.dataset.name = it.name; c.style.animationDelay = i * 30 + 'ms';
+    const th = document.createElement('div'); th.className = 'th'; th.append(it.thumb.cloneNode(true));
+    th.insertAdjacentHTML('beforeend', `<span class="tag ${it.type}">${it.type.toUpperCase()}</span>` + (it.type === 'mp4' && it.prog < 100 ? `<span class="prog"><i style="--p:${it.prog}%"></i></span>` : ''));
+    const meta = document.createElement('div'); meta.className = 'meta';
+    meta.innerHTML = `<span>${it.type === 'mp4' ? (it.prog < 100 ? 'saving…' : mmss(it.dur)) : hms(it.t)}</span><span class="acts">
+      <button type="button" data-c="copy" aria-label="Copy"><svg><use href="#i-copy"/></svg></button>
+      <button type="button" data-c="annotate" aria-label="Annotate"><svg><use href="#i-pen"/></svg></button>
+      <button type="button" data-c="delete" aria-label="Delete"><svg><use href="#i-trash"/></svg></button></span>`;
+    c.append(th, meta); tlist.append(c);
+  });
+  placeTray();
+}
+function openTray() { tray.hidden = false; renderTray(); bar.classList.remove('dim'); tray.animate([{ opacity: 0, transform: 'translateY(8px) scale(.97)' }, { opacity: 1, transform: 'none' }], { duration: reduce ? 1 : 260, easing: 'cubic-bezier(.2,.8,.2,1)' }); }
+function closeTray() { tray.hidden = true; }
+const toggleTray = () => tray.hidden ? openTray() : closeTray();
+tlist.addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  const card = b.closest('.card'), i = S.items.findIndex(it => it.name === card.dataset.name); if (i < 0) return;
+  if (b.dataset.c === 'copy') toast(`<b>Copied</b><span class="fn">${S.items[i].name}</span>`, 1500);
+  if (b.dataset.c === 'annotate') { closeTray(); $('#annotate').scrollIntoView({ behavior: reduce ? 'auto' : 'smooth' }); }
+  if (b.dataset.c === 'delete') { card.classList.add('out'); setTimeout(() => { S.items.splice(i, 1); counts(); renderTray(); }, 240); }
+});
+$('.tray-h', tray).addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.tray === 'copy') toast(`<b>Copied ${S.items.length} capture${S.items.length === 1 ? '' : 's'}</b>`, 1500);
+  if (b.dataset.tray === 'clear') { S.items = []; counts(); renderTray(); }
+});
+document.addEventListener('pointerdown', e => {
+  if (tray.hidden || e.target.closest('#tray') || e.target.closest('.buf')) return; closeTray();
+});
+
+/* ---------- toggles ---------- */
+function toggle(name) {
+  const b = $(`[data-act=${name}]`, bar), on = b.getAttribute('aria-pressed') !== 'true';
+  b.setAttribute('aria-pressed', on); blip(on ? 900 : 600, .06);
+  if (name === 'cam') cam.hidden = !on;
+}
+// webcam bubble: drag, Ctrl + scroll to resize
+let camDrag = null;
+cam.addEventListener('pointerdown', e => {
+  e.stopPropagation(); const r = cam.getBoundingClientRect();
+  camDrag = { dx: e.clientX - r.left, dy: e.clientY - r.top }; cam.setPointerCapture(e.pointerId); cam.style.cursor = 'grabbing';
+});
+cam.addEventListener('pointermove', e => {
+  if (!camDrag) return; const d = desk.getBoundingClientRect();
+  const x = Math.max(0, Math.min(d.width - cam.offsetWidth, e.clientX - d.left - camDrag.dx));
+  const y = Math.max(0, Math.min(d.height - cam.offsetHeight, e.clientY - d.top - camDrag.dy));
+  Object.assign(cam.style, { left: x / d.width * 100 + '%', top: y / d.height * 100 + '%', right: 'auto', bottom: 'auto' });
+});
+cam.addEventListener('pointerup', () => { camDrag = null; cam.style.cursor = ''; });
+cam.addEventListener('wheel', e => {
+  if (!e.ctrlKey) return; e.preventDefault();
+  const w = Math.max(50, Math.min(220, cam.offsetWidth * (e.deltaY < 0 ? 1.08 : .93))); cam.style.width = w + 'px';
+}, { passive: false });
+
+/* ---------- actions ---------- */
+let cycleI = 0;
+const act = {
+  capture: () => capture(), record, pause, buffer: toggleTray, discard,
+  mic: () => toggle('mic'), cam: () => toggle('cam'),
+  settings: () => toast('<b>Settings</b><span class="fn">~/Captures · prefix takebox · 30 fps · keep 7 days</span>', 2600),
+  region: () => { setMode('region'); capture(); }, window: () => { setMode('window'); capture(); }, screen: () => { setMode('screen'); capture(); },
+  cycle: () => { const m = ['region', 'window', 'screen'][cycleI++ % 3]; act[m](); },
+  sound: () => { S.sound = !S.sound; $('[data-run=sound]').setAttribute('aria-pressed', S.sound); },
+  hide: () => { const g = bar.classList.toggle('gone'); toast(g ? '<b>Bar hidden</b><span class="fn">Ctrl + Shift + Space brings it back</span>' : '<b>Bar is back</b>', 1800); }
+};
+bar.addEventListener('click', e => { const b = e.target.closest('[data-act]'); if (b) act[b.dataset.act](); });
+$('.hints').addEventListener('click', e => { const b = e.target.closest('[data-run]'); if (b) act[b.dataset.run](); });
+
+/* ---------- keyboard ---------- */
+let stageSeen = false;
+new IntersectionObserver(([e]) => { stageSeen = e.intersectionRatio > .3; }, { threshold: [0, .3, .6] }).observe(stage);
+const keyMap = { KeyS: 'capture', KeyR: 'record', KeyP: 'pause', KeyB: 'buffer', Digit1: 'region', Digit2: 'window', Digit3: 'screen' };
+addEventListener('keydown', e => {
+  lightRow(e.code);
+  if (e.repeat || e.target.closest?.('input,textarea,select')) return;
+  const mod = e.ctrlKey || e.metaKey || e.altKey, combo = mod && e.shiftKey;
+  if (combo && e.code === 'Space') { e.preventDefault(); return act.hide(); }
+  if (e.code === 'Escape') {
+    if (S.cd) S.cd.cancel = true; else if (S.rec) discard(); else if (!tray.hidden) closeTray(); else hideSel();
+    return;
+  }
+  if (combo && e.code === 'KeyL') { e.preventDefault(); return act.settings(); }
+  const a = keyMap[e.code]; if (!a) return;
+  if (mod && !combo) return;                 // leave the browser's own shortcuts alone
+  if (!combo && !stageSeen) return;          // single keys only while the demo is on screen
+  e.preventDefault(); act[a]();
+});
+
+/* ---------- shortcuts list ---------- */
+const rows = Object.fromEntries($$('#klist li').map(li => [li.dataset.code, li]));
+function lightRow(code) {
+  const li = rows[code]; if (!li) return;
+  li.classList.add('hit'); clearTimeout(li._t); li._t = setTimeout(() => li.classList.remove('hit'), 650);
+}
+function setOS(os) {
+  $$('.seg button').forEach(b => b.setAttribute('aria-pressed', b.dataset.os === os));
+  $$('#klist .m1').forEach(k => k.textContent = os === 'mac' ? '⌥' : 'Ctrl');
+  $$('#klist .m2').forEach(k => k.textContent = os === 'mac' ? '⇧' : 'Shift');
+}
+$('.seg').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setOS(b.dataset.os); });
+if (/Mac/i.test(navigator.userAgent)) setOS('mac');
+
+/* ---------- annotate layers ---------- */
+const canvas = $('#annCanvas'), status = $('#annStatus'), history = [];
+const px = $('#px'); for (let i = 0; i < 28; i++) { const c = document.createElement('i'); c.style.setProperty('--l', 55 + Math.random() * 35 + '%'); px.append(c); }
+function setLayer(name, on) {
+  $$(`[data-layer=${name}]`, canvas).forEach(l => l.classList.toggle('off', !on));
+  $(`[data-ly=${name}]`).setAttribute('aria-pressed', on);
+}
+$('#tools').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  const steps = () => `${history.length} step${history.length === 1 ? '' : 's'}`;
+  if (b.dataset.ly) {
+    // each history step is a list of [layer, state before] so Original undoes in one go
+    const on = b.getAttribute('aria-pressed') !== 'true'; setLayer(b.dataset.ly, on); history.push([[b.dataset.ly, !on]]);
+    status.textContent = `${b.textContent.trim()} ${on ? 'added' : 'removed'} · ${steps()} in history`;
+  } else if (b.dataset.ann === 'undo') {
+    const h = history.pop(); if (!h) { status.textContent = 'Nothing to undo.'; return; }
+    h.forEach(([n, prev]) => setLayer(n, prev)); status.textContent = `Undone · ${steps()} left`;
+  } else if (b.dataset.ann === 'orig') {
+    const was = $$('[data-ly]').filter(t => t.getAttribute('aria-pressed') === 'true').map(t => [t.dataset.ly, true]);
+    if (!was.length) { status.textContent = 'Already showing the capture as taken.'; return; }
+    was.forEach(([n]) => setLayer(n, false)); history.push(was);
+    status.textContent = `Back to the capture as taken · Undo restores the ${was.length} layer${was.length > 1 ? 's' : ''}`;
+  } else if (b.dataset.ann === 'save') {
+    status.textContent = `Saved into ${fname('png')} · layers kept for next time`;
+    canvas.animate([{ filter: 'brightness(1.6)' }, { filter: 'none' }], { duration: 420 }); shutter();
+  }
+});
+
+/* ---------- scroll effects ---------- */
+// statement: words light up as you read
+const st = $('#statement'), tw = document.createTreeWalker(st, NodeFilter.SHOW_TEXT), tnodes = [];
+while (tw.nextNode()) tnodes.push(tw.currentNode);
+tnodes.forEach(n => {
+  const f = document.createDocumentFragment();
+  n.textContent.split(/(\s+)/).forEach(p => { if (!p) return; if (/^\s+$/.test(p)) f.append(p); else { const s = document.createElement('span'); s.className = 'w'; s.textContent = p; f.append(s); } });
+  n.replaceWith(f);
+});
+const words = $$('.w', st);
+let flat = false;
+stage.addEventListener('pointerenter', () => { flat = true; stage.style.setProperty('--tilt', 0); });
+function onScroll() {
+  if (!reduce) {
+    if (!flat) stage.style.setProperty('--tilt', Math.max(0, 1 - scrollY / 380));
+    const r = st.getBoundingClientRect(), p = (innerHeight * .82 - r.top) / (r.height + innerHeight * .25);
+    words.forEach((w, i) => { const t = Math.min(1, Math.max(0, p * words.length * 1.1 - i)); w.style.opacity = .14 + .86 * t; });
+  }
+}
+addEventListener('scroll', onScroll, { passive: true }); onScroll();
+
+// numbers count up once
+const nio = new IntersectionObserver(es => es.forEach(e => {
+  if (!e.isIntersecting) return; nio.unobserve(e.target); if (reduce) return;
+  const el = e.target, to = +el.dataset.to, t0 = performance.now();
+  const step = t => { const p = Math.min(1, (t - t0) / 1300); el.textContent = Math.round(to * (1 - Math.pow(1 - p, 3))); if (p < 1) requestAnimationFrame(step); };
+  requestAnimationFrame(step);
+}), { threshold: .6 });
+$$('[data-to]').forEach(n => nio.observe(n));
+
+// spotlight on bento tiles
+$('#bento').addEventListener('pointermove', e => {
+  $$('.tile').forEach(t => { const r = t.getBoundingClientRect(); t.style.setProperty('--mx', e.clientX - r.left + 'px'); t.style.setProperty('--my', e.clientY - r.top + 'px'); });
+});
+
+/* ---------- boot ---------- */
+function boot() { placeHl(); home(); bar.classList.add('ready'); }
+(document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve()).then(boot);
+setTimeout(() => { if (!bar.classList.contains('ready')) boot(); }, 800);
+})();
+</script>
+
+</body></html>
