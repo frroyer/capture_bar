@@ -1344,24 +1344,31 @@ dialog.lc::backdrop{background:rgba(0,0,0,.7);backdrop-filter:blur(6px)}
 
 <article data-pane="oss" role="tabpanel" hidden>
   <h2>Open-source notices</h2>
-  <p class="lc-meta">Takebox 0.9.4 for Windows · generated from the build manifest</p>
-  <p>Takebox is built with open-source software. We thank its authors. Full license texts ship with the app in <code>licenses/</code>.</p>
+  <p class="lc-meta">Takebox for Windows · 166 Rust crates, from the build manifest (November 2026)</p>
+  <p>Takebox is built with open-source software. We thank its authors. Every component is under a permissive license; none is GPL, LGPL or AGPL. Full license texts ship with the app in <code>licenses/</code>.</p>
   <table class="lc-tbl">
     <thead><tr><th>Component</th><th>Used for</th><th>License</th></tr></thead>
     <tbody>
-      <tr><th>windows-rs</th><td>Windows API bindings</td><td>MIT or Apache-2.0</td></tr>
-      <tr><th>tokio</th><td>Async runtime</td><td>MIT</td></tr>
-      <tr><th>serde, serde_json</th><td>Settings and packages</td><td>MIT or Apache-2.0</td></tr>
-      <tr><th>image</th><td>PNG and JPEG encoding</td><td>MIT or Apache-2.0</td></tr>
-      <tr><th>gifski</th><td>GIF export</td><td>AGPL-3.0 or commercial license</td></tr>
-      <tr><th>FFmpeg (libavcodec)</th><td>Video encoding, dynamically linked</td><td>LGPL-2.1-or-later</td></tr>
-      <tr><th>whisper.cpp</th><td>On-device transcription</td><td>MIT</td></tr>
-      <tr><th>Inter, Inter Tight</th><td>Interface and website type</td><td>SIL Open Font License 1.1</td></tr>
-      <tr><th>Geist Mono</th><td>Code and labels</td><td>SIL Open Font License 1.1</td></tr>
+      <tr><th>egui, eframe, epaint</th><td>The bar and its windows</td><td>MIT or Apache-2.0</td></tr>
+      <tr><th>winit, glow</th><td>Windows and OpenGL drawing</td><td>Apache-2.0; MIT, Apache-2.0 or Zlib</td></tr>
+      <tr><th>AccessKit</th><td>Screen reader support</td><td>MIT or Apache-2.0</td></tr>
+      <tr><th>windows-rs</th><td>Windows API bindings: screen capture, H.264 and AAC encoding through Windows' own codecs, webcam, sound</td><td>MIT or Apache-2.0</td></tr>
+      <tr><th>png, miniz_oxide</th><td>Screenshots as PNG</td><td>MIT or Apache-2.0; MIT, Zlib or Apache-2.0</td></tr>
+      <tr><th>gif, color_quant</th><td>GIF export</td><td>MIT or Apache-2.0; MIT</td></tr>
+      <tr><th>vello_cpu, skrifa</th><td>Drawing annotations into images</td><td>MIT or Apache-2.0</td></tr>
+      <tr><th>arboard, clipboard-win</th><td>Copy to the clipboard</td><td>MIT or Apache-2.0; Boost 1.0</td></tr>
+      <tr><th>global-hotkey, tray-icon</th><td>Global shortcuts and the tray icon</td><td>MIT or Apache-2.0</td></tr>
+      <tr><th>rfd</th><td>File and folder dialogs</td><td>MIT</td></tr>
+      <tr><th>Fluent (fluent-bundle)</th><td>English and French text</td><td>MIT or Apache-2.0</td></tr>
+      <tr><th>serde, toml, ron</th><td>Settings and the capture buffer</td><td>MIT or Apache-2.0</td></tr>
+      <tr><th>directories, option-ext</th><td>Where settings are kept</td><td>MIT or Apache-2.0; MPL-2.0</td></tr>
+      <tr><th>chrono, tracing</th><td>File names and logs</td><td>MIT or Apache-2.0; MIT</td></tr>
+      <tr><th>Hack, Ubuntu Light, Noto Emoji (egui's fonts)</th><td>Fallback type in the app</td><td>MIT / Bitstream Vera; Ubuntu Font Licence 1.0; SIL Open Font License 1.1</td></tr>
+      <tr><th>Inter, Inter Tight, Geist Mono</th><td>Website type</td><td>SIL Open Font License 1.1</td></tr>
     </tbody>
   </table>
-  <p>To get the source code of LGPL components we distribute, write to legal@takebox.example. This offer is valid for three years after the last release that included them.</p>
-  <p class="lc-disc">Sample list. Generate the real one from your dependency manifest (for example with cargo-about).</p>
+  <p>The other crates are libraries these depend on, under MIT, Apache-2.0, BSD, ISC, Zlib, Unicode-3.0 or Unlicense terms. One, option-ext, is under MPL-2.0 and used unmodified; its source is at crates.io/crates/option-ext. The app's interface uses Segoe UI from Windows, which is not distributed with it.</p>
+  <p class="lc-disc">Main components only. Generate the full list for each release from the dependency manifest (for example with cargo-about).</p>
 </article>
 
 <article data-pane="notice" role="tabpanel" hidden>
