@@ -195,6 +195,9 @@ settings-days = { $count ->
    *[other] days
 }
 settings-keep-tip = Their files stay in the folder
+settings-plus-key = Takebox+ activation key
+settings-plus-on = Active
+settings-plus-off = Free version
 settings-file = Saved in { $file }
 settings-shortcuts = Global shortcuts
 settings-shortcuts-reset = Reset all

@@ -2,6 +2,13 @@
 
 Nov 7, 2026 · @François
 
+## 0. Directives
+
+Les spécifications suivantes font partie de la version payante de Takebox, nommée Takebox+
+Ces fonctions ne sont donc pas accessibles dans la version gratuite.
+L'activation de ces fonctions devra se faire par la délivrance d'une clé, pour l'instant hors scope de ce PRD.
+Afin de simuler l'activation de la clé, un paramètre en settings nommé "Clé d'activation de Takebox+". La présence d'une chaine de caractère quelconque suffira à activer Takebox+, l'absence restreindra à Takebox version gratuite.
+
 ## 1. Résumé
 
 Le **Mode Démo** transforme Takebox en outil de tournage pour les vidéos de présentation logicielle. L'utilisateur fait sa démo en parlant ; l'outil enregistre écran, captures, voix et événements sur une seule horloge, transcrit l'audio et produit un **Demo Package** : médias horodatés, transcription mot à mot, script découpé en scènes et timeline de montage. Claude reçoit ce package et le transforme en vidéo finie via des skills vidéo et un outil de montage.
