@@ -255,13 +255,14 @@ pub fn camera_frame(seen: Option<u64>) -> Option<(u64, cb_core::Frame)> {
     }
 }
 
-/// Where recordings draw the webcam bubble, in global physical pixels; `None` for no
-/// bubble. Read at every video frame, so moving the bubble moves it in the video.
-pub fn set_camera_bubble(rect: Option<cb_core::Rect>) {
+/// Where recordings draw the webcam bubble, in global physical pixels, and its outline;
+/// `None` for no bubble. Read at every video frame, so moving the bubble moves it in the
+/// video.
+pub fn set_camera_bubble(bubble: Option<(cb_core::Rect, cb_core::BubbleShape)>) {
     #[cfg(windows)]
-    windows_camera::set_bubble(rect);
+    windows_camera::set_bubble(bubble);
     #[cfg(not(windows))]
-    let _ = rect;
+    let _ = bubble;
 }
 
 /// One of this app's own windows, found by its title: for the windows egui opens

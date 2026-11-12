@@ -568,35 +568,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "capture-bar"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arboard",
- "cb-annotate",
- "cb-buffer",
- "cb-capture",
- "cb-core",
- "cb-encode",
- "cb-platform",
- "cb-ui",
- "chrono",
- "directories",
- "eframe",
- "global-hotkey",
- "rfd",
- "serde",
- "toml 1.2.1+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "cb-annotate"
 version = "0.1.0"
 dependencies = [
  "cb-core",
  "epaint_default_fonts",
+ "ron",
  "serde",
  "skrifa",
  "thiserror 2.0.21",
@@ -3481,6 +3458,30 @@ dependencies = [
  "pkg-config",
  "toml 0.8.2",
  "version-compare",
+]
+
+[[package]]
+name = "takebox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "cb-annotate",
+ "cb-buffer",
+ "cb-capture",
+ "cb-core",
+ "cb-encode",
+ "cb-platform",
+ "cb-ui",
+ "chrono",
+ "directories",
+ "eframe",
+ "global-hotkey",
+ "rfd",
+ "serde",
+ "toml 1.2.1+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

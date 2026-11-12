@@ -66,7 +66,7 @@ pub fn create(
     let icon = Icon::from_rgba(icon_pixels(), ICON_SIZE, ICON_SIZE).map_err(platform_error)?;
     let icon = TrayIconBuilder::new()
         .with_icon(icon)
-        .with_tooltip("Capture Bar")
+        .with_tooltip("Takebox")
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
         .build()

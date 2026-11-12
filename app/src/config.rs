@@ -1,4 +1,4 @@
-//! The settings file (US-8.2, FR-29): TOML, next to the binary when a `capture-bar.toml`
+//! The settings file (US-8.2, FR-29): TOML, next to the binary when a `takebox.toml`
 //! is already there (portable), otherwise in the user's config folder.
 
 use std::path::{Path, PathBuf};
@@ -7,7 +7,7 @@ use std::sync::mpsc;
 use cb_core::Settings;
 
 /// The file name, both next to the binary and in the config folder.
-pub const FILE_NAME: &str = "capture-bar.toml";
+pub const FILE_NAME: &str = "takebox.toml";
 
 /// Where settings are read and written. A file next to the binary wins, so a copy on a
 /// USB stick keeps its own settings.
@@ -18,9 +18,54 @@ pub fn path() -> PathBuf {
     if let Some(portable) = portable.filter(|p| p.is_file()) {
         return portable;
     }
-    directories::ProjectDirs::from("", "", "Capture Bar")
+    directories::ProjectDirs::from("", "", crate::APP_ID)
         .map(|dirs| dirs.config_dir().join(FILE_NAME))
         .unwrap_or_else(|| PathBuf::from(FILE_NAME))
+}
+
+/// The app's name before it became Takebox, as the OS folders were named.
+const LEGACY_NAME: &str = "Capture Bar";
+const LEGACY_FILE_NAME: &str = "capture-bar.toml";
+
+/// Move what the app kept under its former name (Capture Bar) to the new places, once:
+/// the portable settings file, the config folder and eframe's storage (bar position, camera
+/// bubble). Anything already at the new place wins; failures only cost the old values.
+pub fn migrate_legacy() {
+    let mut moves = Vec::new();
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| Some(e.parent()?.to_owned()))
+    {
+        moves.push((dir.join(LEGACY_FILE_NAME), dir.join(FILE_NAME)));
+    }
+    if let (Some(old), Some(new)) = (
+        directories::ProjectDirs::from("", "", LEGACY_NAME),
+        directories::ProjectDirs::from("", "", crate::APP_ID),
+    ) {
+        let (old, new) = (old.config_dir(), new.config_dir());
+        moves.push((old.join(LEGACY_FILE_NAME), new.join(FILE_NAME)));
+    }
+    if let (Some(old), Some(new)) = (
+        eframe::storage_dir(LEGACY_NAME),
+        eframe::storage_dir(crate::APP_ID),
+    ) {
+        moves.push((old, new));
+    }
+    for (old, new) in moves {
+        if !old.exists() || new.exists() {
+            continue;
+        }
+        let moved = new
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::rename(&old, &new));
+        match moved {
+            Ok(()) => {
+                tracing::info!(from = %old.display(), to = %new.display(), "moved from Capture Bar")
+            }
+            Err(e) => tracing::warn!(from = %old.display(), "could not move from Capture Bar: {e}"),
+        }
+    }
 }
 
 /// What `load` found.

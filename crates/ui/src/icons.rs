@@ -20,8 +20,6 @@ pub enum Icon {
     /// Play a recording: a triangle pointing right.
     Play,
     Layers,
-    ChevronUp,
-    ChevronDown,
     Mic,
     Video,
     Sliders,
@@ -37,7 +35,11 @@ pub enum Icon {
     Repeat,
     // Annotation tools (US-7.1).
     ArrowTool,
+    LineTool,
     BoxTool,
+    CircleTool,
+    /// A tilted eraser block.
+    Eraser,
     TextTool,
     Highlighter,
     /// Freehand: a wavy line.
@@ -146,8 +148,6 @@ pub fn paint(p: &Painter, center: Pos2, icon: Icon, color: Color32) {
             p.line(vec![at(-7.0, 0.5), at(0.0, 4.0), at(7.0, 0.5)], s);
             p.line(vec![at(-7.0, 3.5), at(0.0, 7.0), at(7.0, 3.5)], s);
         }
-        Icon::ChevronUp => p_chevron(p, center, -1.0, s),
-        Icon::ChevronDown => p_chevron(p, center, 1.0, s),
         Icon::Mic => {
             frame(-2.5, -7.0, 2.5, 2.0, 2);
             let arc = (0..=10)
@@ -261,7 +261,19 @@ pub fn paint(p: &Painter, center: Pos2, icon: Icon, color: Color32) {
             seg(-6.0, 6.0, 6.0, -6.0);
             p.line(vec![at(-0.5, -6.0), at(6.0, -6.0), at(6.0, 0.5)], s);
         }
+        Icon::LineTool => seg(-6.0, 6.0, 6.0, -6.0),
         Icon::BoxTool => frame(-6.5, -5.0, 6.5, 5.0, 1),
+        Icon::CircleTool => {
+            p.circle_stroke(center, 6.5, s);
+        }
+        Icon::Eraser => {
+            p.add(egui::Shape::closed_line(
+                vec![at(-7.0, 2.0), at(1.0, -6.0), at(7.0, 0.0), at(-1.0, 8.0)],
+                s,
+            ));
+            seg(-3.0, -2.0, 3.0, 4.0);
+            seg(-1.0, 7.0, 7.0, 7.0);
+        }
         Icon::TextTool => {
             seg(-6.0, -6.5, 6.0, -6.5);
             seg(0.0, -6.5, 0.0, 6.5);
@@ -314,16 +326,4 @@ fn p_turn(p: &Painter, c: Pos2, side: f32, s: Stroke) {
     let tip = arc[0];
     p.line(arc, s);
     p.line(vec![tip + vec2(-3.0, -3.0), tip, tip + vec2(3.0, -3.0)], s);
-}
-
-/// `dir` is -1 to point up, 1 to point down.
-fn p_chevron(p: &Painter, c: Pos2, dir: f32, s: Stroke) {
-    p.line(
-        vec![
-            pos2(c.x - 4.0, c.y - dir * 2.0),
-            pos2(c.x, c.y + dir * 2.0),
-            pos2(c.x + 4.0, c.y - dir * 2.0),
-        ],
-        s,
-    );
 }

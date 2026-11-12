@@ -7,6 +7,7 @@ mod editor;
 pub mod i18n;
 mod icons;
 mod overlay;
+mod peek;
 mod place;
 mod settings;
 
@@ -14,6 +15,7 @@ pub use bubble::{CameraBubble, BUBBLE_SIZE};
 pub use countdown::show_countdown;
 pub use editor::{Editor, EditorResult};
 pub use overlay::{Overlay, OverlayResult};
+pub use peek::{Peek, PeekAction};
 pub use place::points_for_pixel;
 pub use settings::{record_key, Recorded, SettingsOutput, SettingsWindow};
 
@@ -40,8 +42,8 @@ pub mod palette {
     pub const MUTED: Color32 = Color32::from_rgb(0xA9, 0xAB, 0xB3);
     pub const PRIMARY: Color32 = Color32::from_rgb(0xF2, 0xF2, 0xF0);
     pub const PRIMARY_TEXT: Color32 = Color32::from_rgb(0x14, 0x14, 0x16);
-    pub const RECORD: Color32 = Color32::from_rgb(0xFF, 0x5A, 0x36);
-    pub const RECORD_BG: Color32 = Color32::from_rgb(0x3A, 0x1A, 0x14);
+    pub const RECORD: Color32 = Color32::from_rgb(0xF4, 0x3F, 0x5E);
+    pub const RECORD_BG: Color32 = Color32::from_rgb(0x3D, 0x17, 0x20);
     pub const ACCENT: Color32 = Color32::from_rgb(0x3B, 0x82, 0xF6);
     /// A setting that is not in effect, such as a shortcut another app holds.
     pub const WARNING: Color32 = Color32::from_rgb(0xF5, 0xA5, 0x24);
@@ -175,6 +177,13 @@ static SHORTCUTS: std::sync::RwLock<std::collections::BTreeMap<Shortcut, String>
 /// Show the bindings of `settings` in tooltips from the next frame on (US-3.2).
 pub fn set_shortcuts(settings: &cb_core::Settings) {
     *SHORTCUTS.write().unwrap_or_else(|e| e.into_inner()) = settings.shortcuts.clone();
+}
+
+static TOOLTIPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Show tooltips on the bar and tray buttons, or not (Settings).
+pub fn set_tooltips(on: bool) {
+    TOOLTIPS.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// A shortcut as shown to the user (FR-28, mockup M3): its keys as set now.
@@ -380,6 +389,9 @@ fn focus_ring(ui: &Ui, response: &Response, radius: impl Into<CornerRadius>) {
 }
 
 fn show_tooltip(response: &Response, text: &str) {
+    if !TOOLTIPS.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     let side: TooltipSide = response
         .ctx
         .data(|d| d.get_temp(Id::NULL))
@@ -527,7 +539,7 @@ pub fn pill(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                 let [first, second] = if state.recording {
                     [Piece::Tinted(Icon::RecordDot, RECORD), Piece::Text(&time)]
                 } else {
-                    [Piece::Icon(Icon::Layers), Piece::Text("Capture Bar")]
+                    [Piece::Icon(Icon::Layers), Piece::Text("Takebox")]
                 };
                 if chip(
                     ui,
@@ -581,7 +593,7 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                 if chip(
                     ui,
                     &[Piece::Icon(Icon::Camera), Piece::Text(&tr!("bar-capture"))],
-                    &ChipStyle::new(PRIMARY, PRIMARY_TEXT),
+                    &ChipStyle::new(ACCENT, Color32::WHITE),
                     &tr!("bar-capture-tip", key = capture_key.as_str()),
                 )
                 .clicked()
@@ -592,7 +604,7 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                     let again = chip(
                         ui,
                         &[Piece::Icon(Icon::Repeat)],
-                        &ChipStyle::new(CHIP, TEXT),
+                        &ChipStyle::new(PRIMARY, PRIMARY_TEXT),
                         &tr!("bar-repeat-tip", key = shortcut(Shortcut::Repeat)),
                     );
                     if again.clicked() {
@@ -668,7 +680,7 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                         Piece::Tinted(Icon::RecordDot, RECORD),
                         Piece::Text(&tr!("bar-record")),
                     ],
-                    &ChipStyle::new(CHIP, TEXT),
+                    &ChipStyle::new(RECORD_BG, TEXT),
                     &tr!("bar-record-tip", key = record_key.as_str()),
                 )
                 .clicked()
@@ -679,25 +691,22 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                 divider(ui);
 
                 let count = buffer.len().to_string();
-                let badge = if buffer.is_empty() { SELECTED } else { ACCENT };
-                let arrow = if state.tray_open {
-                    Icon::ChevronUp
-                } else {
-                    Icon::ChevronDown
-                };
                 let buffer_chip = chip(
                     ui,
-                    &[
-                        Piece::Icon(Icon::Layers),
-                        Piece::Text(&tr!("bar-buffer")),
-                        Piece::Badge(&count, badge),
-                        Piece::Icon(arrow),
-                    ],
-                    &ChipStyle::new(CHIP, TEXT),
+                    &[Piece::Icon(Icon::Layers)],
+                    // Filled while the tray is open, as the chevron used to show.
+                    &ChipStyle::new(
+                        if state.tray_open {
+                            CHIP
+                        } else {
+                            Color32::TRANSPARENT
+                        },
+                        TEXT,
+                    ),
                     &tr!("bar-buffer-tip", key = shortcut(Shortcut::Buffer)),
                 );
-                if vertical && !buffer.is_empty() {
-                    // The count stays visible as a corner badge on the icon-only chip.
+                if !buffer.is_empty() {
+                    // The count, as a corner badge on the icon.
                     let center = buffer_chip.rect.right_top() + vec2(-8.0, 8.0);
                     let painter = ui.painter();
                     painter.circle_filled(center, 8.0, ACCENT);
@@ -1019,6 +1028,8 @@ pub enum ItemAction {
     Select(SelectHow),
     /// Keep it past the retention period, or let it go again (FR-25).
     TogglePin,
+    /// Look at it full size: Space on the picture, or a double-click.
+    Peek,
 }
 
 /// How a click on a picture changes the selection.
@@ -1134,6 +1145,12 @@ fn tray_card(
                     };
                     action = Some(ItemAction::Select(how));
                 }
+                // After the click: Space on a focused card is a click too.
+                let space = (response.hovered() || response.has_focus())
+                    && ui.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::Space));
+                if response.double_clicked() || space {
+                    action = Some(ItemAction::Peek);
+                }
                 let response = if has_file {
                     response.on_hover_cursor(egui::CursorIcon::Grab)
                 } else {
@@ -1231,7 +1248,10 @@ fn tray_card(
                 } else {
                     hover
                 };
-                let hover = format!("{hover}\n{}", tr!("card-select-tip", key = command_key()));
+                let mut hover = format!("{hover}\n{}", tr!("card-select-tip", key = command_key()));
+                if item.kind == ItemKind::Image {
+                    hover = format!("{hover}\n{}", tr!("card-peek-tip"));
+                }
                 response.on_hover_text(hover);
                 ui.add(Label::new(RichText::new(name).color(TEXT).size(12.0)).truncate());
                 ui.add(Label::new(RichText::new(details).color(MUTED).size(11.0)).truncate());

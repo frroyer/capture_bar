@@ -1,4 +1,4 @@
-//! Capture Bar — entry point. Wires the floating bar (cb-ui), global
+//! Takebox — entry point. Wires the floating bar (cb-ui), global
 //! shortcuts, the capture service and the buffer together through commands.
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -6,6 +6,7 @@
 mod config;
 mod hotkeys;
 mod output;
+mod peek_video;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -20,8 +21,8 @@ use cb_core::{
 };
 use cb_platform::TrayAction;
 use cb_ui::{
-    tr, BarState, BatchAction, Editor, EditorResult, ItemAction, Overlay, OverlayResult, SelectHow,
-    SettingsWindow, ToastAction, TooltipSide,
+    tr, BarState, BatchAction, Editor, EditorResult, ItemAction, Overlay, OverlayResult, Peek,
+    PeekAction, SelectHow, SettingsWindow, ToastAction, TooltipSide,
 };
 use eframe::egui;
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
@@ -83,16 +84,20 @@ const FADE_TIME: f32 = 0.15;
 const ATTENTION_TIME: Duration = Duration::from_secs(3);
 const ATTENTION_PULSES: f32 = 3.0;
 
+/// The app's name for the OS: window title and eframe storage folder.
+const APP_ID: &str = "Takebox";
+
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
-    tracing::info!(
-        backend = cb_platform::backend_name(),
-        "starting Capture Bar"
-    );
+    tracing::info!(backend = cb_platform::backend_name(), "starting Takebox");
+    config::migrate_legacy();
+    if let Err(e) = cb_platform::autostart::migrate_legacy() {
+        tracing::warn!("could not move the login entry from Capture Bar: {e}");
+    }
 
     let mut viewport = egui::ViewportBuilder::default();
     // Shown on the taskbar button while the bar is minimized.
@@ -105,7 +110,7 @@ fn main() -> eframe::Result<()> {
     }
     let options = eframe::NativeOptions {
         viewport: viewport
-            .with_title("Capture Bar")
+            .with_title(APP_ID)
             .with_inner_size(INITIAL_SIZE)
             .with_decorations(false)
             .with_transparent(true)
@@ -118,11 +123,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
-        "Capture Bar",
-        options,
-        Box::new(|cc| Ok(Box::new(App::new(cc)))),
-    )
+    eframe::run_native(APP_ID, options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
 }
 
 /// The tray menu's items in the interface's language.
@@ -362,6 +363,12 @@ struct App {
     editor: Option<Editor>,
     /// The capture whose image is being read to open the editor.
     editor_loading: Option<ItemId>,
+    /// Quick Look on one capture of the buffer, full size.
+    peek: Option<Peek>,
+    /// The capture whose image is being read for Quick Look.
+    peek_loading: Option<ItemId>,
+    /// The recording Quick Look plays.
+    peek_video: Option<peek_video::PeekVideo>,
     /// Annotations saved before their capture's file was written: they go on once it is.
     annotation_waiting: Option<(ItemId, Arc<Frame>, Vec<cb_annotate::Shape>)>,
     /// What annotation text is written in: the bar's semibold font, as the editor shows it.
@@ -492,6 +499,7 @@ impl App {
         }
 
         cb_ui::set_shortcuts(loaded.settings());
+        cb_ui::set_tooltips(loaded.settings().tooltips);
         let mut hotkeys = hotkeys::Hotkeys::new()
             // Wayland without the GlobalShortcuts portal lands here (US-3.1).
             .inspect_err(|e| tracing::warn!(error = %e, "global shortcuts unavailable"))
@@ -640,6 +648,9 @@ impl App {
             overlay_dressed: false,
             editor: None,
             editor_loading: None,
+            peek: None,
+            peek_loading: None,
+            peek_video: None,
             annotation_waiting: None,
             annotation_font,
             originals_dir,
@@ -1034,7 +1045,13 @@ impl App {
     }
 
     /// Run what the tray asked of `item` (FR-23).
-    fn item_action(&mut self, frame: &eframe::Frame, item: ItemId, action: ItemAction) {
+    fn item_action(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+        item: ItemId,
+        action: ItemAction,
+    ) {
         let Some(found) = self.buffer.get(item) else {
             return;
         };
@@ -1055,6 +1072,7 @@ impl App {
                 }
             }
             (ItemAction::Annotate, _) => self.annotate(item),
+            (ItemAction::Peek, _) => self.peek(ctx, item),
             // A recording goes on the clipboard as a file, to paste in a folder or a chat.
             (ItemAction::Copy, Some(path)) if matches!(found.kind, ItemKind::Video { .. }) => {
                 let _ = self.output.send(output::Job::CopyFiles(vec![path]));
@@ -1297,6 +1315,7 @@ impl App {
         self.captures_dir = settings.folder.clone();
         self.bar.prefix = output::clean_prefix(&settings.prefix);
         self.bar.mic_on = settings.microphone;
+        cb_ui::set_tooltips(settings.tooltips);
         self.prefs = settings;
         if rebind {
             cb_ui::set_shortcuts(&self.prefs);
@@ -1394,6 +1413,105 @@ impl App {
             let _ = self.settings_writer.send(now.clone());
             self.saved_settings = now;
         }
+    }
+
+    /// Open Quick Look on a capture, or show it in the one already open.
+    fn peek(&mut self, ctx: &egui::Context, item: ItemId) {
+        let Some(found) = self.buffer.get(item) else {
+            return;
+        };
+        let video = matches!(found.kind, ItemKind::Video { .. });
+        let name = found
+            .path
+            .as_deref()
+            .and_then(Path::file_name)
+            .map_or_else(|| tr!("editor-title"), |n| n.to_string_lossy().into_owned());
+        match &mut self.peek {
+            Some(peek) => peek.show_item(item, name, video),
+            None => self.peek = Some(Peek::new(item, name, video)),
+        }
+        self.peek_loading = None;
+        self.peek_video = None;
+        if video {
+            // Still being saved: its first frame stands in.
+            if let (ItemState::Ready, Some(path)) = (&found.state, &found.path) {
+                let ctx = ctx.clone();
+                self.peek_video = Some(peek_video::PeekVideo::start(path, move || {
+                    ctx.request_repaint()
+                }));
+            }
+            return;
+        }
+        // As shown in the tray: with its annotations drawn in.
+        let in_memory = self
+            .newest_frame
+            .as_ref()
+            .filter(|(id, _)| *id == item)
+            .map(|(_, frame)| frame.clone());
+        let ready_file = (found.state == ItemState::Ready)
+            .then(|| found.path.clone())
+            .flatten();
+        match (in_memory, ready_file) {
+            (Some(frame), _) => {
+                if let Some(peek) = &mut self.peek {
+                    peek.set_frame(item, frame);
+                }
+            }
+            (None, Some(path)) => {
+                self.peek_loading = Some(item);
+                let _ = self.output.send(output::Job::Load { item, path });
+            }
+            // Still being saved: the thumbnail stands in.
+            (None, None) => {}
+        }
+    }
+
+    fn show_peek(&mut self, ctx: &egui::Context) {
+        let Some(peek) = &mut self.peek else {
+            return;
+        };
+        let images: Vec<ItemId> = self.buffer.newest_first().map(|i| i.id).collect();
+        let Some(index) = images.iter().position(|&id| id == peek.item()) else {
+            // Deleted or undone meanwhile.
+            self.peek = None;
+            self.peek_video = None;
+            return;
+        };
+        if let Some(video) = &mut self.peek_video {
+            let wake = ctx.clone();
+            match video.poll(move || wake.request_repaint()) {
+                Some(Some(frame)) => peek.set_frame(peek.item(), Arc::new(frame)),
+                Some(None) => self.peek_video = None,
+                None => {}
+            }
+            if let Some(video) = &self.peek_video {
+                ctx.request_repaint_after(video.wait());
+            }
+        }
+        let thumbnail = self.thumbnails.get(&peek.item());
+        let item = peek.item();
+        match peek.show(ctx, thumbnail, (index + 1, images.len())) {
+            Some(PeekAction::Close) => self.close_peek(),
+            Some(PeekAction::Previous) if index > 0 => self.peek(ctx, images[index - 1]),
+            Some(PeekAction::Next) if index + 1 < images.len() => self.peek(ctx, images[index + 1]),
+            Some(PeekAction::Annotate) => {
+                self.close_peek();
+                self.annotate(item);
+            }
+            Some(PeekAction::Play) => {
+                self.close_peek();
+                if let Some(path) = self.buffer.get(item).and_then(|i| i.path.clone()) {
+                    let _ = self.output.send(output::Job::Play(path));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn close_peek(&mut self) {
+        self.peek = None;
+        self.peek_loading = None;
+        self.peek_video = None;
     }
 
     fn show_editor(&mut self, ctx: &egui::Context) {
@@ -1494,12 +1612,20 @@ impl App {
                     }
                 },
                 output::Done::Loaded { item, result } => {
-                    if self.editor_loading.take_if(|i| *i == item).is_none() {
+                    let for_editor = self.editor_loading.take_if(|i| *i == item).is_some();
+                    let for_peek = self.peek_loading.take_if(|i| *i == item).is_some();
+                    if !for_editor && !for_peek {
                         continue;
                     }
                     match result {
                         Ok(frame) if self.buffer.get(item).is_some() => {
-                            self.open_editor(item, Arc::new(frame));
+                            let frame = Arc::new(frame);
+                            if let (true, Some(peek)) = (for_peek, &mut self.peek) {
+                                peek.set_frame(item, frame.clone());
+                            }
+                            if for_editor {
+                                self.open_editor(item, frame);
+                            }
                         }
                         Ok(_) => {}
                         Err(error) => {
@@ -1775,6 +1901,7 @@ impl App {
             let centre = (r.x + r.width as i32 / 2, r.y + r.height as i32 / 2);
             cb_core::display_at(centre, &self.displays).is_some()
         });
+        let shape = self.prefs.bubble_shape;
         let start = *self.camera.start.get_or_insert_with(|| {
             if let Some(saved) = saved {
                 return saved;
@@ -1793,24 +1920,28 @@ impl App {
                 },
                 |d| {
                     let size = (cb_ui::BUBBLE_SIZE * d.scale_factor).round() as u32;
+                    let width = (size as f32 * shape.aspect()).round() as u32;
                     let area = d.work_area;
                     let margin = size / 6;
                     cb_core::Rect {
-                        x: area.x + (area.width - size - margin) as i32,
+                        x: area.x + (area.width - width - margin) as i32,
                         y: area.y + (area.height - size - margin) as i32,
-                        width: size,
+                        width,
                         height: size,
                     }
                 },
             )
         });
-        let rect = self.camera.bubble.show(ctx, start, self.camera.dressed);
+        let rect = self
+            .camera
+            .bubble
+            .show(ctx, start, self.camera.dressed, shape);
         if rect.is_some() {
             self.bubble_rect = rect;
         }
         // Recordings draw the camera only once there is a picture to draw.
         let running = state == cb_platform::CameraState::Running;
-        cb_platform::set_camera_bubble(rect.filter(|_| running));
+        cb_platform::set_camera_bubble(rect.filter(|_| running).map(|r| (r, shape)));
         if !self.camera.dressed && dress_window(&tr!("bubble-title"), true) {
             self.camera.dressed = true;
             // Dragged across monitors of different scales, a resize could bounce it
@@ -1960,7 +2091,8 @@ impl App {
     fn draw(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         // Frozen during a drag: changing the band would move the bar under the pointer.
         if !self.dragging {
-            self.band = self.bar_hovered && !self.bar.tray_open;
+            // The window grows for tooltips only when they are shown.
+            self.band = self.bar_hovered && !self.bar.tray_open && self.prefs.tooltips;
         }
         if self
             .toast
@@ -2379,7 +2511,8 @@ impl eframe::App for App {
         // Typing the prefix counts as being there, wherever the cursor went.
         let cursor_in = self.dragging
             || ctx.input(|i| i.pointer.hover_pos().is_some())
-            || ctx.memory(|m| m.focused().is_some());
+            || ctx.memory(|m| m.focused().is_some())
+            || self.peek.is_some();
         let cursor_near = flashing || self.bar_hovered || cursor_in;
         if tray_idle(
             self.bar.tray_open,
@@ -2390,7 +2523,8 @@ impl eframe::App for App {
             self.bar.tray_open = false;
         }
         self.bar.has_last_region = self.last_region.is_some();
-        let (shown, fade) = animated_opacity(ctx, self.hidden, cursor_near);
+        let (shown, fade) =
+            animated_opacity(ctx, self.hidden, cursor_near || !self.prefs.fade_when_away);
         self.bar_fade = fade;
 
         let mut used = self.window_size;
@@ -2406,13 +2540,14 @@ impl eframe::App for App {
         self.show_camera(ctx);
         self.show_countdown(ctx);
         self.show_overlay(ctx);
+        self.show_peek(ctx);
         self.show_editor(ctx);
         self.show_settings(ctx);
         if std::mem::take(&mut self.folder_requested) {
             self.choose_folder(ctx, frame);
         }
         if let Some((item, action)) = self.item_action.take() {
-            self.item_action(frame, item, action);
+            self.item_action(ctx, frame, item, action);
         }
         if let Some(action) = self.batch_action.take() {
             self.batch_action(frame, action);

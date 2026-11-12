@@ -1,6 +1,7 @@
-//! Draws the webcam bubble into recorded frames on the GPU (US-5.4): the centre square
-//! of the camera picture, mirrored as in the bar's preview, cut to a disc with a soft
-//! edge and a white rim, blended onto the frame where the bubble is on screen.
+//! Draws the webcam bubble into recorded frames on the GPU (US-5.4): the centre of the
+//! camera picture cut to the bubble's proportions, mirrored as in the bar's preview, in
+//! a rounded rectangle (a circle when the corners meet) with a soft edge and a white
+//! rim, blended onto the frame where the bubble is on screen.
 
 use crate::windows_camera::CamFrame;
 use windows::core::{s, Result as WinResult, PCSTR};
@@ -20,12 +21,17 @@ V vs(uint id : SV_VertexID) {
     v.uv = t;
     return v;
 }
+// box: width, height, corner radius and rim width, in pixels.
+// crop: the share of the picture's width and height that the box shows.
+cbuffer Bubble : register(b0) { float4 box; float4 crop; };
 float4 ps(V v) : SV_Target {
-    float r = length(v.uv - 0.5) * 2;   // 1 on the edge
-    float aa = fwidth(r);
-    float alpha = 1 - smoothstep(1 - aa, 1, r);
-    float rim = smoothstep(0.955 - aa, 0.955, r);
-    float3 c = cam.Sample(linear_clamp, float2(1 - v.uv.x, v.uv.y)).rgb;  // mirrored
+    float2 p = (v.uv - 0.5) * box.xy;                 // pixels from the centre
+    float2 q = abs(p) - (box.xy * 0.5 - box.z);
+    float d = length(max(q, 0)) + min(max(q.x, q.y), 0) - box.z;  // pixels past the edge
+    float alpha = saturate(0.5 - d);
+    float rim = saturate(d + box.w + 0.5);
+    float2 uv = 0.5 + (v.uv - 0.5) * crop.xy;
+    float3 c = cam.Sample(linear_clamp, float2(1 - uv.x, uv.y)).rgb;  // mirrored
     return float4(lerp(c, float3(1, 1, 1), rim), alpha);
 }
 ";
@@ -35,8 +41,10 @@ pub(crate) struct BubblePainter {
     ps: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
     blend: ID3D11BlendState,
-    /// The camera's centre square, its side and the picture it holds.
-    picture: Option<(ID3D11Texture2D, ID3D11ShaderResourceView, u32, u64)>,
+    /// The `Bubble` constants: box, then crop.
+    constants: ID3D11Buffer,
+    /// The camera picture, its size and which picture it holds.
+    picture: Option<(ID3D11Texture2D, ID3D11ShaderResourceView, (u32, u32), u64)>,
 }
 
 fn compile(entry: PCSTR, target: PCSTR) -> WinResult<ID3DBlob> {
@@ -85,7 +93,15 @@ impl BubblePainter {
             compile(s!("vs"), s!("vs_4_0"))?,
             compile(s!("ps"), s!("ps_4_0"))?,
         );
-        let (mut vs, mut ps, mut sampler, mut blend) = (None, None, None, None);
+        let (mut vs, mut ps, mut sampler, mut blend, mut constants) =
+            (None, None, None, None, None);
+        let constants_desc = D3D11_BUFFER_DESC {
+            ByteWidth: 32,
+            Usage: D3D11_USAGE_DYNAMIC,
+            BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+            CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+            ..Default::default()
+        };
         let sampler_desc = D3D11_SAMPLER_DESC {
             Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
             AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
@@ -111,31 +127,33 @@ impl BubblePainter {
             device.CreatePixelShader(bytes(&ps_code), None, Some(&mut ps))?;
             device.CreateSamplerState(&sampler_desc, Some(&mut sampler))?;
             device.CreateBlendState(&blend_desc, Some(&mut blend))?;
+            device.CreateBuffer(&constants_desc, None, Some(&mut constants))?;
         }
         Ok(Self {
             vs: vs.expect("vertex shader"),
             ps: ps.expect("pixel shader"),
             sampler: sampler.expect("sampler"),
             blend: blend.expect("blend state"),
+            constants: constants.expect("constant buffer"),
             picture: None,
         })
     }
 
-    /// Upload the centre square of `frame`, unless it is the picture already there.
+    /// Upload `frame`, unless it is the picture already there.
     fn upload(
         &mut self,
         device: &ID3D11Device,
         context: &ID3D11DeviceContext,
         frame: &CamFrame,
     ) -> WinResult<()> {
-        let side = frame.width.min(frame.height);
+        let size = (frame.width, frame.height);
         if self.picture.as_ref().is_some_and(|p| p.3 == frame.seq) {
             return Ok(());
         }
-        if self.picture.as_ref().is_none_or(|p| p.2 != side) {
+        if self.picture.as_ref().is_none_or(|p| p.2 != size) {
             let desc = D3D11_TEXTURE2D_DESC {
-                Width: side,
-                Height: side,
+                Width: size.0,
+                Height: size.1,
                 MipLevels: 1,
                 ArraySize: 1,
                 Format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -154,19 +172,18 @@ impl BubblePainter {
                 device.CreateTexture2D(&desc, None, Some(&mut texture))?;
                 let texture = texture.expect("texture");
                 device.CreateShaderResourceView(&texture, None, Some(&mut view))?;
-                self.picture = Some((texture, view.expect("view"), side, u64::MAX));
+                self.picture = Some((texture, view.expect("view"), size, u64::MAX));
             }
         }
         let picture = self.picture.as_mut().expect("made above");
-        let (left, top) = ((frame.width - side) / 2, (frame.height - side) / 2);
-        let row = side as usize * 4;
+        let row = size.0 as usize * 4;
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        // SAFETY: the mapping holds `side` rows of `RowPitch` bytes until Unmap; each
+        // SAFETY: the mapping holds `size.1` rows of `RowPitch` bytes until Unmap; each
         // source row lies inside `frame.bgra`.
         unsafe {
             context.Map(&picture.0, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))?;
-            for y in 0..side as usize {
-                let from = ((top as usize + y) * frame.width as usize + left as usize) * 4;
+            for y in 0..size.1 as usize {
+                let from = y * row;
                 std::ptr::copy_nonoverlapping(
                     frame.bgra[from..from + row].as_ptr(),
                     (mapped.pData as *mut u8).add(y * mapped.RowPitch as usize),
@@ -179,24 +196,56 @@ impl BubblePainter {
         Ok(())
     }
 
-    /// Draw `frame` as a disc filling `(x, y, size, size)` of `target`, which may
-    /// reach past its edges.
+    /// Draw `frame` filling `place` of `target`, which may reach past its edges, with
+    /// corners rounded by `corner` of its shorter side (a half makes a circle).
     pub fn paint(
         &mut self,
         device: &ID3D11Device,
         context: &ID3D11DeviceContext,
         target: &ID3D11Texture2D,
-        (x, y, size): (i32, i32, u32),
+        place: cb_core::Rect,
+        corner: f32,
         frame: &CamFrame,
     ) -> WinResult<()> {
         self.upload(device, context, frame)?;
         let view = self.picture.as_ref().expect("uploaded").1.clone();
+        let (w, h) = (place.width as f32, place.height as f32);
+        let short = w.min(h);
+        let (picture, shown) = (frame.width as f32 / frame.height.max(1) as f32, w / h);
+        let crop = if picture >= shown {
+            [shown / picture, 1.0]
+        } else {
+            [1.0, picture / shown]
+        };
+        let constants: [f32; 8] = [
+            w,
+            h,
+            short * corner,
+            short * 0.025 + 1.0,
+            crop[0],
+            crop[1],
+            0.0,
+            0.0,
+        ];
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        // SAFETY: the buffer holds 32 bytes, written whole before Unmap.
+        unsafe {
+            context.Map(
+                &self.constants,
+                0,
+                D3D11_MAP_WRITE_DISCARD,
+                0,
+                Some(&mut mapped),
+            )?;
+            std::ptr::copy_nonoverlapping(constants.as_ptr(), mapped.pData.cast(), 8);
+            context.Unmap(&self.constants, 0);
+        }
         let mut rtv = None;
         let viewport = D3D11_VIEWPORT {
-            TopLeftX: x as f32,
-            TopLeftY: y as f32,
-            Width: size as f32,
-            Height: size as f32,
+            TopLeftX: place.x as f32,
+            TopLeftY: place.y as f32,
+            Width: w,
+            Height: h,
             MinDepth: 0.0,
             MaxDepth: 1.0,
         };
@@ -212,6 +261,7 @@ impl BubblePainter {
             context.PSSetShader(&self.ps, None);
             context.PSSetShaderResources(0, Some(&[Some(view)]));
             context.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
+            context.PSSetConstantBuffers(0, Some(&[Some(self.constants.clone())]));
             context.OMSetBlendState(&self.blend, Some(&[0.0; 4]), u32::MAX);
             context.Draw(4, 0);
             context.OMSetRenderTargets(None, None);
@@ -269,18 +319,20 @@ mod tests {
         }
     }
 
-    /// US-5.4: the camera lands as a mirrored disc where the bubble is, and nowhere else.
-    #[test]
-    fn bubble_is_a_mirrored_disc_at_its_place() {
+    const SIDE: u32 = 200;
+
+    /// Paints a 4:3 camera picture (red on the left, blue on the right) at `place` of a
+    /// black 200 px frame, as the recording's copy of the screen; returns BGR at a pixel.
+    /// `None` without a hardware D3D11 device.
+    fn painted(place: cb_core::Rect, corner: f32) -> Option<impl Fn(u32, u32) -> [u8; 3]> {
         let Ok(gpu) = crate::windows::shared_gpu() else {
             eprintln!("skipped: no hardware D3D11 device");
-            return;
+            return None;
         };
         let device = &gpu.device;
         // SAFETY: no preconditions.
         let context = &unsafe { device.GetImmediateContext() }.unwrap();
-        // A black frame, as the recording's copy of the screen.
-        let side = 200u32;
+        let side = SIDE;
         let black = vec![0u8; (side * side * 4) as usize];
         let desc = D3D11_TEXTURE2D_DESC {
             Width: side,
@@ -329,12 +381,26 @@ mod tests {
         };
         let mut painter = BubblePainter::new(device).unwrap();
         painter
-            .paint(device, context, &frame, (50, 50, 100), &picture)
+            .paint(device, context, &frame, place, corner, &picture)
             .unwrap();
         let pixels = read_back(device, context, &frame, side);
-        let at = |x: u32, y: u32| {
+        Some(move |x: u32, y: u32| {
             let i = ((y * side + x) * 4) as usize;
             [pixels[i], pixels[i + 1], pixels[i + 2]]
+        })
+    }
+
+    /// US-5.4: the camera lands as a mirrored disc where the bubble is, and nowhere else.
+    #[test]
+    fn bubble_is_a_mirrored_disc_at_its_place() {
+        let place = cb_core::Rect {
+            x: 50,
+            y: 50,
+            width: 100,
+            height: 100,
+        };
+        let Some(at) = painted(place, 0.5) else {
+            return;
         };
         assert_eq!(at(10, 10), [0, 0, 0], "outside the bubble");
         assert_eq!(
@@ -356,5 +422,26 @@ mod tests {
         );
         let edge = at(100, 52);
         assert!(edge.iter().all(|&c| c > 150), "white rim, got {edge:?}");
+    }
+
+    /// A portrait bubble keeps its proportions and rounds only its corners.
+    #[test]
+    fn a_portrait_bubble_is_a_rounded_rectangle() {
+        let place = cb_core::Rect {
+            x: 20,
+            y: 20,
+            width: 75,
+            height: 100,
+        };
+        let Some(at) = painted(place, 0.18) else {
+            return;
+        };
+        assert_eq!(at(21, 21), [0, 0, 0], "the rounded corner");
+        assert_eq!(at(100, 70), [0, 0, 0], "past its width");
+        assert_ne!(at(26, 26), [0, 0, 0], "inside the corner's curve");
+        let [b, _, r] = at(40, 70);
+        assert!(b > 200 && r < 50, "mirrored: blue on the left, got {b} {r}");
+        let [b, _, r] = at(75, 70);
+        assert!(r > 200 && b < 50, "mirrored: red on the right, got {b} {r}");
     }
 }

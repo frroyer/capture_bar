@@ -84,14 +84,14 @@ fn excluded_window_is_absent_from_grab() {
     let hwnd = unsafe {
         let class = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
-            lpszClassName: w!("CaptureBarExcludeTest"),
+            lpszClassName: w!("TakeboxExcludeTest"),
             hbrBackground: HBRUSH(CreateSolidBrush(COLORREF(0x00FF_00FF)).0),
             ..Default::default()
         };
         assert_ne!(RegisterClassW(&class), 0, "register class");
         CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            w!("CaptureBarExcludeTest"),
+            w!("TakeboxExcludeTest"),
             w!("exclude_from_capture test"),
             WS_POPUP | WS_VISIBLE,
             display.bounds.x + 100,
@@ -132,13 +132,13 @@ fn removing_the_frame_makes_client_area_fill_the_window() {
     unsafe {
         let class = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
-            lpszClassName: w!("CaptureBarFrameTest"),
+            lpszClassName: w!("TakeboxFrameTest"),
             ..Default::default()
         };
         assert_ne!(RegisterClassW(&class), 0, "register class");
         let hwnd = CreateWindowExW(
             WS_EX_TOOLWINDOW,
-            w!("CaptureBarFrameTest"),
+            w!("TakeboxFrameTest"),
             w!("remove_window_frame test"),
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             100,

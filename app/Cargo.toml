@@ -1,12 +1,12 @@
 [package]
-name = "capture-bar"
-description = "Capture Bar — one permanent, movable bar for screenshots and recordings"
+name = "takebox"
+description = "Takebox — one permanent, movable bar for screenshots and recordings"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "capture-bar"
+name = "takebox"
 path = "src/main.rs"
 
 [dependencies]

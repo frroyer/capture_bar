@@ -714,6 +714,13 @@ pub struct Settings {
     pub countdown_secs: u32,
     /// The language of the interface (NFR-14).
     pub language: Language,
+    /// Fade the bar to see-through while the cursor is away from it (FR-5).
+    pub fade_when_away: bool,
+    /// Show tooltips on the bar's buttons; off once the user knows them. Screen readers
+    /// still get each button's name.
+    pub tooltips: bool,
+    /// The outline of the webcam window, also drawn into recordings (US-5.4).
+    pub bubble_shape: BubbleShape,
     /// Global shortcuts the user changed (US-3.2), as `Ctrl+Shift+S`. An empty string
     /// turns one off; the others keep their default.
     pub shortcuts: std::collections::BTreeMap<Shortcut, String>,
@@ -802,6 +809,35 @@ pub enum ShortcutConflict {
     Invalid,
 }
 
+/// The outline of the webcam window (US-5.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BubbleShape {
+    #[default]
+    Circle,
+    Square,
+    /// Taller than wide, 3:4.
+    Portrait,
+}
+
+impl BubbleShape {
+    /// Width over height.
+    pub fn aspect(self) -> f32 {
+        match self {
+            Self::Portrait => 0.75,
+            Self::Circle | Self::Square => 1.0,
+        }
+    }
+
+    /// Corner radius as a share of the shorter side: a half rounds a square into a circle.
+    pub fn corner(self) -> f32 {
+        match self {
+            Self::Circle => 0.5,
+            Self::Square | Self::Portrait => 0.18,
+        }
+    }
+}
+
 /// The language of the interface (NFR-14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -874,6 +910,9 @@ impl Default for Settings {
             microphone: true,
             countdown_secs: 3,
             language: Language::Auto,
+            fade_when_away: true,
+            tooltips: true,
+            bubble_shape: BubbleShape::default(),
             shortcuts: Default::default(),
         }
     }

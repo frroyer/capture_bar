@@ -1,17 +1,17 @@
-//! The webcam bubble (US-5.4, M1): a round, mirrored camera picture in its own small
-//! window, dragged anywhere on screen. Recordings draw the camera where it is, so it
+//! The webcam bubble (US-5.4, M1): a mirrored camera picture in its own small window,
+//! round or a rounded square or portrait (Settings), dragged anywhere on screen. Recordings draw the camera where it is, so it
 //! shows in the video without the window itself being captured.
 
 use crate::place::{keep_at, placed};
 use crate::{palette, tr};
+use cb_core::BubbleShape;
 use egui::{
-    epaint::{Mesh, Vertex},
-    pos2, vec2, CentralPanel, Color32, ColorImage, Context, CursorIcon, FontFamily, FontId, Frame,
-    Pos2, Sense, Stroke, TextureHandle, TextureOptions, ViewportBuilder, ViewportCommand,
-    ViewportId,
+    pos2, vec2, CentralPanel, Color32, ColorImage, Context, CornerRadius, CursorIcon, FontFamily,
+    FontId, Frame, Rect, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, ViewportBuilder,
+    ViewportCommand, ViewportId,
 };
 
-/// Diameter, in points.
+/// Height, in points; the width follows the shape.
 pub const BUBBLE_SIZE: f32 = 180.0;
 
 #[derive(Default)]
@@ -35,16 +35,17 @@ impl CameraBubble {
         }
     }
 
-    /// Draw the bubble for one frame, first at `start` (global physical pixels, a
-    /// square of `BUBBLE_SIZE` points at its monitor's scale); the user moves it from
-    /// there. It stays hidden until `dressed` (by the caller, once the window exists)
-    /// and in place. Returns where it is now, as a square in global physical pixels,
-    /// once its window is open.
+    /// Draw the bubble for one frame, first at `start` (global physical pixels,
+    /// `BUBBLE_SIZE` points high at its monitor's scale); the user moves it from there.
+    /// It stays hidden until `dressed` (by the caller, once the window exists) and in
+    /// place, and takes `shape`'s proportions when they change. Returns where it is now,
+    /// in global physical pixels, once its window is open.
     pub fn show(
         &mut self,
         ctx: &Context,
         start: cb_core::Rect,
         dressed: bool,
+        shape: BubbleShape,
     ) -> Option<cb_core::Rect> {
         let builder = ViewportBuilder::default()
             .with_title(tr!("bubble-title"))
@@ -66,8 +67,11 @@ impl CameraBubble {
                 }
                 CentralPanel::default()
                     .frame(Frame::NONE)
-                    .show(ui, |ui| self.draw(ui));
+                    .show(ui, |ui| self.draw(ui, shape));
                 let inner = ui.ctx().input(|i| i.viewport().inner_rect)?;
+                if self.shown {
+                    reshape(ui.ctx(), inner, shape.aspect());
+                }
                 let ppp = ui.ctx().pixels_per_point();
                 self.shown.then_some(cb_core::Rect {
                     x: (inner.min.x * ppp).round() as i32,
@@ -79,7 +83,7 @@ impl CameraBubble {
         )
     }
 
-    fn draw(&self, ui: &mut egui::Ui) {
+    fn draw(&self, ui: &mut egui::Ui, shape: BubbleShape) {
         let area = ui.max_rect();
         let response = ui.interact(
             area,
@@ -97,26 +101,78 @@ impl CameraBubble {
                 resize(ui.ctx(), zoom);
             }
         }
-        let center = area.center();
-        let radius = area.width().min(area.height()) / 2.0 - 1.0;
+        let rect = area.shrink(1.0);
+        let corner = (shape.corner() * rect.width().min(rect.height())).min(255.0) as u8;
+        let rim = Stroke::new(4.0, Color32::WHITE);
         let painter = ui.painter();
-        if let Some(texture) = &self.texture {
-            painter.add(disc(texture, center, radius, self.aspect));
-        } else {
-            painter.circle_filled(center, radius, palette::BAR);
-            painter.text(
-                center,
-                egui::Align2::CENTER_CENTER,
-                tr!("bubble-starting"),
-                FontId::new(13.0, FontFamily::Proportional),
-                palette::MUTED,
-            );
+        let picture = egui::epaint::RectShape::new(
+            rect,
+            CornerRadius::same(corner),
+            if self.texture.is_some() {
+                Color32::WHITE
+            } else {
+                palette::BAR
+            },
+            rim,
+            StrokeKind::Inside,
+        );
+        match &self.texture {
+            Some(texture) => {
+                // The rim on its own shape: epaint cannot stroke a textured rect (its
+                // stroke would go into the textured mesh, a debug assert).
+                let uv = mirrored_cover(self.aspect, rect.aspect_ratio());
+                let mut fill = picture.clone().with_texture(texture.id(), uv);
+                fill.stroke = Stroke::NONE;
+                painter.add(fill);
+                let mut rim = picture;
+                rim.fill = Color32::TRANSPARENT;
+                painter.add(rim);
+            }
+            None => {
+                painter.add(picture);
+                painter.text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    tr!("bubble-starting"),
+                    FontId::new(13.0, FontFamily::Proportional),
+                    palette::MUTED,
+                );
+            }
         }
-        painter.circle_stroke(center, radius - 2.0, Stroke::new(4.0, Color32::WHITE));
     }
 }
 
-/// Smallest and largest diameter the user can resize it to, in points.
+/// The part of a picture `picture` wide over high that fills a box `target` wide over
+/// high, centred and mirrored, as texture coordinates.
+fn mirrored_cover(picture: f32, target: f32) -> Rect {
+    let (span_x, span_y) = if picture >= target {
+        (target / picture, 1.0)
+    } else {
+        (1.0, picture / target)
+    };
+    // Left runs past right: the picture is mirrored, as people expect to see themselves.
+    Rect::from_min_max(
+        pos2(0.5 + span_x / 2.0, 0.5 - span_y / 2.0),
+        pos2(0.5 - span_x / 2.0, 0.5 + span_y / 2.0),
+    )
+}
+
+/// Give the window `aspect` (width over height) around its centre, keeping its height,
+/// when the shape was changed or it opened at an older shape's size.
+fn reshape(ctx: &Context, inner: Rect, aspect: f32) {
+    let width = (inner.height() * aspect).round();
+    if (width - inner.width()).abs() < 1.0 {
+        return;
+    }
+    let Some(outer) = ctx.input(|i| i.viewport().outer_rect) else {
+        return;
+    };
+    let shift = (width - inner.width()) / 2.0;
+    ctx.send_viewport_cmd(ViewportCommand::OuterPosition(outer.min - vec2(shift, 0.0)));
+    ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(width, inner.height())));
+}
+
+/// Smallest and largest height the user can resize it to, in points.
 const MIN_SIZE: f32 = 80.0;
 const MAX_SIZE: f32 = 480.0;
 
@@ -128,42 +184,32 @@ fn resize(ctx: &Context, zoom: f32) {
     }) else {
         return;
     };
-    let side = (inner.width() * zoom).clamp(MIN_SIZE, MAX_SIZE);
-    let grow = (side - inner.width()) / 2.0;
-    if grow == 0.0 {
+    let height = (inner.height() * zoom).clamp(MIN_SIZE, MAX_SIZE);
+    let size = inner.size() * (height / inner.height());
+    let grow = (size - inner.size()) / 2.0;
+    if grow.y == 0.0 {
         return;
     }
-    ctx.send_viewport_cmd(ViewportCommand::OuterPosition(outer.min - vec2(grow, grow)));
-    ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(side, side)));
+    ctx.send_viewport_cmd(ViewportCommand::OuterPosition(outer.min - grow));
+    ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
 }
 
-/// The centre square of the picture, mirrored, as a disc: a triangle fan.
-fn disc(texture: &TextureHandle, center: Pos2, radius: f32, aspect: f32) -> egui::Shape {
-    // The part of the picture's width (or height) the square takes.
-    let (span_x, span_y) = if aspect >= 1.0 {
-        (1.0 / aspect, 1.0)
-    } else {
-        (1.0, aspect)
-    };
-    let uv = |dx: f32, dy: f32| pos2(0.5 - dx * span_x / 2.0, 0.5 + dy * span_y / 2.0);
-    let mut mesh = Mesh::with_texture(texture.id());
-    mesh.vertices.push(Vertex {
-        pos: center,
-        uv: uv(0.0, 0.0),
-        color: Color32::WHITE,
-    });
-    const STEPS: u32 = 96;
-    for i in 0..=STEPS {
-        let angle = std::f32::consts::TAU * i as f32 / STEPS as f32;
-        let (dx, dy) = (angle.cos(), angle.sin());
-        mesh.vertices.push(Vertex {
-            pos: center + vec2(dx, dy) * radius,
-            uv: uv(dx, dy),
-            color: Color32::WHITE,
-        });
-        if i > 0 {
-            mesh.add_triangle(0, i, i + 1);
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_picture_is_cut_to_the_box_and_mirrored() {
+        let uv = mirrored_cover(4.0 / 3.0, 1.0);
+        assert!(uv.min.x > uv.max.x, "mirrored: {uv:?}");
+        assert!((uv.min.x - uv.max.x - 0.75).abs() < 1e-6, "a square of 4:3");
+        assert_eq!((uv.min.y, uv.max.y), (0.0, 1.0));
+        let uv = mirrored_cover(4.0 / 3.0, 0.75);
+        assert!((uv.min.x - uv.max.x - 0.5625).abs() < 1e-6, "3:4 of 4:3");
+        let uv = mirrored_cover(0.5, 1.0);
+        assert!(
+            (uv.max.y - uv.min.y - 0.5).abs() < 1e-6,
+            "a tall picture loses height"
+        );
     }
-    egui::Shape::mesh(mesh)
 }

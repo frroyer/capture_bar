@@ -1,10 +1,12 @@
 //! The annotation editor (US-7.1, US-7.2, FR-27): a window over one capture, with arrows,
-//! boxes, text, highlights, pixelates and a crop kept as layers until saved.
+//! lines, boxes, ellipses, text, highlights, pixelates and a crop kept as layers until
+//! saved, and an eraser that takes layers away.
 
 use std::sync::Arc;
 
 use cb_annotate::{
-    arrow_parts, corners, default_sizes, mosaic, pixel_rect, History, Mosaic, Point, Rgba, Shape,
+    arrow_parts, corners, curve, default_sizes, mosaic, pixel_rect, shape_at, History, Mosaic,
+    Point, Rgba, Shape,
 };
 use cb_buffer::ItemId;
 use egui::{
@@ -29,23 +31,119 @@ pub enum EditorResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tool {
     Arrow,
+    Line,
     Rect,
+    Ellipse,
     Pen,
     Text,
     Highlight,
     Pixelate,
     Crop,
+    Eraser,
+}
+
+impl Tool {
+    /// Draws a shape that can be filled.
+    fn fills(self) -> bool {
+        matches!(self, Tool::Rect | Tool::Ellipse)
+    }
+
+    /// Draws with a line, whose width can be picked.
+    fn strokes(self) -> bool {
+        matches!(
+            self,
+            Tool::Arrow | Tool::Line | Tool::Rect | Tool::Ellipse | Tool::Pen
+        )
+    }
+
+    /// Draws a line that can be bent through points.
+    fn bends(self) -> bool {
+        matches!(self, Tool::Arrow | Tool::Line)
+    }
+}
+
+/// The line widths offered, as multiples of the one that suits the image, each with how
+/// thick it is drawn in its button, in points.
+const WIDTHS: [(f32, f32); 5] = [(0.5, 1.5), (1.0, 3.0), (1.5, 4.5), (2.0, 6.0), (3.0, 8.0)];
+/// How close to a bend handle a press grabs it, in points on screen.
+const HANDLE_REACH: f32 = 9.0;
+
+/// A handle of the line being bent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Handle {
+    /// A point the line goes through: 0 is its start, the last one its end.
+    Knot(usize),
+    /// Half way between knot `i` and the next: dragging it adds a bend there.
+    Insert(usize),
+}
+
+/// The line or arrow whose bend handles are shown.
+#[derive(Debug, Clone, PartialEq)]
+struct Bending {
+    index: usize,
+    /// As it is in the history: once it is not, undo or the eraser took it away.
+    shape: Shape,
+    /// The handle being dragged, and the shape as dragged so far.
+    drag: Option<(Handle, Shape)>,
+}
+
+/// Start, bends, end.
+fn knots(shape: &Shape) -> Option<Vec<Point>> {
+    match shape {
+        Shape::Arrow { from, to, via, .. } | Shape::Line { from, to, via, .. } => {
+            let mut knots = vec![*from];
+            knots.extend_from_slice(via);
+            knots.push(*to);
+            Some(knots)
+        }
+        _ => None,
+    }
+}
+
+/// `shape` with its start, bends and end moved to `knots`.
+fn with_knots(shape: &Shape, knots: &[Point]) -> Shape {
+    let (from, to) = (knots[0], knots[knots.len() - 1]);
+    let via = knots[1..knots.len() - 1].to_vec();
+    match shape.clone() {
+        Shape::Arrow { color, width, .. } => Shape::Arrow {
+            from,
+            to,
+            color,
+            width,
+            via,
+        },
+        Shape::Line { color, width, .. } => Shape::Line {
+            from,
+            to,
+            color,
+            width,
+            via,
+        },
+        other => other,
+    }
+}
+
+/// Where the curve is half way between knot `i` and the next (Catmull-Rom at t = 0.5).
+fn midpoint(knots: &[Point], i: usize) -> Point {
+    let p0 = knots[i.saturating_sub(1)];
+    let (p1, p2) = (knots[i], knots[i + 1]);
+    let p3 = knots[(i + 2).min(knots.len() - 1)];
+    let at = |a: f32, b: f32, c: f32, d: f32| (9.0 * (b + c) - a - d) / 16.0;
+    Point::new(at(p0.x, p1.x, p2.x, p3.x), at(p0.y, p1.y, p2.y, p3.y))
 }
 
 /// Each tool with its icon, the message id of its name and the key that picks it.
-const TOOLS: [(Tool, Icon, &str, Key); 7] = [
+const TOOLS: [(Tool, Icon, &str, Key); 10] = [
     (Tool::Arrow, Icon::ArrowTool, "tool-arrow", Key::A),
+    (Tool::Line, Icon::LineTool, "tool-line", Key::L),
     (Tool::Rect, Icon::BoxTool, "tool-box", Key::R),
+    (Tool::Ellipse, Icon::CircleTool, "tool-circle", Key::O),
     (Tool::Pen, Icon::Pencil, "tool-pen", Key::P),
     (Tool::Text, Icon::TextTool, "tool-text", Key::T),
     (Tool::Highlight, Icon::Highlighter, "tool-highlight", Key::H),
     (Tool::Pixelate, Icon::Mosaic, "tool-pixelate", Key::B),
     (Tool::Crop, Icon::Crop, "tool-crop", Key::C),
+    (Tool::Eraser, Icon::Eraser, "tool-eraser", Key::E),
 ];
 
 /// Each colour with the message id of its name.
@@ -62,6 +160,8 @@ const COLORS: [(Rgba, &str); 6] = [
 const HIGHLIGHT_ALPHA: u8 = 102;
 /// Shorter drags are taken as a slip, not a shape, in image pixels.
 const MIN_DRAG: f32 = 3.0;
+/// How far from a shape the eraser still takes it, in points on screen.
+const ERASER_REACH: f32 = 5.0;
 const TOOLBAR_HEIGHT: f32 = 48.0;
 const CANVAS_PAD: f32 = 12.0;
 /// Until the toolbar has been measured.
@@ -124,7 +224,11 @@ pub struct Editor {
     saved: Vec<Shape>,
     tool: Tool,
     color: Rgba,
+    /// Inside colour of new boxes and ellipses; none leaves them empty.
+    fill: Option<Rgba>,
     stroke: f32,
+    /// The line width that suits the image; the others are multiples of it.
+    base_stroke: f32,
     text_size: f32,
     /// Side of a pixelate block, in image pixels.
     block: f32,
@@ -140,6 +244,8 @@ pub struct Editor {
     view: Option<View>,
     /// How wide the toolbar needs the window, measured as it is drawn.
     toolbar_width: f32,
+    /// The line or arrow drawn or clicked last, with its handles to bend it.
+    bending: Option<Bending>,
 }
 
 impl Editor {
@@ -161,7 +267,9 @@ impl Editor {
             saved: annotations,
             tool: Tool::Arrow,
             color: COLORS[0].0,
+            fill: None,
             stroke,
+            base_stroke: stroke,
             text_size,
             block: stroke * 4.0,
             mosaics: Vec::new(),
@@ -172,6 +280,7 @@ impl Editor {
             focused: false,
             view: None,
             toolbar_width: MIN_WIDTH,
+            bending: None,
         }
     }
 
@@ -289,6 +398,18 @@ impl Editor {
                 self.tool = tool;
             }
         }
+        let step = ui.input(|i| {
+            i32::from(i.key_pressed(Key::CloseBracket)) - i32::from(i.key_pressed(Key::OpenBracket))
+        });
+        if plain && step != 0 {
+            let now = self.width_choice() as i32;
+            let next = (now + step).clamp(0, WIDTHS.len() as i32 - 1) as usize;
+            self.stroke = self.base_stroke * WIDTHS[next].0;
+        }
+        // Esc lets go of the line being bent before it closes anything.
+        if self.bending.is_some() && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            self.bending = None;
+        }
         if ui.input(|i| i.key_pressed(Key::Escape)) {
             if self.confirm_discard || !self.changed() {
                 return Some(EditorResult::Cancel);
@@ -296,6 +417,17 @@ impl Editor {
             self.confirm_discard = true;
         }
         None
+    }
+
+    /// Which of `WIDTHS` the current width is, or the nearest.
+    fn width_choice(&self) -> usize {
+        let ratio = self.stroke / self.base_stroke;
+        (0..WIDTHS.len())
+            .min_by(|&a, &b| {
+                let off = |i: usize| (WIDTHS[i].0 - ratio).abs();
+                off(a).total_cmp(&off(b))
+            })
+            .unwrap_or(1)
     }
 
     fn save(&mut self) -> EditorResult {
@@ -364,6 +496,38 @@ impl Editor {
                     self.color = color;
                 }
             }
+            let fill = ui.add_enabled_ui(self.tool.fills(), |ui| {
+                fill_swatch(ui, self.fill, false, &tr!("editor-fill-tip"))
+            });
+            egui::Popup::menu(&fill.inner).show(|ui| {
+                ui.horizontal(|ui| {
+                    let none = tr!("editor-fill-none");
+                    if fill_swatch(ui, None, self.fill.is_none(), &none).clicked() {
+                        self.fill = None;
+                    }
+                    for (color, name) in COLORS {
+                        let name = i18n::text(name, None);
+                        let chosen = self.fill == Some(color);
+                        if fill_swatch(ui, Some(color), chosen, &name).clicked() {
+                            self.fill = Some(color);
+                        }
+                    }
+                });
+            });
+            let chosen = self.width_choice();
+            let width = ui.add_enabled_ui(self.tool.strokes(), |ui| {
+                width_swatch(ui, WIDTHS[chosen].1, false, &tr!("editor-width-tip"))
+            });
+            egui::Popup::menu(&width.inner).show(|ui| {
+                ui.horizontal(|ui| {
+                    for (i, (times, thick)) in WIDTHS.into_iter().enumerate() {
+                        let name = tr!("editor-width", percent = (times * 100.0) as u32);
+                        if width_swatch(ui, thick, i == chosen, &name).clicked() {
+                            self.stroke = self.base_stroke * times;
+                        }
+                    }
+                });
+            });
             ui.add_space(8.0);
             let undo = ui.add_enabled_ui(self.history.can_undo(), |ui| {
                 chip(
@@ -478,8 +642,23 @@ impl Editor {
         );
         let painter = ui.painter_at(rect);
         self.mosaics.retain(|(s, ..)| shapes.contains(s));
-        for shape in &shapes {
-            self.paint_layer(ui.ctx(), &painter, view, shape);
+        // Kept only while it is still there, as it was.
+        self.bending = self
+            .bending
+            .take()
+            .filter(|b| shapes.get(b.index) == Some(&b.shape));
+        let dragged = self
+            .bending
+            .as_ref()
+            .and_then(|b| Some((b.index, b.drag.as_ref()?.1.clone())));
+        for (i, shape) in shapes.iter().enumerate() {
+            match &dragged {
+                Some((at, live)) if *at == i => self.paint_layer(ui.ctx(), &painter, view, live),
+                _ => self.paint_layer(ui.ctx(), &painter, view, shape),
+            }
+        }
+        if self.tool.bends() && self.bend(&response, &painter, view) {
+            return;
         }
 
         if self.tool == Tool::Pen {
@@ -487,6 +666,10 @@ impl Editor {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
             }
             self.freehand(&response, &painter, view);
+            return;
+        }
+        if self.tool == Tool::Eraser {
+            self.erase(&response, view);
             return;
         }
         if self.tool == Tool::Text {
@@ -533,9 +716,93 @@ impl Editor {
         if response.drag_stopped() {
             self.drag_from = None;
             if let Some(shape) = shape {
+                // A new line or arrow shows its handles at once, to bend it.
+                if self.tool.bends() {
+                    self.bending = Some(Bending {
+                        index: self.history.shapes().len(),
+                        shape: shape.clone(),
+                        drag: None,
+                    });
+                }
                 self.history.add(shape);
             }
         }
+    }
+
+    /// The handles of the line being bent: drag a point to move it, the dot half way
+    /// between two points to add a bend there; double-click a bend to take it out. A
+    /// click on another line or arrow picks it. Returns whether the pointer was used.
+    fn bend(&mut self, response: &egui::Response, painter: &egui::Painter, view: View) -> bool {
+        let pointer = response.interact_pointer_pos();
+        let press = response.ctx.input(|i| i.pointer.press_origin());
+        let near = |at: Point, to: Option<Pos2>| {
+            to.is_some_and(|p| view.to_screen(at).distance(p) <= HANDLE_REACH)
+        };
+        if response.clicked() && self.bending.as_ref().is_none_or(|b| b.drag.is_none()) {
+            let shapes = self.history.shapes();
+            let reach = ERASER_REACH / view.scale;
+            let hit = pointer
+                .and_then(|p| shape_at(shapes, view.to_image(p), reach))
+                .filter(|&i| knots(&shapes[i]).is_some());
+            let on_handle = self.bending.as_ref().is_some_and(|b| {
+                let k = knots(&b.shape).unwrap_or_default();
+                k.iter().any(|p| near(*p, pointer))
+            });
+            if !on_handle {
+                self.bending = hit.map(|index| Bending {
+                    index,
+                    shape: shapes[index].clone(),
+                    drag: None,
+                });
+            }
+        }
+        let Some(bending) = &mut self.bending else {
+            return false;
+        };
+        let Some(points) = knots(&bending.shape) else {
+            return false;
+        };
+        if response.double_clicked() {
+            let bend = (1..points.len() - 1).find(|&i| near(points[i], pointer));
+            if let Some(i) = bend {
+                let mut fewer = points.clone();
+                fewer.remove(i);
+                let shape = with_knots(&bending.shape, &fewer);
+                self.history.replace(bending.index, shape.clone());
+                bending.shape = shape;
+                bending.drag = None;
+                return true;
+            }
+        }
+        if response.drag_started() {
+            let knot = (0..points.len()).find(|&i| near(points[i], press));
+            let insert = (0..points.len() - 1).find(|&i| near(midpoint(&points, i), press));
+            bending.drag = knot
+                .map(Handle::Knot)
+                .or(insert.map(Handle::Insert))
+                .map(|handle| (handle, bending.shape.clone()));
+        }
+        let Some((handle, _)) = bending.drag else {
+            paint_handles(painter, view, &points);
+            return false;
+        };
+        if let Some(at) = pointer.map(|p| view.to_image(p)) {
+            let mut moved = points.clone();
+            match handle {
+                Handle::Knot(i) => moved[i] = at,
+                Handle::Insert(i) => moved.insert(i + 1, at),
+            }
+            let live = with_knots(&bending.shape, &moved);
+            paint_handles(painter, view, &knots(&live).unwrap_or_default());
+            bending.drag = Some((handle, live));
+        }
+        if response.drag_stopped() {
+            if let Some((_, live)) = bending.drag.take() {
+                self.history.replace(bending.index, live.clone());
+                bending.shape = live;
+            }
+        }
+        true
     }
 
     /// Follow the pointer while it is held down; the line becomes a shape when let go.
@@ -565,6 +832,22 @@ impl Editor {
         }
     }
 
+    /// Take away the topmost shape under the pointer while it is pressed; dragging erases
+    /// every shape it passes over, each one its own undo step.
+    fn erase(&mut self, response: &egui::Response, view: View) {
+        if response.hovered() {
+            response.ctx.set_cursor_icon(CursorIcon::Crosshair);
+        }
+        let pressed = response.is_pointer_button_down_on() || response.clicked();
+        let Some(pos) = response.interact_pointer_pos().filter(|_| pressed) else {
+            return;
+        };
+        let reach = ERASER_REACH / view.scale;
+        if let Some(i) = shape_at(self.history.shapes(), view.to_image(pos), reach) {
+            self.history.erase(i);
+        }
+    }
+
     /// The shape a drag from `from` to `to` makes with the current tool, if it is big enough.
     fn shape(&self, from: Point, to: Point) -> Option<Shape> {
         let (min, max) = corners(from, to);
@@ -576,12 +859,28 @@ impl Editor {
                 to,
                 color,
                 width: self.stroke,
+                via: Vec::new(),
+            }),
+            Tool::Line if w.hypot(h) >= MIN_DRAG => Some(Shape::Line {
+                from,
+                to,
+                color,
+                width: self.stroke,
+                via: Vec::new(),
             }),
             Tool::Rect if w >= MIN_DRAG && h >= MIN_DRAG => Some(Shape::Rect {
                 min,
                 max,
                 color,
                 width: self.stroke,
+                fill: self.fill,
+            }),
+            Tool::Ellipse if w >= MIN_DRAG && h >= MIN_DRAG => Some(Shape::Ellipse {
+                min,
+                max,
+                color,
+                width: self.stroke,
+                fill: self.fill,
             }),
             Tool::Highlight if w >= MIN_DRAG && h >= MIN_DRAG => Some(Shape::Highlight {
                 min,
@@ -719,6 +1018,87 @@ fn swatch(ui: &mut Ui, color: Rgba, chosen: bool, name: &str) -> egui::Response 
     response.on_hover_text(name)
 }
 
+/// The fill colour as a square, so it reads apart from the round line colours; none is
+/// crossed out. The chosen one has a ring.
+fn fill_swatch(ui: &mut Ui, fill: Option<Rgba>, chosen: bool, name: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(22.0, H_IN_GROUP), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), name));
+    let square = Rect::from_center_size(rect.center(), vec2(14.0, 14.0));
+    let p = ui.painter();
+    let dim = |c: Color32| {
+        if ui.is_enabled() {
+            c
+        } else {
+            c.gamma_multiply(0.4)
+        }
+    };
+    if chosen {
+        p.rect_stroke(
+            square.expand(3.0),
+            3.0,
+            Stroke::new(2.0, palette::TEXT),
+            StrokeKind::Outside,
+        );
+    }
+    let border = Stroke::new(1.0, dim(palette::BORDER));
+    match fill {
+        Some(color) => {
+            p.rect(square, 2.0, dim(color32(color)), border, StrokeKind::Inside);
+        }
+        None => {
+            p.rect_stroke(
+                square,
+                2.0,
+                Stroke::new(1.5, dim(palette::MUTED)),
+                StrokeKind::Inside,
+            );
+            p.line_segment(
+                [square.left_bottom(), square.right_top()],
+                Stroke::new(1.5, dim(palette::RECORD)),
+            );
+        }
+    }
+    response.on_hover_text(name)
+}
+
+/// A line width as a short stroke that thick; the chosen one has a ring.
+fn width_swatch(ui: &mut Ui, thick: f32, chosen: bool, name: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(30.0, H_IN_GROUP), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), name));
+    let p = ui.painter();
+    let color = if ui.is_enabled() {
+        palette::TEXT
+    } else {
+        palette::TEXT.gamma_multiply(0.4)
+    };
+    if chosen {
+        p.rect_stroke(
+            rect.shrink2(vec2(1.0, 4.0)),
+            4.0,
+            Stroke::new(2.0, palette::TEXT),
+            StrokeKind::Inside,
+        );
+    }
+    let c = rect.center();
+    p.line_segment(
+        [c - vec2(9.0, 0.0), c + vec2(9.0, 0.0)],
+        Stroke::new(thick, color),
+    );
+    response.on_hover_text(name)
+}
+
+/// The points a line goes through, and half way between them where a bend can be added.
+fn paint_handles(painter: &egui::Painter, view: View, knots: &[Point]) {
+    let ring = Stroke::new(1.5, palette::ACCENT);
+    for i in 0..knots.len() - 1 {
+        let at = view.to_screen(midpoint(knots, i));
+        painter.circle(at, 4.0, Color32::from_white_alpha(160), ring);
+    }
+    for knot in knots {
+        painter.circle(view.to_screen(*knot), 6.0, Color32::WHITE, ring);
+    }
+}
+
 /// Shade what a crop leaves out.
 fn paint_crop(painter: &egui::Painter, view: View, min: Point, max: Point) {
     let full = view.rect();
@@ -745,28 +1125,56 @@ fn paint(painter: &egui::Painter, view: View, shape: &Shape) {
             to,
             color,
             width,
+            via,
         } => {
             let color = color32(*color);
-            let parts = arrow_parts(*from, *to, *width);
-            let w = width * view.scale;
-            let start = view.to_screen(*from);
-            painter.line_segment(
-                [start, view.to_screen(parts.shaft_end)],
-                Stroke::new(w, color),
-            );
-            painter.circle_filled(start, w / 2.0, color);
+            let parts = arrow_parts(&curve(*from, via, *to), *width);
+            paint_polyline(painter, view, &parts.shaft, width * view.scale, color);
             let head = parts.head.iter().map(|p| view.to_screen(*p)).collect();
             painter.add(egui::Shape::convex_polygon(head, color, Stroke::NONE));
+        }
+        Shape::Line {
+            from,
+            to,
+            color,
+            width,
+            via,
+        } => {
+            let line = curve(*from, via, *to);
+            paint_polyline(painter, view, &line, width * view.scale, color32(*color));
         }
         Shape::Rect {
             min,
             max,
             color,
             width,
+            fill,
         } => {
             let rect = Rect::from_min_max(view.to_screen(*min), view.to_screen(*max));
+            if let Some(fill) = fill {
+                painter.rect_filled(rect, 0.0, color32(*fill));
+            }
             let stroke = Stroke::new(width * view.scale, color32(*color));
             painter.rect_stroke(rect, 0.0, stroke, StrokeKind::Middle);
+        }
+        Shape::Ellipse {
+            min,
+            max,
+            color,
+            width,
+            fill,
+        } => {
+            let rect = Rect::from_min_max(view.to_screen(*min), view.to_screen(*max));
+            let radius = rect.size() / 2.0;
+            if let Some(fill) = fill {
+                painter.add(egui::Shape::ellipse_filled(
+                    rect.center(),
+                    radius,
+                    color32(*fill),
+                ));
+            }
+            let stroke = Stroke::new(width * view.scale, color32(*color));
+            painter.add(egui::Shape::ellipse_stroke(rect.center(), radius, stroke));
         }
         Shape::Highlight { min, max, color } => {
             let rect = Rect::from_min_max(view.to_screen(*min), view.to_screen(*max));
@@ -777,14 +1185,7 @@ fn paint(painter: &egui::Painter, view: View, shape: &Shape) {
             color,
             width,
         } => {
-            let color = color32(*color);
-            let w = width * view.scale;
-            let points: Vec<Pos2> = points.iter().map(|p| view.to_screen(*p)).collect();
-            // Round ends and joins, as the saved image has them.
-            for p in &points {
-                painter.circle_filled(*p, w / 2.0, color);
-            }
-            painter.add(egui::Shape::line(points, Stroke::new(w, color)));
+            paint_polyline(painter, view, points, width * view.scale, color32(*color));
         }
         Shape::Text {
             at,
@@ -803,6 +1204,16 @@ fn paint(painter: &egui::Painter, view: View, shape: &Shape) {
         }
         Shape::Pixelate { .. } | Shape::Crop { .. } => {}
     }
+}
+
+/// A line through `points`, `w` points wide, with round ends and joins as the saved
+/// image has them.
+fn paint_polyline(painter: &egui::Painter, view: View, points: &[Point], w: f32, color: Color32) {
+    let points: Vec<Pos2> = points.iter().map(|p| view.to_screen(*p)).collect();
+    for p in &points {
+        painter.circle_filled(*p, w / 2.0, color);
+    }
+    painter.add(egui::Shape::line(points, Stroke::new(w, color)));
 }
 
 #[cfg(test)]
@@ -946,7 +1357,7 @@ mod tests {
         let narrow = editor.toolbar_width;
         assert!(
             narrow > MIN_WIDTH,
-            "five tools, six colours, actions: {narrow}"
+            "ten tools, six colours, a fill, actions: {narrow}"
         );
         editor.history.add(Shape::Highlight {
             min: Point::default(),
@@ -958,6 +1369,129 @@ mod tests {
             editor.toolbar_width, narrow,
             "the same buttons, enabled or not"
         );
+    }
+
+    #[test]
+    fn o_draws_a_filled_ellipse_and_e_erases_it() {
+        let mut editor = editor();
+        run(&mut editor, vec![vec![key(Key::O, Modifiers::NONE)]]);
+        assert_eq!(editor.tool, Tool::Ellipse);
+        editor.fill = Some(COLORS[3].0);
+        drag(
+            &mut editor,
+            Point::new(100.0, 50.0),
+            Point::new(300.0, 150.0),
+        );
+        let [Shape::Ellipse { fill, .. }] = editor.history.shapes() else {
+            panic!("one ellipse: {:?}", editor.history.shapes());
+        };
+        assert_eq!(*fill, Some(COLORS[3].0));
+
+        run(&mut editor, vec![vec![key(Key::E, Modifiers::NONE)]]);
+        assert_eq!(editor.tool, Tool::Eraser);
+        let away = editor.view.unwrap().to_screen(Point::new(20.0, 20.0));
+        let inside = editor.view.unwrap().to_screen(Point::new(200.0, 100.0));
+        for at in [away, inside] {
+            run(
+                &mut editor,
+                vec![
+                    vec![egui::Event::PointerMoved(at)],
+                    vec![button(at, true)],
+                    vec![button(at, false)],
+                    vec![],
+                ],
+            );
+            if at == away {
+                assert_eq!(editor.history.shapes().len(), 1, "a miss erases nothing");
+            }
+        }
+        assert!(
+            editor.history.shapes().is_empty(),
+            "inside a filled ellipse"
+        );
+        run(&mut editor, vec![vec![key(Key::Z, Modifiers::COMMAND)]]);
+        assert_eq!(editor.history.shapes().len(), 1, "undo brings it back");
+    }
+
+    #[test]
+    fn brackets_pick_the_width_of_the_next_line() {
+        let mut editor = editor();
+        let base = editor.stroke;
+        run(
+            &mut editor,
+            vec![vec![key(Key::CloseBracket, Modifiers::NONE)]],
+        );
+        assert_eq!(editor.stroke, base * 1.5);
+        drag(&mut editor, Point::new(20.0, 20.0), Point::new(200.0, 20.0));
+        let [Shape::Arrow { width, .. }] = editor.history.shapes() else {
+            panic!("one arrow: {:?}", editor.history.shapes());
+        };
+        assert_eq!(*width, base * 1.5);
+        for _ in 0..9 {
+            run(
+                &mut editor,
+                vec![vec![key(Key::OpenBracket, Modifiers::NONE)]],
+            );
+        }
+        assert_eq!(editor.stroke, base * 0.5, "stops at the thinnest");
+    }
+
+    #[test]
+    fn dragging_the_middle_of_a_new_line_bends_it_and_undo_straightens_it() {
+        let mut editor = editor();
+        editor.tool = Tool::Line;
+        drag(
+            &mut editor,
+            Point::new(20.0, 100.0),
+            Point::new(220.0, 100.0),
+        );
+        assert!(editor.bending.is_some(), "its handles show");
+        drag(
+            &mut editor,
+            Point::new(120.0, 100.0),
+            Point::new(120.0, 40.0),
+        );
+        let [Shape::Line { via, .. }] = editor.history.shapes() else {
+            panic!("still one line: {:?}", editor.history.shapes());
+        };
+        assert!(
+            via.len() == 1 && close(via[0], Point::new(120.0, 40.0)),
+            "{via:?}"
+        );
+        // The end moves too, and Esc lets go of the line without closing the editor.
+        drag(
+            &mut editor,
+            Point::new(220.0, 100.0),
+            Point::new(250.0, 150.0),
+        );
+        let [Shape::Line { to, .. }] = editor.history.shapes() else {
+            panic!();
+        };
+        assert!(close(*to, Point::new(250.0, 150.0)));
+        let esc = vec![vec![key(Key::Escape, Modifiers::NONE)]];
+        assert_eq!(run(&mut editor, esc), None);
+        assert!(editor.bending.is_none());
+        editor.history.undo();
+        editor.history.undo();
+        let [Shape::Line { via, .. }] = editor.history.shapes() else {
+            panic!();
+        };
+        assert!(via.is_empty());
+    }
+
+    #[test]
+    fn l_draws_a_line_where_dragged() {
+        let mut editor = editor();
+        run(&mut editor, vec![vec![key(Key::L, Modifiers::NONE)]]);
+        drag(
+            &mut editor,
+            Point::new(20.0, 20.0),
+            Point::new(200.0, 100.0),
+        );
+        let [Shape::Line { from, to, .. }] = editor.history.shapes() else {
+            panic!("one line: {:?}", editor.history.shapes());
+        };
+        assert!(close(*from, Point::new(20.0, 20.0)) && close(*to, Point::new(200.0, 100.0)));
     }
 
     #[test]
@@ -1003,6 +1537,9 @@ mod tests {
             Point::new(20.0, 20.0),
             Point::new(200.0, 100.0),
         );
+        // The new arrow's bend handles go first.
+        assert_eq!(run(&mut editor, esc()), None);
+        assert!(editor.bending.is_none() && !editor.confirm_discard);
         assert_eq!(run(&mut editor, esc()), None, "asks first");
         assert!(editor.confirm_discard);
         assert_eq!(run(&mut editor, esc()), Some(EditorResult::Cancel));

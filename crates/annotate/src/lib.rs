@@ -1,4 +1,5 @@
-//! Annotations on a capture (US-7.1, FR-27): arrows, boxes, text and highlights kept as
+//! Annotations on a capture (US-7.1, FR-27): arrows, lines, boxes, ellipses, text and
+//! highlights kept as
 //! vector layers in image pixels while editing, with unlimited undo, and drawn into the
 //! pixels only when saved.
 
@@ -7,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{GlyphId, MetadataProvider};
-use vello_cpu::kurbo::{self, BezPath, Cap, Join, Line, Shape as _};
+use vello_cpu::kurbo::{self, BezPath, Cap, Join, Shape as _};
 use vello_cpu::peniko::Color;
 use vello_cpu::{CompositeMode, PixmapMut, RasterizerSettings, RenderContext, Resources};
 
@@ -47,18 +48,41 @@ impl Rgba {
 /// One annotation. Widths and sizes are in image pixels.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Shape {
+    /// Straight, or curved through `via` (see [`curve`]).
     Arrow {
         from: Point,
         to: Point,
         color: Rgba,
         width: f32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        via: Vec<Point>,
     },
-    /// An outlined box. `min` is the top-left corner.
+    /// A line with round ends: straight, or curved through `via` (see [`curve`]).
+    Line {
+        from: Point,
+        to: Point,
+        color: Rgba,
+        width: f32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        via: Vec<Point>,
+    },
+    /// An outlined box, filled with `fill` when there is one. `min` is the top-left corner.
     Rect {
         min: Point,
         max: Point,
         color: Rgba,
         width: f32,
+        #[serde(default)]
+        fill: Option<Rgba>,
+    },
+    /// An outlined ellipse inside the box `min`..`max`, filled with `fill` when there is one.
+    Ellipse {
+        min: Point,
+        max: Point,
+        color: Rgba,
+        width: f32,
+        #[serde(default)]
+        fill: Option<Rgba>,
     },
     /// A see-through fill over what matters; `color` carries the transparency.
     Highlight { min: Point, max: Point, color: Rgba },
@@ -92,31 +116,94 @@ pub fn corners(a: Point, b: Point) -> (Point, Point) {
     )
 }
 
+/// The line from `from` to `to` through the points `via`, as a polyline: straight when
+/// there are none, else a smooth curve (Catmull-Rom) that passes through each of them.
+/// The editor and the saved image both draw this.
+pub fn curve(from: Point, via: &[Point], to: Point) -> Vec<Point> {
+    let mut knots = Vec::with_capacity(via.len() + 2);
+    knots.push(from);
+    knots.extend_from_slice(via);
+    knots.push(to);
+    if knots.len() == 2 {
+        return knots;
+    }
+    let mut out = vec![from];
+    for i in 0..knots.len() - 1 {
+        let p0 = knots[i.saturating_sub(1)];
+        let (p1, p2) = (knots[i], knots[i + 1]);
+        let p3 = knots[(i + 2).min(knots.len() - 1)];
+        // chisle: steps by length, about one per 4 pixels.
+        let steps = (distance(p1, p2) / 4.0).clamp(4.0, 64.0) as usize;
+        for step in 1..=steps {
+            let t = step as f32 / steps as f32;
+            let (t2, t3) = (t * t, t * t * t);
+            let at = |a: f32, b: f32, c: f32, d: f32| {
+                0.5 * (2.0 * b
+                    + (c - a) * t
+                    + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2
+                    + (3.0 * b - a - 3.0 * c + d) * t3)
+            };
+            out.push(Point::new(
+                at(p0.x, p1.x, p2.x, p3.x),
+                at(p0.y, p1.y, p2.y, p3.y),
+            ));
+        }
+    }
+    out
+}
+
+fn distance(a: Point, b: Point) -> f32 {
+    (b.x - a.x).hypot(b.y - a.y)
+}
+
+/// The point `back` pixels before the end of `line`, measured along it, and how many of
+/// its points come before that one.
+fn back_along(line: &[Point], back: f32) -> (Point, usize) {
+    let mut left = back;
+    for i in (1..line.len()).rev() {
+        let (a, b) = (line[i - 1], line[i]);
+        let d = distance(a, b);
+        if d >= left && d > 0.0 {
+            let t = left / d;
+            return (Point::new(b.x + (a.x - b.x) * t, b.y + (a.y - b.y) * t), i);
+        }
+        left -= d;
+    }
+    (line[0], 1)
+}
+
 /// How an arrow is drawn, so the editor and the saved image agree.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ArrowParts {
-    /// The line runs from the arrow's start to here, inside the head.
-    pub shaft_end: Point,
+    /// The line, from the arrow's start to inside the head.
+    pub shaft: Vec<Point>,
     /// Tip, then the two back corners.
     pub head: [Point; 3],
 }
 
-pub fn arrow_parts(from: Point, to: Point, width: f32) -> ArrowParts {
-    let (dx, dy) = (to.x - from.x, to.y - from.y);
-    let length = dx.hypot(dy);
+/// The arrow along `line` (from [`curve`]), its head at the last point.
+pub fn arrow_parts(line: &[Point], width: f32) -> ArrowParts {
+    let to = *line.last().expect("a line has two points");
+    let length: f32 = line.windows(2).map(|w| distance(w[0], w[1])).sum();
     if length < f32::EPSILON {
         return ArrowParts {
-            shaft_end: to,
+            shaft: vec![to],
             head: [to; 3],
         };
     }
-    let (ux, uy) = (dx / length, dy / length);
     let head_length = (width * 4.0).max(10.0).min(length);
     let half_width = head_length * 0.6;
+    // The head points the way the line comes in over the head's own length.
+    let (from, _) = back_along(line, head_length);
+    let d = distance(from, to).max(f32::EPSILON);
+    let (ux, uy) = ((to.x - from.x) / d, (to.y - from.y) / d);
     let base = Point::new(to.x - ux * head_length, to.y - uy * head_length);
+    // Half way into the head: the line's round end stays hidden under it.
+    let (end, before) = back_along(line, head_length * 0.5);
+    let mut shaft = line[..before].to_vec();
+    shaft.push(end);
     ArrowParts {
-        // Half way into the head: the line's round end stays hidden under it.
-        shaft_end: Point::new(to.x - ux * head_length * 0.5, to.y - uy * head_length * 0.5),
+        shaft,
         head: [
             to,
             Point::new(base.x - uy * half_width, base.y + ux * half_width),
@@ -132,17 +219,30 @@ pub fn default_sizes(width: u32, height: u32) -> (f32, f32) {
     (stroke, stroke * 6.0)
 }
 
+/// One step that can be undone.
+#[derive(Debug, Clone, PartialEq)]
+enum Edit {
+    /// A shape put on top.
+    Add(Shape),
+    /// The shape that was at this place in the stack, erased.
+    Erase(usize, Shape),
+    /// The shape at this place changed from the first to the second.
+    Replace(usize, Shape, Shape),
+}
+
 /// The annotations so far, with unlimited undo and redo (US-7.1).
 #[derive(Debug, Clone, Default)]
 pub struct History {
     shapes: Vec<Shape>,
-    undone: Vec<Shape>,
+    done: Vec<Edit>,
+    undone: Vec<Edit>,
 }
 
 impl History {
     /// Annotations saved earlier, back as layers: each can be undone, down to the original.
     pub fn with_shapes(shapes: Vec<Shape>) -> Self {
         Self {
+            done: shapes.iter().cloned().map(Edit::Add).collect(),
             shapes,
             undone: Vec::new(),
         }
@@ -155,22 +255,69 @@ impl History {
 
     /// A new annotation; what was undone can no longer be redone.
     pub fn add(&mut self, shape: Shape) {
-        self.shapes.push(shape);
+        self.apply(Edit::Add(shape));
+    }
+
+    /// Erase the shape at `index` (bottom first); undo puts it back in its place.
+    pub fn erase(&mut self, index: usize) {
+        if let Some(shape) = self.shapes.get(index).cloned() {
+            self.apply(Edit::Erase(index, shape));
+        }
+    }
+
+    /// Change the shape at `index`, as one undo step: a line bent, say.
+    pub fn replace(&mut self, index: usize, shape: Shape) {
+        if let Some(old) = self.shapes.get(index).cloned() {
+            if old != shape {
+                self.apply(Edit::Replace(index, old, shape));
+            }
+        }
+    }
+
+    fn apply(&mut self, edit: Edit) {
+        self.redo_edit(&edit);
+        self.done.push(edit);
         self.undone.clear();
+    }
+
+    fn redo_edit(&mut self, edit: &Edit) {
+        match edit {
+            Edit::Add(shape) => self.shapes.push(shape.clone()),
+            Edit::Erase(index, _) => {
+                self.shapes.remove(*index);
+            }
+            Edit::Replace(index, _, new) => self.shapes[*index] = new.clone(),
+        }
     }
 
     /// Returns whether there was something to undo.
     pub fn undo(&mut self) -> bool {
-        self.shapes.pop().map(|s| self.undone.push(s)).is_some()
+        let Some(edit) = self.done.pop() else {
+            return false;
+        };
+        match &edit {
+            Edit::Add(_) => {
+                self.shapes.pop();
+            }
+            Edit::Erase(index, shape) => self.shapes.insert(*index, shape.clone()),
+            Edit::Replace(index, old, _) => self.shapes[*index] = old.clone(),
+        }
+        self.undone.push(edit);
+        true
     }
 
     /// Returns whether there was something to redo.
     pub fn redo(&mut self) -> bool {
-        self.undone.pop().map(|s| self.shapes.push(s)).is_some()
+        let Some(edit) = self.undone.pop() else {
+            return false;
+        };
+        self.redo_edit(&edit);
+        self.done.push(edit);
+        true
     }
 
     pub fn can_undo(&self) -> bool {
-        !self.shapes.is_empty()
+        !self.done.is_empty()
     }
 
     pub fn can_redo(&self) -> bool {
@@ -181,6 +328,90 @@ impl History {
     pub fn shapes(&self) -> &[Shape] {
         &self.shapes
     }
+}
+
+/// The topmost shape the eraser at `p` touches, as its index in `shapes`. `reach` is how
+/// far from a line still counts, in image pixels. Crops are not drawn, so never touched.
+pub fn shape_at(shapes: &[Shape], p: Point, reach: f32) -> Option<usize> {
+    shapes.iter().rposition(|shape| touches(shape, p, reach))
+}
+
+fn touches(shape: &Shape, p: Point, reach: f32) -> bool {
+    let inside = |min: Point, max: Point, pad: f32| {
+        p.x >= min.x - pad && p.x <= max.x + pad && p.y >= min.y - pad && p.y <= max.y + pad
+    };
+    match shape {
+        Shape::Arrow {
+            from,
+            to,
+            width,
+            via,
+            ..
+        }
+        | Shape::Line {
+            from,
+            to,
+            width,
+            via,
+            ..
+        } => curve(*from, via, *to)
+            .windows(2)
+            .any(|w| segment_distance(p, w[0], w[1]) <= width / 2.0 + reach),
+        Shape::Pen { points, width, .. } => {
+            let near = |d: f32| d <= width / 2.0 + reach;
+            match points.as_slice() {
+                [one] => near((p.x - one.x).hypot(p.y - one.y)),
+                _ => points
+                    .windows(2)
+                    .any(|w| near(segment_distance(p, w[0], w[1]))),
+            }
+        }
+        Shape::Rect {
+            min,
+            max,
+            width,
+            fill,
+            ..
+        } => {
+            let pad = width / 2.0 + reach;
+            inside(*min, *max, pad) && (fill.is_some() || !inside(*min, *max, -pad))
+        }
+        Shape::Ellipse {
+            min,
+            max,
+            width,
+            fill,
+            ..
+        } => {
+            let (rx, ry) = ((max.x - min.x) / 2.0, (max.y - min.y) / 2.0);
+            let (dx, dy) = (p.x - (min.x + rx), p.y - (min.y + ry));
+            // chisle: distance to the outline taken along the radius, close enough to aim.
+            let r = (dx / rx.max(0.5)).hypot(dy / ry.max(0.5));
+            let off = (r - 1.0) * rx.min(ry);
+            let pad = width / 2.0 + reach;
+            off <= pad && (fill.is_some() || off >= -pad)
+        }
+        Shape::Highlight { min, max, .. } | Shape::Pixelate { min, max, .. } => {
+            inside(*min, *max, reach)
+        }
+        Shape::Text { at, text, size, .. } => {
+            // chisle: an average glyph width, not measured with the font.
+            let w = text.chars().count() as f32 * size * 0.55;
+            inside(*at, Point::new(at.x + w, at.y + size * 1.2), reach)
+        }
+        Shape::Crop { .. } => false,
+    }
+}
+
+fn segment_distance(p: Point, a: Point, b: Point) -> f32 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let length2 = dx * dx + dy * dy;
+    let t = if length2 > 0.0 {
+        (((p.x - a.x) * dx + (p.y - a.y) * dy) / length2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (p.x - (a.x + t * dx)).hypot(p.y - (a.y + t * dy))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -365,11 +596,16 @@ fn draw(ctx: &mut RenderContext, shape: &Shape, font: &[u8]) -> Result<(), Flatt
             to,
             color,
             width,
+            via,
         } => {
-            let parts = arrow_parts(*from, *to, *width);
+            let parts = arrow_parts(&curve(*from, via, *to), *width);
             ctx.set_paint(color.vello());
-            ctx.set_stroke(kurbo::Stroke::new((*width).into()).with_caps(Cap::Round));
-            ctx.stroke_path(&Line::new(from.kurbo(), parts.shaft_end.kurbo()).to_path(0.1));
+            ctx.set_stroke(
+                kurbo::Stroke::new((*width).into())
+                    .with_caps(Cap::Round)
+                    .with_join(Join::Round),
+            );
+            ctx.stroke_path(&polyline(&parts.shaft));
             let mut head = BezPath::new();
             head.move_to(parts.head[0].kurbo());
             head.line_to(parts.head[1].kurbo());
@@ -377,15 +613,53 @@ fn draw(ctx: &mut RenderContext, shape: &Shape, font: &[u8]) -> Result<(), Flatt
             head.close_path();
             ctx.fill_path(&head);
         }
+        Shape::Line {
+            from,
+            to,
+            color,
+            width,
+            via,
+        } => {
+            ctx.set_paint(color.vello());
+            ctx.set_stroke(
+                kurbo::Stroke::new((*width).into())
+                    .with_caps(Cap::Round)
+                    .with_join(Join::Round),
+            );
+            ctx.stroke_path(&polyline(&curve(*from, via, *to)));
+        }
         Shape::Rect {
             min,
             max,
             color,
             width,
+            fill,
         } => {
+            let rect = kurbo::Rect::from_points(min.kurbo(), max.kurbo());
+            if let Some(fill) = fill {
+                ctx.set_paint(fill.vello());
+                ctx.fill_rect(&rect);
+            }
             ctx.set_paint(color.vello());
             ctx.set_stroke(kurbo::Stroke::new((*width).into()).with_join(Join::Miter));
-            ctx.stroke_rect(&kurbo::Rect::from_points(min.kurbo(), max.kurbo()));
+            ctx.stroke_rect(&rect);
+        }
+        Shape::Ellipse {
+            min,
+            max,
+            color,
+            width,
+            fill,
+        } => {
+            let bounds = kurbo::Rect::from_points(min.kurbo(), max.kurbo());
+            let ellipse = kurbo::Ellipse::from_rect(bounds).to_path(0.1);
+            if let Some(fill) = fill {
+                ctx.set_paint(fill.vello());
+                ctx.fill_path(&ellipse);
+            }
+            ctx.set_paint(color.vello());
+            ctx.set_stroke(kurbo::Stroke::new((*width).into()));
+            ctx.stroke_path(&ellipse);
         }
         Shape::Highlight { min, max, color } => {
             ctx.set_paint(color.vello());
@@ -396,12 +670,7 @@ fn draw(ctx: &mut RenderContext, shape: &Shape, font: &[u8]) -> Result<(), Flatt
             color,
             width,
         } => {
-            let mut path = BezPath::new();
-            let mut points = points.iter().map(|p| p.kurbo());
-            if let Some(first) = points.next() {
-                path.move_to(first);
-                points.for_each(|p| path.line_to(p));
-            }
+            let path = polyline(points);
             ctx.set_paint(color.vello());
             ctx.set_stroke(
                 kurbo::Stroke::new((*width).into())
@@ -424,6 +693,16 @@ fn draw(ctx: &mut RenderContext, shape: &Shape, font: &[u8]) -> Result<(), Flatt
         Shape::Pixelate { .. } | Shape::Crop { .. } => {}
     }
     Ok(())
+}
+
+fn polyline(points: &[Point]) -> BezPath {
+    let mut path = BezPath::new();
+    let mut points = points.iter().map(|p| p.kurbo());
+    if let Some(first) = points.next() {
+        path.move_to(first);
+        points.for_each(|p| path.line_to(p));
+    }
+    path
 }
 
 /// The outlines of `text` on one line, its top-left corner at `at`, `size` pixels per em.
@@ -590,12 +869,119 @@ mod tests {
             max: Point::new(120.0, 80.0),
             color: RED,
             width: 6.0,
+            fill: None,
         }]);
         assert_eq!(pixel(&out, 70, 20), RED.0, "on the top edge");
         assert_eq!(pixel(&out, 20, 50), RED.0, "on the left edge");
         assert_eq!(pixel(&out, 70, 50), GREY, "inside");
         assert_eq!(pixel(&out, 5, 5), GREY, "outside");
         assert_eq!((out.width, out.height), (200, 100));
+    }
+
+    #[test]
+    fn a_filled_box_and_ellipse_colour_their_inside() {
+        const BLUE: Rgba = Rgba([0, 0, 255, 255]);
+        let out = flat(&[
+            Shape::Rect {
+                min: Point::new(10.0, 10.0),
+                max: Point::new(90.0, 90.0),
+                color: RED,
+                width: 4.0,
+                fill: Some(BLUE),
+            },
+            Shape::Ellipse {
+                min: Point::new(110.0, 10.0),
+                max: Point::new(190.0, 90.0),
+                color: RED,
+                width: 4.0,
+                fill: Some(BLUE),
+            },
+        ]);
+        assert_eq!(pixel(&out, 50, 50), BLUE.0, "inside the box");
+        assert_eq!(pixel(&out, 50, 10), RED.0, "the box outline stays on top");
+        assert_eq!(pixel(&out, 150, 50), BLUE.0, "inside the ellipse");
+        assert_eq!(pixel(&out, 150, 10), RED.0, "top of the ellipse");
+        assert_eq!(pixel(&out, 112, 12), GREY, "the ellipse leaves its corners");
+    }
+
+    #[test]
+    fn an_empty_ellipse_and_a_line_draw_only_their_strokes() {
+        let out = flat(&[
+            Shape::Ellipse {
+                min: Point::new(10.0, 10.0),
+                max: Point::new(90.0, 90.0),
+                color: RED,
+                width: 4.0,
+                fill: None,
+            },
+            Shape::Line {
+                from: Point::new(110.0, 50.0),
+                to: Point::new(190.0, 50.0),
+                color: RED,
+                width: 4.0,
+                via: Vec::new(),
+            },
+        ]);
+        assert_eq!(pixel(&out, 10, 50), RED.0, "left of the ellipse");
+        assert_eq!(pixel(&out, 50, 50), GREY, "inside the ellipse");
+        assert_eq!(pixel(&out, 150, 50), RED.0, "on the line");
+        assert_eq!(pixel(&out, 150, 56), GREY, "beside the line");
+    }
+
+    #[test]
+    fn the_eraser_finds_the_topmost_shape_and_undo_puts_it_back() {
+        let line = |y: f32| Shape::Line {
+            from: Point::new(0.0, y),
+            to: Point::new(100.0, y),
+            color: RED,
+            width: 4.0,
+            via: Vec::new(),
+        };
+        let hollow = Shape::Rect {
+            min: Point::new(20.0, 20.0),
+            max: Point::new(80.0, 80.0),
+            color: RED,
+            width: 4.0,
+            fill: None,
+        };
+        let mut history = History::default();
+        for shape in [line(50.0), hollow.clone(), line(10.0)] {
+            history.add(shape);
+        }
+        let at = |h: &History, x, y| shape_at(h.shapes(), Point::new(x, y), 2.0);
+        assert_eq!(
+            at(&history, 50.0, 51.0),
+            Some(0),
+            "the line, through the hollow box"
+        );
+        assert_eq!(at(&history, 20.0, 30.0), Some(1), "the edge of the box");
+        assert_eq!(at(&history, 60.0, 30.0), None, "inside the hollow box");
+        assert_eq!(at(&history, 50.0, 10.0), Some(2));
+
+        history.erase(1);
+        assert_eq!(history.shapes(), [line(50.0), line(10.0)]);
+        history.add(line(90.0));
+        assert!(history.undo() && history.undo(), "the add, then the erase");
+        assert_eq!(history.shapes(), [line(50.0), hollow.clone(), line(10.0)]);
+        assert!(history.redo());
+        assert_eq!(history.shapes(), [line(50.0), line(10.0)]);
+        history.undo_all();
+        assert!(history.shapes().is_empty());
+    }
+
+    #[test]
+    fn a_box_saved_before_fills_existed_still_reads() {
+        let rect = Shape::Rect {
+            min: Point::new(1.0, 2.0),
+            max: Point::new(3.0, 4.0),
+            color: RED,
+            width: 2.0,
+            fill: None,
+        };
+        let text = ron::to_string(&rect).unwrap();
+        let old = text.replace(",fill:None", "");
+        assert_ne!(old, text, "the field was there: {text}");
+        assert_eq!(ron::from_str::<Shape>(&old).unwrap(), rect);
     }
 
     #[test]
@@ -607,14 +993,61 @@ mod tests {
             to,
             color: RED,
             width: 4.0,
+            via: Vec::new(),
         }]);
         assert_eq!(pixel(&out, 60, 50), RED.0, "on the line");
         assert_eq!(pixel(&out, 60, 56), GREY, "beside the line");
-        let parts = arrow_parts(from, to, 4.0);
+        let parts = arrow_parts(&[from, to], 4.0);
         let wide = parts.head[1].y - parts.head[2].y;
         assert!(wide.abs() > 10.0, "the head is wider than the line");
         assert_eq!(pixel(&out, 180, 54), RED.0, "inside the head, off the line");
         assert_eq!(pixel(&out, 195, 50), GREY, "past the tip");
+    }
+
+    #[test]
+    fn a_bent_line_goes_through_its_points_and_reads_back() {
+        let bent = |via: Vec<Point>| Shape::Line {
+            from: Point::new(10.0, 90.0),
+            to: Point::new(190.0, 90.0),
+            color: RED,
+            width: 4.0,
+            via,
+        };
+        let line = bent(vec![Point::new(100.0, 20.0)]);
+        let out = flat(std::slice::from_ref(&line));
+        assert_eq!(pixel(&out, 100, 20), RED.0, "through the bend");
+        assert_eq!(pixel(&out, 100, 90), GREY, "not straight across");
+        let text = ron::to_string(&line).unwrap();
+        assert_eq!(ron::from_str::<Shape>(&text).unwrap(), line);
+        let straight = ron::to_string(&bent(Vec::new())).unwrap();
+        assert!(
+            !straight.contains("via"),
+            "older files stay the same: {straight}"
+        );
+
+        let mut history = History::with_shapes(vec![line.clone()]);
+        let moved = bent(vec![Point::new(100.0, 150.0)]);
+        history.replace(0, moved.clone());
+        assert_eq!(history.shapes(), [moved]);
+        assert!(history.undo());
+        assert_eq!(history.shapes(), [line]);
+    }
+
+    #[test]
+    fn a_curved_arrow_points_along_its_end() {
+        let line = curve(
+            Point::new(0.0, 0.0),
+            &[Point::new(100.0, 100.0)],
+            Point::new(200.0, 0.0),
+        );
+        let parts = arrow_parts(&line, 4.0);
+        let tip = parts.head[0];
+        let back = Point::new(
+            (parts.head[1].x + parts.head[2].x) / 2.0,
+            (parts.head[1].y + parts.head[2].y) / 2.0,
+        );
+        assert!(back.x < tip.x && back.y > tip.y, "comes up from below-left");
+        assert!(distance(*parts.shaft.last().unwrap(), tip) < 20.0);
     }
 
     #[test]
@@ -767,6 +1200,7 @@ mod tests {
             max: Point::new(180.0, y + 20.0),
             color: RED,
             width: 4.0,
+            fill: None,
         };
         let out = flat(&[
             line(10.0),

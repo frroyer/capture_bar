@@ -34,13 +34,13 @@ jobs:
       - run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
       - run: cargo test --workspace --target ${{ matrix.target }}
         if: matrix.target != 'x86_64-apple-darwin'
-      - run: cargo build -p capture-bar --release --target ${{ matrix.target }}
+      - run: cargo build -p takebox --release --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
-          name: capture-bar-${{ matrix.target }}
+          name: takebox-${{ matrix.target }}
           path: |
-            target/${{ matrix.target }}/release/capture-bar
-            target/${{ matrix.target }}/release/capture-bar.exe
+            target/${{ matrix.target }}/release/takebox
+            target/${{ matrix.target }}/release/takebox.exe
           if-no-files-found: ignore
 
   licences:
