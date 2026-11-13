@@ -13,7 +13,7 @@ mod place;
 mod settings;
 
 pub use bubble::{CameraBubble, BUBBLE_SIZE};
-pub use countdown::show_countdown;
+pub use countdown::{show_clap, show_countdown};
 pub use demo::{DemoSetup, DemoSetupOutput};
 pub use editor::{Editor, EditorResult};
 pub use overlay::{Overlay, OverlayResult};

@@ -94,6 +94,14 @@ fn main() -> eframe::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+    // `takebox clap-report <folder>`: measure a demo session's clap test again (US-10.2).
+    let args: Vec<String> = std::env::args().collect();
+    if let [_, command, dir] = args.as_slice() {
+        if command == "clap-report" {
+            println!("{}", output::clap_message(Path::new(dir)));
+            return Ok(());
+        }
+    }
     tracing::info!(backend = cb_platform::backend_name(), "starting Takebox");
     config::migrate_legacy();
     if let Err(e) = cb_platform::autostart::migrate_legacy() {
@@ -242,6 +250,27 @@ enum Taskbar {
     /// Minimized, with a taskbar button to click. eframe runs no frames meanwhile, so
     /// the next frame means the bar is back.
     In,
+}
+
+/// The clap test's period (US-10.2): `CB_CLAP_SECS=10` claps every 10 s through each
+/// demo session, to measure how the tracks keep in sync. Off when unset or 0.
+fn clap_every() -> Option<Duration> {
+    let secs: u64 = std::env::var("CB_CLAP_SECS").ok()?.trim().parse().ok()?;
+    (secs > 0).then(|| Duration::from_secs(secs))
+}
+
+/// A square at the centre of what a demo session records, black but for a flash at each
+/// clap, which also beeps (US-10.2). It is in the video: that is its point.
+struct Clap {
+    every: Duration,
+    next: Instant,
+    lit_until: Instant,
+    /// Global physical pixels.
+    center: (i32, i32),
+    dressed: bool,
+    shown: bool,
+    /// When each beep really played, from the sound card, sent from its thread.
+    played: (mpsc::Sender<Instant>, mpsc::Receiver<Instant>),
 }
 
 /// Debug builds only: `CB_SHOW_IN_CAPTURE` lets screenshots include the app's windows.
@@ -407,6 +436,8 @@ struct App {
     demo_setup: Option<cb_ui::DemoSetup>,
     /// The demo session being recorded, or about to be once what to record is picked.
     demo: Option<demo::DemoSession>,
+    /// The clap test, while a demo session records with `CB_CLAP_SECS` set (US-10.2).
+    clap: Option<Clap>,
     /// Give the bar's window the keyboard on the next frame.
     focus_bar: bool,
     /// Whether the bar starts at login, as the OS had it when Settings opened (US-8.3).
@@ -681,6 +712,7 @@ impl App {
             settings_window: None,
             demo_setup: None,
             demo: None,
+            clap: None,
             focus_bar: false,
             autostart: false,
             autostart_done: None,
@@ -922,6 +954,57 @@ impl App {
             .focus();
     }
 
+    /// Clap when due, logging the clap on the session's clock, and draw the square.
+    fn show_clap(&mut self, ctx: &egui::Context) {
+        let running = match (&self.recording, &self.demo) {
+            (Some(recording), Some(demo)) => demo.item == Some(recording.item),
+            _ => false,
+        };
+        if !running {
+            self.clap = None;
+        }
+        let (Some(clap), Some(recording), Some(demo)) =
+            (&mut self.clap, &self.recording, &mut self.demo)
+        else {
+            return;
+        };
+        let now = Instant::now();
+        let ms = |t: Duration| t.as_millis() as u64;
+        for played in clap.played.1.try_iter() {
+            if let Some(t) = recording.handle.media_time(played) {
+                demo.claps.beeps.push(ms(t));
+            }
+        }
+        if recording.clock.paused() {
+            clap.next = now + clap.every;
+        } else if now >= clap.next && clap.shown {
+            if let Some(t) = recording.handle.media_time(now) {
+                demo.claps.claps.push(ms(t));
+                let (played, repaint) = (clap.played.0.clone(), self.repaint.clone());
+                cb_platform::clap_beep(Box::new(move |at| {
+                    if let Some(at) = at {
+                        let _ = played.send(at);
+                        repaint.request_repaint();
+                    }
+                }));
+                clap.lit_until = now + Duration::from_millis(100);
+                clap.next = now + clap.every;
+            }
+        }
+        let lit = now < clap.lit_until;
+        let scale = cb_core::display_at(clap.center, &self.displays)
+            .map_or_else(|| ctx.pixels_per_point(), |d| d.scale_factor);
+        cb_ui::show_clap(ctx, clap.center, scale, lit, clap.dressed, &mut clap.shown);
+        // Not kept out of captures: the video must show it.
+        clap.dressed = clap.dressed || dress_window(&tr!("clap-title"), false);
+        let wake = if lit {
+            clap.lit_until - now
+        } else {
+            clap.next.saturating_duration_since(now)
+        };
+        ctx.request_repaint_after(wake);
+    }
+
     fn show_demo_setup(&mut self, ctx: &egui::Context) {
         let monitor = self.bar_display();
         let Some(setup) = &mut self.demo_setup else {
@@ -956,6 +1039,16 @@ impl App {
         let Some(recording) = &self.recording else {
             return;
         };
+        // On the session's clock, as asked: the still is the frame of this moment.
+        if let Some(demo) = self
+            .demo
+            .as_mut()
+            .filter(|d| d.item == Some(recording.item))
+        {
+            if let Some(t) = recording.handle.media_time(Instant::now()) {
+                demo.still_times.insert(item, t.as_millis() as u64);
+            }
+        }
         let (sender, repaint) = (self.stills.0.clone(), self.repaint.clone());
         recording.handle.still(Box::new(move |result| {
             let _ = sender.send((item, result));
@@ -1625,7 +1718,7 @@ impl App {
         // Stills of a demo session go into its folder (US-10.1, DR-3).
         let recording = self.recording.is_some();
         let path = match self.demo.as_mut().filter(|d| recording && d.item.is_some()) {
-            Some(demo) => demo.next_still(),
+            Some(demo) => demo.place_still(item, frame.captured_at),
             None => self
                 .captures_dir
                 .join(output::file_name(&self.bar.prefix, frame.captured_at)),
@@ -2061,6 +2154,9 @@ impl App {
             }
         };
         let item = self.buffer.push(ItemKind::Video { duration_ms: 0 }, mode);
+        let clap_center = self
+            .target_center(&target)
+            .or_else(cb_platform::cursor_position);
         let (sender, repaint) = (self.recorded.0.clone(), self.repaint.clone());
         let done = Box::new(move |result| {
             let _ = sender.send((item, result));
@@ -2085,7 +2181,19 @@ impl App {
                 self.bar.recording = true;
                 if let Some(d) = self.demo.as_mut().filter(|_| demo) {
                     d.item = Some(item);
-                    d.started_at = SystemTime::now();
+                    if let Some(every) = clap_every() {
+                        tracing::info!(secs = every.as_secs(), "clap test on");
+                        self.flash(tr!("toast-clap-on", seconds = every.as_secs()));
+                    }
+                    self.clap = clap_every().map(|every| Clap {
+                        every,
+                        next: Instant::now() + every,
+                        lit_until: Instant::now(),
+                        center: clap_center.unwrap_or((0, 0)),
+                        dressed: false,
+                        shown: false,
+                        played: mpsc::channel(),
+                    });
                 }
             }
             Err(error) => {
@@ -2130,14 +2238,26 @@ impl App {
                     if let Some(demo) = &demo {
                         let _ = self.output.send(output::Job::Write {
                             path: demo.dir.join("manifest.json"),
-                            bytes: demo.manifest(&recording.path, duration_ms),
+                            bytes: demo.manifest(&recording),
                         });
+                        if !demo.claps.claps.is_empty() {
+                            // Kept first, so the report can be made again if this one is
+                            // cut short: `takebox clap-report <folder>`.
+                            let _ = self.output.send(output::Job::Write {
+                                path: demo.dir.join(demo::CLAP_LOG),
+                                bytes: demo.claps.to_json(),
+                            });
+                            let _ = self.output.send(output::Job::ClapReport(demo.dir.clone()));
+                        }
                     }
                     let _ = self.output.send(output::Job::Preview {
                         item,
                         path: recording.path,
                     });
                     match &demo {
+                        Some(demo) if !demo.claps.claps.is_empty() => {
+                            self.flash(tr!("toast-clap-measuring"))
+                        }
                         Some(demo) => self.flash(tr!(
                             "toast-demo-saved",
                             folder = demo.dir.display().to_string()
@@ -2661,6 +2781,7 @@ impl eframe::App for App {
         self.show_editor(ctx);
         self.show_settings(ctx);
         self.show_demo_setup(ctx);
+        self.show_clap(ctx);
         if std::mem::take(&mut self.folder_requested) {
             self.choose_folder(ctx, frame);
         }

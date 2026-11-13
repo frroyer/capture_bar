@@ -64,6 +64,48 @@ pub fn show_countdown(
     );
 }
 
+/// Side of the clap test's square, in points.
+const CLAP: f32 = 120.0;
+
+/// Draw the clap test's square (US-10.2) centred on `center`, global physical pixels on a
+/// monitor of `scale`: white while `lit`, else black. Placed and shown as the countdown.
+pub fn show_clap(
+    ctx: &Context,
+    center: (i32, i32),
+    scale: f32,
+    lit: bool,
+    dressed: bool,
+    shown: &mut bool,
+) {
+    let side = (CLAP * scale).round() as i32;
+    let rect = cb_core::Rect {
+        x: center.0 - side / 2,
+        y: center.1 - side / 2,
+        width: side as u32,
+        height: side as u32,
+    };
+    let builder = ViewportBuilder::default()
+        .with_title(tr!("clap-title"))
+        .with_decorations(false)
+        .with_has_shadow(false)
+        .with_always_on_top()
+        .with_resizable(false)
+        .with_taskbar(false)
+        .with_active(false);
+    let builder = placed(builder, ctx, rect, *shown);
+    ctx.show_viewport_immediate(ViewportId::from_hash_of("clap test"), builder, |ui, _| {
+        let fill = if lit { Color32::WHITE } else { Color32::BLACK };
+        CentralPanel::default()
+            .frame(Frame::NONE.fill(fill))
+            .show(ui, |_| {});
+        if *shown {
+            ui.ctx()
+                .send_viewport_cmd(ViewportCommand::MousePassthrough(true));
+        }
+        *shown |= keep_at(ui.ctx(), rect) && dressed;
+    });
+}
+
 fn draw(ui: &mut egui::Ui, left: f32, total: f32) {
     let area = ui.max_rect();
     let center = pos2(area.center().x, area.top() + SIZE / 2.0);

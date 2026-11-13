@@ -100,6 +100,9 @@ pub enum Job {
         path: PathBuf,
         bytes: Vec<u8>,
     },
+    /// Find a demo session's claps in its `video` and write the drift report to `to`
+    /// (US-10.2). Says how it went.
+    ClapReport(PathBuf),
     /// Make a GIF of the recording at `from`, next to it (US-6.7). Exports queue and run
     /// one at a time, in order, reporting progress (US-6.2).
     ExportGif {
@@ -498,9 +501,27 @@ fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
         | Job::Annotate { .. }
         | Job::Remove(_)
         | Job::Write { .. }
+        | Job::ClapReport(_)
         | Job::ExportGif { .. } => {
             unreachable!("not a one-off job")
         }
+    }
+}
+
+/// Measure the clap test of the demo package `dir` (US-10.2), and say how it went.
+pub fn clap_message(dir: &Path) -> String {
+    match crate::demo::ClapReport::measure(dir) {
+        Ok(report) => {
+            let (video, sound) = report.drifts();
+            let ms = |v: Option<i64>| v.map_or_else(|| "?".to_owned(), |v| v.to_string());
+            let (video, sound) = (ms(video), ms(sound));
+            if report.passed() {
+                tr!("toast-clap-passed", video = video, sound = sound)
+            } else {
+                tr!("toast-clap-failed", video = video, sound = sound)
+            }
+        }
+        Err(e) => tr!("toast-clap-error", error = e),
     }
 }
 
@@ -665,6 +686,17 @@ pub fn spawn(wake: impl Fn() + Send + Sync + 'static) -> (mpsc::Sender<Job>, mps
                             result,
                         });
                         wake();
+                        continue;
+                    }
+                    Job::ClapReport(dir) => {
+                        // Minutes for a long session: on its own thread, not in the queue.
+                        let (dir, done, wake) = (dir.clone(), done_tx.clone(), wake.clone());
+                        let _ = std::thread::Builder::new()
+                            .name("clap report".into())
+                            .spawn(move || {
+                                let _ = done.send(Done::Message(clap_message(&dir)));
+                                wake();
+                            });
                         continue;
                     }
                     Job::CopyFile(_)
