@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use cb_annotate::{
-    arrow_parts, corners, curve, default_sizes, mosaic, pixel_rect, shape_at, History, Mosaic,
-    Point, Rgba, Shape,
+    arrow_parts, bounds, corner_radius, corners, curve, default_sizes, fit, mosaic, next_step,
+    pixel_rect, shape_at, step_ink, step_text_size, History, Mosaic, Point, Rgba, Shape,
 };
 use cb_buffer::ItemId;
 use egui::{
@@ -17,7 +17,7 @@ use egui::{
 
 use crate::icons::Icon;
 use crate::place::{centred_on, Opening};
-use crate::{chip, palette, ChipStyle, Piece, H_IN_GROUP, SEMIBOLD};
+use crate::{chip, palette, ChipStyle, Piece, EDITOR_FONT, H_IN_GROUP};
 use crate::{i18n, tr};
 
 /// What the user decided, which ends the editor.
@@ -31,12 +31,16 @@ pub enum EditorResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tool {
+    /// Picks a layer to move it, or to resize it by a corner.
+    Select,
     Arrow,
     Line,
     Rect,
     Ellipse,
     Pen,
     Text,
+    /// Numbered step marks, counting on with each click.
+    Step,
     Highlight,
     Pixelate,
     Crop,
@@ -68,6 +72,37 @@ impl Tool {
 const WIDTHS: [(f32, f32); 5] = [(0.5, 1.5), (1.0, 3.0), (1.5, 4.5), (2.0, 6.0), (3.0, 8.0)];
 /// How close to a bend handle a press grabs it, in points on screen.
 const HANDLE_REACH: f32 = 9.0;
+
+/// The layer picked with the select tool, as it was then: an undo that changes it lets
+/// go of it.
+#[derive(Debug, Clone)]
+struct Selected {
+    index: usize,
+    shape: Shape,
+}
+
+/// What a drag with the select tool holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Grab {
+    Body,
+    /// A corner of the selection box: 0 top-left, 1 top-right, 2 bottom-right,
+    /// 3 bottom-left.
+    Corner(usize),
+}
+
+/// A layer being moved or resized, drawn as `live` until the drag ends.
+#[derive(Debug, Clone)]
+struct Moving {
+    index: usize,
+    original: Shape,
+    from: (Point, Point),
+    grab: Grab,
+    start: Point,
+    live: Shape,
+}
+
+/// How close to a corner of the selection a press grabs it, in points on screen.
+const CORNER_REACH: f32 = 8.0;
 
 /// A handle of the line being bent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,13 +169,15 @@ fn midpoint(knots: &[Point], i: usize) -> Point {
 }
 
 /// Each tool with its icon, the message id of its name and the key that picks it.
-const TOOLS: [(Tool, Icon, &str, Key); 10] = [
+const TOOLS: [(Tool, Icon, &str, Key); 12] = [
+    (Tool::Select, Icon::Select, "tool-select", Key::V),
     (Tool::Arrow, Icon::ArrowTool, "tool-arrow", Key::A),
     (Tool::Line, Icon::LineTool, "tool-line", Key::L),
     (Tool::Rect, Icon::BoxTool, "tool-box", Key::R),
     (Tool::Ellipse, Icon::CircleTool, "tool-circle", Key::O),
     (Tool::Pen, Icon::Pencil, "tool-pen", Key::P),
     (Tool::Text, Icon::TextTool, "tool-text", Key::T),
+    (Tool::Step, Icon::Step, "tool-step", Key::N),
     (Tool::Highlight, Icon::Highlighter, "tool-highlight", Key::H),
     (Tool::Pixelate, Icon::Mosaic, "tool-pixelate", Key::B),
     (Tool::Crop, Icon::Crop, "tool-crop", Key::C),
@@ -170,6 +207,26 @@ const MIN_WIDTH: f32 = 640.0;
 /// Between the editing buttons and Cancel / Save.
 const TOOLBAR_GAP: f32 = 24.0;
 const TOOLBAR_MARGIN: i8 = 10;
+
+/// The colours offered, as Settings sets them, each with its name: a colour's own when
+/// it is one of the defaults, its `#RRGGBB` otherwise.
+fn colors() -> [(Rgba, String); 6] {
+    let set = crate::editor_palette();
+    std::array::from_fn(|i| {
+        let color = set.map_or(COLORS[i].0, |p| {
+            let [r, g, b] = p[i];
+            Rgba([r, g, b, 0xFF])
+        });
+        let name = match COLORS.iter().find(|c| c.0 == color) {
+            Some((_, id)) => i18n::text(id, None),
+            None => {
+                let [r, g, b, _] = color.0;
+                cb_core::color_hex([r, g, b])
+            }
+        };
+        (color, name)
+    })
+}
 
 fn color32(c: Rgba) -> Color32 {
     let [r, g, b, a] = c.0;
@@ -249,6 +306,10 @@ pub struct Editor {
     bending: Option<Bending>,
     /// Where the window opens: on the bar's monitor.
     opening: Option<Opening>,
+    selected: Option<Selected>,
+    moving: Option<Moving>,
+    /// The corner radius while its slider is dragged, kept as one undo step on release.
+    rounding: Option<f32>,
 }
 
 impl Editor {
@@ -269,7 +330,7 @@ impl Editor {
             history: History::with_shapes(annotations.clone()),
             saved: annotations,
             tool: Tool::Arrow,
-            color: COLORS[0].0,
+            color: colors()[0].0,
             fill: None,
             stroke,
             base_stroke: stroke,
@@ -285,6 +346,9 @@ impl Editor {
             toolbar_width: MIN_WIDTH,
             bending: None,
             opening: None,
+            selected: None,
+            moving: None,
+            rounding: None,
         }
     }
 
@@ -513,9 +577,10 @@ impl Editor {
                 }
             }
             ui.add_space(8.0);
-            for (color, name) in COLORS {
-                if swatch(ui, color, self.color == color, &i18n::text(name, None)).clicked() {
-                    self.color = color;
+            let colors = colors();
+            for (color, name) in &colors {
+                if swatch(ui, *color, self.color == *color, name).clicked() {
+                    self.color = *color;
                 }
             }
             let fill = ui.add_enabled_ui(self.tool.fills(), |ui| {
@@ -527,11 +592,10 @@ impl Editor {
                     if fill_swatch(ui, None, self.fill.is_none(), &none).clicked() {
                         self.fill = None;
                     }
-                    for (color, name) in COLORS {
-                        let name = i18n::text(name, None);
-                        let chosen = self.fill == Some(color);
-                        if fill_swatch(ui, Some(color), chosen, &name).clicked() {
-                            self.fill = Some(color);
+                    for (color, name) in &colors {
+                        let chosen = self.fill == Some(*color);
+                        if fill_swatch(ui, Some(*color), chosen, name).clicked() {
+                            self.fill = Some(*color);
                         }
                     }
                 });
@@ -550,6 +614,7 @@ impl Editor {
                     }
                 });
             });
+            self.corner_slider(ui);
             ui.add_space(8.0);
             let undo = ui.add_enabled_ui(self.history.can_undo(), |ui| {
                 chip(
@@ -625,6 +690,42 @@ impl Editor {
         result
     }
 
+    /// The image's corner radius, now: while the slider is dragged, its value.
+    fn corner_radius(&self) -> f32 {
+        self.rounding
+            .unwrap_or_else(|| corner_radius(self.history.shapes()))
+    }
+
+    /// A small slider rounding the image's corners; what they cut off becomes
+    /// transparent when saved.
+    fn corner_slider(&mut self, ui: &mut Ui) {
+        ui.add_space(8.0);
+        let (w, h) = (self.base.width as f32, self.base.height as f32);
+        let most = (w.min(h) / 8.0).round().max(1.0);
+        let mut radius = self.corner_radius();
+        ui.add(egui::Label::new(
+            egui::RichText::new("◜").size(16.0).color(palette::TEXT),
+        ));
+        let slider = ui
+            .add_sized(
+                vec2(36.0, H_IN_GROUP),
+                egui::Slider::new(&mut radius, 0.0..=most)
+                    .show_value(false)
+                    .step_by(1.0),
+            )
+            .on_hover_text(tr!("editor-corners-tip", px = radius as u32));
+        if slider.changed() {
+            self.rounding = Some(radius);
+        }
+        let done = !slider.dragged() && !slider.is_pointer_button_down_on();
+        if let Some(radius) = self.rounding.filter(|_| done) {
+            self.rounding = None;
+            if radius != corner_radius(self.history.shapes()) {
+                self.history.add(Shape::Corners { radius });
+            }
+        }
+    }
+
     fn canvas(&mut self, ui: &mut Ui, texture: &TextureHandle) {
         let ppp = ui.ctx().pixels_per_point();
         let room = ui.max_rect().shrink(CANVAS_PAD);
@@ -656,7 +757,12 @@ impl Editor {
             pos2(x0 as f32 / w as f32, y0 as f32 / h as f32),
             pos2(x1 as f32 / w as f32, y1 as f32 / h as f32),
         );
-        ui.painter().image(texture.id(), rect, uv, Color32::WHITE);
+        // Rounded as Save will round them, the corners cut off showing the window.
+        let round = self.corner_radius() * scale;
+        egui::Image::from_texture((texture.id(), rect.size()))
+            .uv(uv)
+            .corner_radius(round.min(u8::MAX as f32) as u8)
+            .paint_at(ui, rect);
         let response = ui.interact(
             rect,
             ui.scope_id().with("annotate canvas"),
@@ -672,7 +778,8 @@ impl Editor {
         let dragged = self
             .bending
             .as_ref()
-            .and_then(|b| Some((b.index, b.drag.as_ref()?.1.clone())));
+            .and_then(|b| Some((b.index, b.drag.as_ref()?.1.clone())))
+            .or_else(|| self.moving.as_ref().map(|m| (m.index, m.live.clone())));
         for (i, shape) in shapes.iter().enumerate() {
             match &dragged {
                 Some((at, live)) if *at == i => self.paint_layer(ui.ctx(), &painter, view, live),
@@ -692,6 +799,26 @@ impl Editor {
         }
         if self.tool == Tool::Eraser {
             self.erase(&response, view);
+            return;
+        }
+        if self.tool == Tool::Select {
+            self.select(ui.ctx(), &response, &painter, view);
+            return;
+        }
+        if self.tool == Tool::Step {
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+            }
+            if response.clicked() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    self.history.add(Shape::Step {
+                        at: view.to_image(pos),
+                        number: next_step(self.history.shapes()),
+                        color: self.color,
+                        radius: self.text_size * 0.75,
+                    });
+                }
+            }
             return;
         }
         if self.tool == Tool::Text {
@@ -870,6 +997,153 @@ impl Editor {
         }
     }
 
+    /// Pick a layer with a click; drag it to move it, or drag a corner of its box to
+    /// resize it. Delete removes it. Each move or resize is one undo step.
+    fn select(
+        &mut self,
+        ctx: &Context,
+        response: &egui::Response,
+        painter: &egui::Painter,
+        view: View,
+    ) {
+        let shapes = self.history.shapes();
+        self.selected = self
+            .selected
+            .take()
+            .filter(|s| shapes.get(s.index) == Some(&s.shape));
+        if self
+            .moving
+            .as_ref()
+            .is_some_and(|m| shapes.get(m.index) != Some(&m.original))
+        {
+            self.moving = None;
+        }
+        let reach = ERASER_REACH / view.scale;
+        let corner_at = |selected: &Selected, pos: Pos2| {
+            let (a, b) = layer_bounds(ctx, &selected.shape);
+            box_corners(view, a, b)
+                .iter()
+                .position(|c| c.distance(pos) <= CORNER_REACH)
+        };
+        let hover = response.hover_pos();
+        if response.drag_started() {
+            if let Some(pos) = ctx.input(|i| i.pointer.press_origin()) {
+                let p = view.to_image(pos);
+                let grab = self
+                    .selected
+                    .as_ref()
+                    .and_then(|s| Some((s.index, Grab::Corner(corner_at(s, pos)?))))
+                    .or_else(|| Some((shape_at(shapes, p, reach)?, Grab::Body)))
+                    .or_else(|| {
+                        let s = self.selected.as_ref()?;
+                        let (a, b) = layer_bounds(ctx, &s.shape);
+                        let inside = p.x >= a.x && p.x <= b.x && p.y >= a.y && p.y <= b.y;
+                        inside.then_some((s.index, Grab::Body))
+                    });
+                if let Some((index, grab)) = grab {
+                    let shape = shapes[index].clone();
+                    self.moving = Some(Moving {
+                        index,
+                        from: layer_bounds(ctx, &shape),
+                        original: shape.clone(),
+                        grab,
+                        start: p,
+                        live: shape.clone(),
+                    });
+                    self.selected = Some(Selected { index, shape });
+                }
+            }
+        }
+        if let Some(moving) = &mut self.moving {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let p = view.to_image(pos);
+                let (mut a, mut b) = moving.from;
+                // Whatever is held moves as far as the pointer did.
+                let (dx, dy) = (p.x - moving.start.x, p.y - moving.start.y);
+                let shift = |q: Point| Point::new(q.x + dx, q.y + dy);
+                match moving.grab {
+                    Grab::Body => (a, b) = (shift(a), shift(b)),
+                    Grab::Corner(0) => a = shift(a),
+                    Grab::Corner(1) => (b.x, a.y) = (b.x + dx, a.y + dy),
+                    Grab::Corner(2) => b = shift(b),
+                    Grab::Corner(_) => (a.x, b.y) = (a.x + dx, b.y + dy),
+                }
+                moving.live = fit(&moving.original, moving.from, (a, b));
+            }
+            if response.drag_stopped() {
+                if let Some(moving) = self.moving.take() {
+                    if moving.live != moving.original {
+                        self.history.replace(moving.index, moving.live.clone());
+                    }
+                    self.selected = Some(Selected {
+                        index: moving.index,
+                        shape: moving.live,
+                    });
+                }
+            }
+        } else if response.clicked() {
+            let picked = response
+                .interact_pointer_pos()
+                .and_then(|pos| shape_at(self.history.shapes(), view.to_image(pos), reach));
+            self.selected = picked.map(|index| Selected {
+                index,
+                shape: self.history.shapes()[index].clone(),
+            });
+        }
+        if let Some(selected) = &self.selected {
+            let delete = ctx.input_mut(|i| {
+                i.consume_key(Modifiers::NONE, Key::Delete)
+                    || i.consume_key(Modifiers::NONE, Key::Backspace)
+            });
+            if delete && self.moving.is_none() {
+                self.history.erase(selected.index);
+                self.selected = None;
+            }
+        }
+
+        let shown = match (&self.moving, &self.selected) {
+            (Some(m), _) => Some(m.live.clone()),
+            (None, Some(s)) => Some(s.shape.clone()),
+            _ => None,
+        };
+        let over_corner = self
+            .selected
+            .as_ref()
+            .zip(hover)
+            .and_then(|(s, pos)| corner_at(s, pos));
+        let over_shape = hover
+            .and_then(|pos| shape_at(self.history.shapes(), view.to_image(pos), reach))
+            .is_some();
+        ctx.set_cursor_icon(match (self.moving.as_ref().map(|m| m.grab), over_corner) {
+            (Some(Grab::Corner(c)), _) | (None, Some(c)) if c % 2 == 0 => CursorIcon::ResizeNwSe,
+            (Some(Grab::Corner(_)), _) | (None, Some(_)) => CursorIcon::ResizeNeSw,
+            (Some(Grab::Body), _) => CursorIcon::Grabbing,
+            (None, None) if over_shape => CursorIcon::Grab,
+            _ => CursorIcon::Default,
+        });
+        if let Some(shape) = shown {
+            let (a, b) = layer_bounds(ctx, &shape);
+            let (a, b) = corners(a, b);
+            let outline = Rect::from_min_max(view.to_screen(a), view.to_screen(b)).expand(3.0);
+            painter.rect_stroke(
+                outline,
+                2.0,
+                Stroke::new(1.0, palette::ACCENT),
+                StrokeKind::Outside,
+            );
+            for c in box_corners(view, a, b) {
+                let handle = Rect::from_center_size(c, vec2(8.0, 8.0));
+                painter.rect_filled(handle, 1.0, Color32::WHITE);
+                painter.rect_stroke(
+                    handle,
+                    1.0,
+                    Stroke::new(1.5, palette::ACCENT),
+                    StrokeKind::Middle,
+                );
+            }
+        }
+    }
+
     /// The shape a drag from `from` to `to` makes with the current tool, if it is big enough.
     fn shape(&self, from: Point, to: Point) -> Option<Shape> {
         let (min, max) = corners(from, to);
@@ -960,7 +1234,7 @@ impl Editor {
         let pos = view.to_screen(typing.at);
         let font = FontId::new(
             self.text_size * view.scale,
-            FontFamily::Name(SEMIBOLD.into()),
+            FontFamily::Name(EDITOR_FONT.into()),
         );
         let width = (view.to_screen(Point::new(view.size.0, 0.0)).x - pos.x).max(40.0);
         let height = ui.ctx().fonts_mut(|f| f.row_height(&font));
@@ -978,7 +1252,7 @@ impl Editor {
                     typing.text.clone(),
                     FontId::new(
                         self.text_size * view.scale,
-                        FontFamily::Name(SEMIBOLD.into()),
+                        FontFamily::Name(EDITOR_FONT.into()),
                     ),
                     Color32::WHITE,
                 )
@@ -1121,6 +1395,33 @@ fn paint_handles(painter: &egui::Painter, view: View, knots: &[Point]) {
     }
 }
 
+/// The box of a layer, as [`bounds`] gives it but with text measured in the font it is
+/// drawn with.
+fn layer_bounds(ctx: &Context, shape: &Shape) -> (Point, Point) {
+    let Shape::Text { at, text, size, .. } = shape else {
+        return bounds(shape);
+    };
+    let font = FontId::new(*size, FontFamily::Name(EDITOR_FONT.into()));
+    let width = ctx
+        .fonts_mut(|f| f.layout_no_wrap(text.clone(), font, Color32::WHITE))
+        .size()
+        .x;
+    let (_, max) = bounds(shape);
+    (*at, Point::new(at.x + width, max.y))
+}
+
+/// The corners of the selection box `a`..`b` on screen, as [`Grab::Corner`] numbers them,
+/// just outside the outline.
+fn box_corners(view: View, a: Point, b: Point) -> [Pos2; 4] {
+    let r = Rect::from_min_max(view.to_screen(a), view.to_screen(b)).expand(3.0);
+    [
+        r.left_top(),
+        r.right_top(),
+        r.right_bottom(),
+        r.left_bottom(),
+    ]
+}
+
 /// Shade what a crop leaves out.
 fn paint_crop(painter: &egui::Painter, view: View, min: Point, max: Point) {
     let full = view.rect();
@@ -1215,7 +1516,7 @@ fn paint(painter: &egui::Painter, view: View, shape: &Shape) {
             color,
             size,
         } => {
-            let font = FontId::new(size * view.scale, FontFamily::Name(SEMIBOLD.into()));
+            let font = FontId::new(size * view.scale, FontFamily::Name(EDITOR_FONT.into()));
             painter.text(
                 view.to_screen(*at),
                 Align2::LEFT_TOP,
@@ -1224,7 +1525,20 @@ fn paint(painter: &egui::Painter, view: View, shape: &Shape) {
                 color32(*color),
             );
         }
-        Shape::Pixelate { .. } | Shape::Crop { .. } => {}
+        Shape::Step {
+            at,
+            number,
+            color,
+            radius,
+        } => {
+            let center = view.to_screen(*at);
+            painter.circle_filled(center, radius * view.scale, color32(*color));
+            let size = step_text_size(*radius) * view.scale;
+            let font = FontId::new(size, FontFamily::Name(EDITOR_FONT.into()));
+            let ink = color32(step_ink(*color));
+            painter.text(center, Align2::CENTER_CENTER, number.to_string(), font, ink);
+        }
+        Shape::Pixelate { .. } | Shape::Crop { .. } | Shape::Corners { .. } => {}
     }
 }
 
@@ -1651,6 +1965,108 @@ mod tests {
             (400.0, 200.0),
             "Original uncrops"
         );
+    }
+
+    #[test]
+    fn the_select_tool_moves_and_resizes_a_layer_as_one_undo_step() {
+        let mut editor = editor();
+        editor.history.add(Shape::Rect {
+            min: Point::new(40.0, 40.0),
+            max: Point::new(80.0, 80.0),
+            color: COLORS[0].0,
+            width: 2.0,
+            fill: Some(COLORS[1].0),
+        });
+        run(&mut editor, vec![vec![key(Key::V, Modifiers::NONE)]]);
+        assert_eq!(editor.tool, Tool::Select);
+        let view = editor.view.unwrap();
+        let drag = |editor: &mut Editor, from: Point, to: Point| {
+            let (a, b) = (view.to_screen(from), view.to_screen(to));
+            let mid = a + (b - a) / 2.0;
+            run(
+                editor,
+                vec![
+                    vec![egui::Event::PointerMoved(a)],
+                    vec![button(a, true)],
+                    vec![egui::Event::PointerMoved(mid)],
+                    vec![egui::Event::PointerMoved(b)],
+                    vec![button(b, false)],
+                    vec![],
+                ],
+            );
+        };
+        // Moved by its middle.
+        drag(&mut editor, Point::new(60.0, 60.0), Point::new(110.0, 90.0));
+        let [Shape::Rect { min, max, .. }] = editor.history.shapes() else {
+            panic!("one box: {:?}", editor.history.shapes());
+        };
+        assert!(close(*min, Point::new(90.0, 70.0)) && close(*max, Point::new(130.0, 110.0)));
+        // Resized by its bottom-right corner, now selected.
+        drag(
+            &mut editor,
+            Point::new(131.5, 111.5),
+            Point::new(171.5, 131.5),
+        );
+        let [Shape::Rect { min, max, .. }] = editor.history.shapes() else {
+            panic!("one box");
+        };
+        assert!(close(*min, Point::new(90.0, 70.0)), "{min:?}");
+        assert!(close(*max, Point::new(170.0, 130.0)), "{max:?}");
+        // One undo per change.
+        editor.history.undo();
+        let [Shape::Rect { max, .. }] = editor.history.shapes() else {
+            panic!("one box");
+        };
+        assert!(close(*max, Point::new(130.0, 110.0)), "{max:?}");
+        // Delete removes the selected layer.
+        run(&mut editor, vec![vec![]]);
+        let at = view.to_screen(Point::new(110.0, 90.0));
+        run(
+            &mut editor,
+            vec![
+                vec![egui::Event::PointerMoved(at)],
+                vec![button(at, true)],
+                vec![button(at, false)],
+                vec![],
+                vec![key(Key::Delete, Modifiers::NONE)],
+                vec![],
+            ],
+        );
+        assert!(editor.history.shapes().is_empty());
+    }
+
+    #[test]
+    fn each_click_with_the_step_tool_adds_the_next_number_in_the_colour() {
+        let mut editor = editor();
+        run(&mut editor, vec![vec![key(Key::N, Modifiers::NONE)]]);
+        assert_eq!(editor.tool, Tool::Step);
+        editor.color = COLORS[2].0;
+        let view = editor.view.unwrap();
+        for at in [Point::new(50.0, 50.0), Point::new(150.0, 80.0)] {
+            let at = view.to_screen(at);
+            run(
+                &mut editor,
+                vec![
+                    vec![egui::Event::PointerMoved(at)],
+                    vec![button(at, true)],
+                    vec![button(at, false)],
+                    vec![],
+                ],
+            );
+        }
+        let [Shape::Step {
+            number: 1,
+            color: first,
+            ..
+        }, Shape::Step { number: 2, at, .. }] = editor.history.shapes()
+        else {
+            panic!("two steps: {:?}", editor.history.shapes());
+        };
+        assert_eq!(*first, COLORS[2].0);
+        assert!((at.x - 150.0).abs() < 1.0, "{at:?}");
+        // Undo takes the last one back, and the count goes on from what is left.
+        editor.history.undo();
+        assert_eq!(next_step(editor.history.shapes()), 2);
     }
 
     #[test]

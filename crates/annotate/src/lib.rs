@@ -106,6 +106,141 @@ pub enum Shape {
     /// Keep only this part of the image. The last crop counts, applied after everything
     /// else is drawn.
     Crop { min: Point, max: Point },
+    /// Round the image's corners by `radius` pixels, after any crop: what is cut off
+    /// becomes transparent. The last one counts; 0 keeps square corners.
+    Corners { radius: f32 },
+    /// A numbered step mark for tutorials: a disc of `color` centred on `at`, with
+    /// `number` in its middle in [`step_ink`].
+    Step {
+        at: Point,
+        number: u32,
+        color: Rgba,
+        radius: f32,
+    },
+}
+
+/// The colour of a step's number on a disc of `color`: white on dark discs, near-black
+/// on light ones.
+pub fn step_ink(color: Rgba) -> Rgba {
+    let [r, g, b, _] = color.0.map(f32::from);
+    if 0.299 * r + 0.587 * g + 0.114 * b > 160.0 {
+        Rgba([0x14, 0x14, 0x16, 255])
+    } else {
+        Rgba([255, 255, 255, 255])
+    }
+}
+
+/// The size of a step's number, pixels per em, for a disc of `radius`.
+pub fn step_text_size(radius: f32) -> f32 {
+    radius * 1.15
+}
+
+/// The number the next step mark carries: one past the highest so far.
+pub fn next_step(shapes: &[Shape]) -> u32 {
+    shapes
+        .iter()
+        .filter_map(|s| match s {
+            Shape::Step { number, .. } => Some(*number),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+/// The full name of the first font in a font file (`Segoe UI Bold`), or `None` when it
+/// cannot be read as one.
+pub fn font_name(font: &[u8]) -> Option<String> {
+    let font = skrifa::FontRef::from_index(font, 0).ok()?;
+    let name = font
+        .localized_strings(skrifa::string::StringId::FULL_NAME)
+        .english_or_first()?
+        .to_string();
+    (!name.trim().is_empty()).then_some(name)
+}
+
+/// The box around a line of text at `at`, `size` pixels per em, measured roughly:
+/// an average glyph width, not the font's. The editor measures it with the font.
+pub fn text_box(at: Point, text: &str, size: f32) -> (Point, Point) {
+    let w = text.chars().count() as f32 * size * 0.55;
+    (at, Point::new(at.x + w, at.y + size * 1.2))
+}
+
+/// The box around `shape`, top-left and bottom-right, without its line width.
+pub fn bounds(shape: &Shape) -> (Point, Point) {
+    let around = |points: &mut dyn Iterator<Item = Point>| {
+        let first = points.next().unwrap_or_default();
+        points.fold((first, first), |(a, b), p| {
+            (
+                Point::new(a.x.min(p.x), a.y.min(p.y)),
+                Point::new(b.x.max(p.x), b.y.max(p.y)),
+            )
+        })
+    };
+    match shape {
+        Shape::Arrow { from, to, via, .. } | Shape::Line { from, to, via, .. } => {
+            around(&mut curve(*from, via, *to).into_iter())
+        }
+        Shape::Pen { points, .. } => around(&mut points.iter().copied()),
+        Shape::Rect { min, max, .. }
+        | Shape::Ellipse { min, max, .. }
+        | Shape::Highlight { min, max, .. }
+        | Shape::Pixelate { min, max, .. }
+        | Shape::Crop { min, max } => (*min, *max),
+        Shape::Corners { .. } => (Point::default(), Point::default()),
+        Shape::Text { at, text, size, .. } => text_box(*at, text, *size),
+        Shape::Step { at, radius, .. } => (
+            Point::new(at.x - radius, at.y - radius),
+            Point::new(at.x + radius, at.y + radius),
+        ),
+    }
+}
+
+/// `shape` moved and stretched so that its box `from` becomes `to` (see [`bounds`]).
+/// Line widths stay as they are; text grows with the box's height, and a step mark
+/// stays round, growing with the smaller side.
+pub fn fit(shape: &Shape, from: (Point, Point), to: (Point, Point)) -> Shape {
+    let ratio = |a0: f32, a1: f32, b0: f32, b1: f32| {
+        if (a1 - a0).abs() > f32::EPSILON {
+            (b1 - b0) / (a1 - a0)
+        } else {
+            1.0
+        }
+    };
+    let sx = ratio(from.0.x, from.1.x, to.0.x, to.1.x);
+    let sy = ratio(from.0.y, from.1.y, to.0.y, to.1.y);
+    let map = |p: Point| {
+        Point::new(
+            to.0.x + (p.x - from.0.x) * sx,
+            to.0.y + (p.y - from.0.y) * sy,
+        )
+    };
+    let mut out = shape.clone();
+    match &mut out {
+        Shape::Arrow { from, to, via, .. } | Shape::Line { from, to, via, .. } => {
+            *from = map(*from);
+            *to = map(*to);
+            via.iter_mut().for_each(|p| *p = map(*p));
+        }
+        Shape::Pen { points, .. } => points.iter_mut().for_each(|p| *p = map(*p)),
+        Shape::Rect { min, max, .. }
+        | Shape::Ellipse { min, max, .. }
+        | Shape::Highlight { min, max, .. }
+        | Shape::Pixelate { min, max, .. }
+        | Shape::Crop { min, max } => (*min, *max) = corners(map(*min), map(*max)),
+        Shape::Corners { .. } => {}
+        Shape::Text { at, size, .. } => {
+            // The top-left corner follows the box, wherever a flip put it.
+            let (corner, _) = corners(map(from.0), map(from.1));
+            *at = Point::new(corner.x + (at.x - from.0.x) * sx.abs(), corner.y);
+            *size = (*size * sy.abs()).max(4.0);
+        }
+        Shape::Step { at, radius, .. } => {
+            *at = map(*at);
+            *radius = (*radius * sx.abs().min(sy.abs())).max(4.0);
+        }
+    }
+    out
 }
 
 /// The opposite corners of a drag, as top-left and bottom-right.
@@ -395,11 +530,11 @@ fn touches(shape: &Shape, p: Point, reach: f32) -> bool {
             inside(*min, *max, reach)
         }
         Shape::Text { at, text, size, .. } => {
-            // chisle: an average glyph width, not measured with the font.
-            let w = text.chars().count() as f32 * size * 0.55;
-            inside(*at, Point::new(at.x + w, at.y + size * 1.2), reach)
+            let (min, max) = text_box(*at, text, *size);
+            inside(min, max, reach)
         }
-        Shape::Crop { .. } => false,
+        Shape::Crop { .. } | Shape::Corners { .. } => false,
+        Shape::Step { at, radius, .. } => distance(p, *at) <= radius + reach,
     }
 }
 
@@ -446,6 +581,7 @@ pub fn flatten(frame: &Frame, shapes: &[Shape], font: &[u8]) -> Result<Frame, Fl
     // Vector shapes are drawn in runs: a pixelate works on the pixels below it so far.
     let mut run = Vec::new();
     let mut crop = None;
+    let mut round = 0.0;
     for shape in shapes {
         match shape {
             Shape::Pixelate { min, max, block } => {
@@ -455,15 +591,63 @@ pub fn flatten(frame: &Frame, shapes: &[Shape], font: &[u8]) -> Result<Frame, Fl
                 m.fill(&mut rgba, frame.width);
             }
             Shape::Crop { min, max } => crop = Some((*min, *max)),
+            Shape::Corners { radius } => round = *radius,
             shape => run.push(shape),
         }
     }
     render(&mut rgba, width, height, &run, font)?;
     let out = Frame { rgba, ..*frame };
-    Ok(match crop {
+    let mut out = match crop {
         Some((min, max)) => cropped(&out, min, max),
         None => out,
-    })
+    };
+    round_corners(&mut out, round);
+    Ok(out)
+}
+
+/// Make the image's corners round, `radius` pixels, with a smooth edge: what lies
+/// outside becomes transparent.
+fn round_corners(frame: &mut Frame, radius: f32) {
+    let (w, h) = (frame.width as f32, frame.height as f32);
+    let r = radius.min(w / 2.0).min(h / 2.0);
+    if r <= 0.0 {
+        return;
+    }
+    let side = r.ceil() as u32;
+    for y in (0..side.min(frame.height)).chain(frame.height.saturating_sub(side)..frame.height) {
+        for x in (0..side.min(frame.width)).chain(frame.width.saturating_sub(side)..frame.width) {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let cx = if px < r {
+                r
+            } else if px > w - r {
+                w - r
+            } else {
+                continue;
+            };
+            let cy = if py < r {
+                r
+            } else if py > h - r {
+                h - r
+            } else {
+                continue;
+            };
+            let cover = (r - (px - cx).hypot(py - cy) + 0.5).clamp(0.0, 1.0);
+            let alpha = &mut frame.rgba[((y * frame.width + x) * 4 + 3) as usize];
+            *alpha = (f32::from(*alpha) * cover).round() as u8;
+        }
+    }
+}
+
+/// The corner radius the image is rounded by: the last [`Shape::Corners`], or 0.
+pub fn corner_radius(shapes: &[Shape]) -> f32 {
+    shapes
+        .iter()
+        .rev()
+        .find_map(|s| match s {
+            Shape::Corners { radius } => Some(*radius),
+            _ => None,
+        })
+        .unwrap_or(0.0)
 }
 
 fn render(
@@ -689,8 +873,24 @@ fn draw(ctx: &mut RenderContext, shape: &Shape, font: &[u8]) -> Result<(), Flatt
             ctx.set_paint(color.vello());
             ctx.fill_path(&path);
         }
+        Shape::Step {
+            at,
+            number,
+            color,
+            radius,
+        } => {
+            ctx.set_paint(color.vello());
+            ctx.fill_path(&kurbo::Circle::new(at.kurbo(), (*radius).into()).to_path(0.1));
+            let size = step_text_size(*radius);
+            let mut digits = text_path(font, &number.to_string(), Point::default(), size)?;
+            // Centred by the drawn outlines, so every number sits in the middle.
+            let ink = digits.bounding_box();
+            digits.apply_affine(kurbo::Affine::translate(at.kurbo() - ink.center()));
+            ctx.set_paint(step_ink(*color).vello());
+            ctx.fill_path(&digits);
+        }
         // Pixel operations, done by `flatten` between runs of vector shapes.
-        Shape::Pixelate { .. } | Shape::Crop { .. } => {}
+        Shape::Pixelate { .. } | Shape::Crop { .. } | Shape::Corners { .. } => {}
     }
     Ok(())
 }
@@ -1097,6 +1297,144 @@ mod tests {
         assert!(changed(10, 110, 10, 60) > 100, "the letters are there");
         assert_eq!(changed(150, 200, 0, 100), 0, "nothing past the text");
         assert_eq!(changed(0, 200, 70, 100), 0, "nothing below the line");
+    }
+
+    #[test]
+    fn round_corners_turn_transparent_after_the_crop() {
+        let crop = Shape::Crop {
+            min: Point::new(20.0, 20.0),
+            max: Point::new(120.0, 80.0),
+        };
+        let out = flat(&[crop, Shape::Corners { radius: 20.0 }]);
+        assert_eq!((out.width, out.height), (100, 60));
+        assert_eq!(pixel(&out, 0, 0)[3], 0, "the corner is cut off");
+        assert_eq!(pixel(&out, 99, 59)[3], 0);
+        assert_eq!(pixel(&out, 50, 0), GREY, "the edges stay");
+        assert_eq!(pixel(&out, 20, 20), GREY, "inside the curve");
+        let soft = (0..20)
+            .filter(|&x| (1..255).contains(&pixel(&out, x, 3)[3]))
+            .count();
+        assert!(soft > 0, "a smooth edge");
+        assert_eq!(
+            corner_radius(&[
+                Shape::Corners { radius: 8.0 },
+                Shape::Corners { radius: 3.0 }
+            ]),
+            3.0
+        );
+        assert_eq!(
+            flat(&[Shape::Corners { radius: 0.0 }]).rgba,
+            grey(200, 100).rgba
+        );
+    }
+
+    #[test]
+    fn a_shape_moves_and_stretches_into_a_new_box() {
+        let arrow = Shape::Arrow {
+            from: Point::new(10.0, 10.0),
+            to: Point::new(30.0, 50.0),
+            color: RED,
+            width: 4.0,
+            via: vec![Point::new(20.0, 20.0)],
+        };
+        let from = bounds(&arrow);
+        assert_eq!(from, (Point::new(10.0, 10.0), Point::new(30.0, 50.0)));
+        // Moved by (5, 5) and twice as wide.
+        let to = (Point::new(15.0, 15.0), Point::new(55.0, 55.0));
+        let Shape::Arrow {
+            from: a,
+            to: b,
+            via,
+            width,
+            ..
+        } = fit(&arrow, from, to)
+        else {
+            panic!("still an arrow");
+        };
+        assert_eq!((a, b), (Point::new(15.0, 15.0), Point::new(55.0, 55.0)));
+        assert_eq!(via, [Point::new(35.0, 25.0)]);
+        assert_eq!(width, 4.0, "line widths stay");
+
+        let step = Shape::Step {
+            at: Point::new(50.0, 50.0),
+            number: 1,
+            color: RED,
+            radius: 10.0,
+        };
+        let to = (Point::new(0.0, 0.0), Point::new(40.0, 60.0));
+        let Shape::Step { at, radius, .. } = fit(&step, bounds(&step), to) else {
+            panic!("still a step");
+        };
+        assert_eq!(
+            (at, radius),
+            (Point::new(20.0, 30.0), 20.0),
+            "round, as big as fits"
+        );
+
+        // A box dragged past its other corner is flipped, not inside out.
+        let rect = Shape::Rect {
+            min: Point::new(10.0, 10.0),
+            max: Point::new(20.0, 20.0),
+            color: RED,
+            width: 2.0,
+            fill: None,
+        };
+        let flipped = (Point::new(30.0, 10.0), Point::new(25.0, 20.0));
+        let Shape::Rect { min, max, .. } = fit(&rect, bounds(&rect), flipped) else {
+            panic!("still a box");
+        };
+        assert_eq!((min, max), (Point::new(25.0, 10.0), Point::new(30.0, 20.0)));
+
+        let text = Shape::Text {
+            at: Point::new(10.0, 10.0),
+            text: "Hi".into(),
+            color: RED,
+            size: 20.0,
+        };
+        let (min, max) = bounds(&text);
+        let taller = (Point::new(min.x, min.y), Point::new(max.x, max.y + 24.0));
+        let Shape::Text { at, size, .. } = fit(&text, (min, max), taller) else {
+            panic!("still text");
+        };
+        assert_eq!((at, size), (Point::new(10.0, 10.0), 40.0));
+    }
+
+    #[test]
+    fn a_step_is_a_disc_with_its_number_in_the_middle() {
+        let out = flat(&[Shape::Step {
+            at: Point::new(100.0, 50.0),
+            number: 7,
+            color: RED,
+            radius: 30.0,
+        }]);
+        assert_eq!(pixel(&out, 100, 50 - 26), RED.0, "the disc");
+        assert_eq!(pixel(&out, 100, 50 + 26), RED.0, "the disc");
+        assert_eq!(pixel(&out, 100, 50 - 34), GREY, "nothing past it");
+        let white = (85..115)
+            .flat_map(|x| (35..65).map(move |y| (x, y)))
+            .filter(|&(x, y)| pixel(&out, x, y) == [255, 255, 255, 255])
+            .count();
+        assert!(white > 30, "a white number in the middle: {white}");
+    }
+
+    #[test]
+    fn steps_count_on_from_the_highest_and_ink_follows_the_disc() {
+        let step = |number| Shape::Step {
+            at: Point::new(0.0, 0.0),
+            number,
+            color: RED,
+            radius: 10.0,
+        };
+        assert_eq!(next_step(&[]), 1);
+        assert_eq!(next_step(&[step(1), step(4), step(2)]), 5);
+        assert_eq!(
+            step_ink(Rgba([0xFA, 0xCC, 0x15, 255])).0[0],
+            0x14,
+            "dark on yellow"
+        );
+        assert_eq!(step_ink(RED).0[0], 255, "white on red");
+        assert_eq!(shape_at(&[step(1)], Point::new(8.0, 0.0), 0.0), Some(0));
+        assert_eq!(shape_at(&[step(1)], Point::new(14.0, 0.0), 2.0), None);
     }
 
     #[test]

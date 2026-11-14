@@ -40,6 +40,10 @@ pub enum Icon {
     LineTool,
     BoxTool,
     CircleTool,
+    /// Select, move and resize: a mouse pointer.
+    Select,
+    /// Numbered step marks: a disc with a 1 in it.
+    Step,
     /// A tilted eraser block.
     Eraser,
     TextTool,
@@ -274,6 +278,25 @@ pub fn paint(p: &Painter, center: Pos2, icon: Icon, color: Color32) {
         Icon::BoxTool => frame(-6.5, -5.0, 6.5, 5.0, 1),
         Icon::CircleTool => {
             p.circle_stroke(center, 6.5, s);
+        }
+        Icon::Select => {
+            p.add(egui::Shape::closed_line(
+                vec![
+                    at(-4.0, -7.0),
+                    at(-4.0, 5.0),
+                    at(-1.0, 2.0),
+                    at(1.5, 7.0),
+                    at(3.5, 6.0),
+                    at(1.0, 1.0),
+                    at(5.0, 1.0),
+                ],
+                s,
+            ));
+        }
+        Icon::Step => {
+            p.circle_stroke(center, 7.0, s);
+            seg(-1.5, -2.5, 0.5, -4.0);
+            seg(0.5, -4.0, 0.5, 4.0);
         }
         Icon::Eraser => {
             p.add(egui::Shape::closed_line(

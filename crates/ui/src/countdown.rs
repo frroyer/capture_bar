@@ -64,6 +64,69 @@ pub fn show_countdown(
     );
 }
 
+/// How far the highlight's outline sits outside the region, and its width, in points.
+const HIGHLIGHT_GAP: f32 = 2.0;
+const HIGHLIGHT_WIDTH: f32 = 4.0;
+
+/// Outline `region` (global physical pixels, on a monitor of `scale`) in the accent
+/// blue, just outside it, at `level` from 1 (full) down to 0: shown once a repeated
+/// capture is taken. Same window rules as [`show_countdown`].
+pub fn show_highlight(
+    ctx: &Context,
+    region: cb_core::Rect,
+    scale: f32,
+    level: f32,
+    dressed: bool,
+    shown: &mut bool,
+) {
+    let pad = ((HIGHLIGHT_GAP + HIGHLIGHT_WIDTH) * scale).round() as i32;
+    let rect = cb_core::Rect {
+        x: region.x - pad,
+        y: region.y - pad,
+        width: region.width + 2 * pad as u32,
+        height: region.height + 2 * pad as u32,
+    };
+    let builder = ViewportBuilder::default()
+        .with_title(tr!("highlight-title"))
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_has_shadow(false)
+        .with_always_on_top()
+        .with_resizable(false)
+        .with_taskbar(false)
+        .with_active(false);
+    let builder = placed(builder, ctx, rect, *shown);
+    ctx.show_viewport_immediate(
+        ViewportId::from_hash_of("repeat highlight"),
+        builder,
+        |ui, _class| {
+            CentralPanel::default().frame(Frame::NONE).show(ui, |ui| {
+                let area = ui.max_rect().shrink(HIGHLIGHT_WIDTH / 2.0);
+                let blue = palette::ACCENT.gamma_multiply(level);
+                let p = ui.painter();
+                // A soft glow under a crisp line.
+                p.rect_stroke(
+                    area,
+                    4.0,
+                    Stroke::new(HIGHLIGHT_WIDTH, blue.gamma_multiply(0.35)),
+                    egui::StrokeKind::Middle,
+                );
+                p.rect_stroke(
+                    area,
+                    4.0,
+                    Stroke::new(HIGHLIGHT_WIDTH / 2.0, blue),
+                    egui::StrokeKind::Middle,
+                );
+            });
+            if *shown {
+                ui.ctx()
+                    .send_viewport_cmd(ViewportCommand::MousePassthrough(true));
+            }
+            *shown |= keep_at(ui.ctx(), rect) && dressed;
+        },
+    );
+}
+
 /// Side of the clap test's square, in points.
 const CLAP: f32 = 120.0;
 

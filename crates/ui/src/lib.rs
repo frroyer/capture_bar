@@ -13,7 +13,7 @@ mod place;
 mod settings;
 
 pub use bubble::{CameraBubble, BUBBLE_SIZE};
-pub use countdown::{show_clap, show_countdown};
+pub use countdown::{show_clap, show_countdown, show_highlight};
 pub use demo::{DemoSetup, DemoSetupOutput};
 pub use editor::{Editor, EditorResult};
 pub use overlay::{Overlay, OverlayResult};
@@ -144,10 +144,23 @@ const PAD_X: f32 = 10.0;
 const GAP: f32 = 8.0;
 const CHIP_RADIUS: CornerRadius = CornerRadius::same(10);
 const SEMIBOLD: &str = "semibold";
+/// The family of the capture editor's text: the font Settings picked, then the
+/// interface's semibold.
+const EDITOR_FONT: &str = "editor";
 
 /// Use the OS interface font when there is one, or egui's default otherwise.
 /// Bar labels need the semibold family this defines, so call it before the first frame.
 pub fn install_fonts(ctx: &egui::Context, system: Option<(Vec<u8>, Vec<u8>)>) {
+    install_fonts_with(ctx, system, None);
+}
+
+/// [`install_fonts`], with `editor` as the capture editor's font (Settings); without
+/// one the editor writes in the interface's semibold.
+pub fn install_fonts_with(
+    ctx: &egui::Context,
+    system: Option<(Vec<u8>, Vec<u8>)>,
+    editor: Option<Vec<u8>>,
+) {
     let mut fonts = FontDefinitions::default();
     let mut semibold = fonts.families[&FontFamily::Proportional].clone();
     if let Some((regular, bold)) = system {
@@ -162,10 +175,31 @@ pub fn install_fonts(ctx: &egui::Context, system: Option<(Vec<u8>, Vec<u8>)>) {
             family.insert(0, "ui-regular".into());
         }
     }
+    let mut editor_family = semibold.clone();
+    if let Some(editor) = editor {
+        fonts
+            .font_data
+            .insert("editor".into(), Arc::new(FontData::from_owned(editor)));
+        editor_family.insert(0, "editor".into());
+    }
     fonts
         .families
         .insert(FontFamily::Name(SEMIBOLD.into()), semibold);
+    fonts
+        .families
+        .insert(FontFamily::Name(EDITOR_FONT.into()), editor_family);
     ctx.set_fonts(fonts);
+}
+
+static EDITOR_PALETTE: std::sync::RwLock<Option<[[u8; 3]; 6]>> = std::sync::RwLock::new(None);
+
+/// The capture editor's colours from the next frame on (Settings).
+pub fn set_editor_palette(palette: [[u8; 3]; 6]) {
+    *EDITOR_PALETTE.write().unwrap_or_else(|e| e.into_inner()) = Some(palette);
+}
+
+fn editor_palette() -> Option<[[u8; 3]; 6]> {
+    *EDITOR_PALETTE.read().unwrap_or_else(|e| e.into_inner())
 }
 
 /// The name of a capture mode in the interface's language.
@@ -704,19 +738,6 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                 {
                     out.commands.push(Command::ToggleRecording);
                 }
-                if !state.recording
-                    && state.plus
-                    && chip(
-                        ui,
-                        &[Piece::Icon(Icon::Clapper)],
-                        &ChipStyle::new(Color32::TRANSPARENT, TEXT),
-                        &tr!("bar-demo-tip", key = shortcut(Shortcut::Demo)),
-                    )
-                    .clicked()
-                {
-                    out.commands.push(Command::ToggleDemo);
-                }
-
                 divider(ui);
 
                 let count = buffer.len().to_string();
@@ -783,6 +804,17 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
                     .clicked()
                     {
                         out.toggle_cam = true;
+                    }
+                    if state.plus
+                        && chip(
+                            ui,
+                            &[Piece::Icon(Icon::Clapper)],
+                            &ChipStyle::new(Color32::TRANSPARENT, TEXT),
+                            &tr!("bar-demo-tip", key = shortcut(Shortcut::Demo)),
+                        )
+                        .clicked()
+                    {
+                        out.commands.push(Command::ToggleDemo);
                     }
                     if chip(
                         ui,

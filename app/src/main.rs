@@ -273,6 +273,57 @@ struct Clap {
     played: (mpsc::Sender<Instant>, mpsc::Receiver<Instant>),
 }
 
+/// The blue outline around a repeated region once it is taken.
+struct Highlight {
+    /// Global physical pixels.
+    region: Rect,
+    since: Instant,
+    dressed: bool,
+    shown: bool,
+}
+
+impl Highlight {
+    /// Fully lit for this long, then fading out over as long again.
+    const HOLD: Duration = Duration::from_millis(350);
+
+    /// 1 while held, then down to 0; `None` once gone.
+    fn level(&self, now: Instant) -> Option<f32> {
+        let t = now.saturating_duration_since(self.since).as_secs_f32() / Self::HOLD.as_secs_f32();
+        (t < 2.0).then(|| (2.0 - t).min(1.0))
+    }
+}
+
+/// The font file at `path`, if it reads as a font; `None` for an empty path.
+fn read_font(path: &str) -> Option<Vec<u8>> {
+    if path.is_empty() {
+        return None;
+    }
+    match std::fs::read(path) {
+        Ok(bytes) if cb_annotate::font_name(&bytes).is_some() => Some(bytes),
+        Ok(_) => {
+            tracing::warn!(
+                path,
+                "editor font is not a font: the interface font is used"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(path, error = %e, "editor font not read: the interface font is used");
+            None
+        }
+    }
+}
+
+/// What saved annotations are written in: the editor font, else the interface's
+/// semibold, else the built-in one.
+fn annotation_font(editor: Option<&[u8]>, system: Option<&(Vec<u8>, Vec<u8>)>) -> Arc<[u8]> {
+    match (editor, system) {
+        (Some(font), _) => font.into(),
+        (None, Some((_, semibold))) => semibold.as_slice().into(),
+        (None, None) => cb_annotate::fallback_font().into(),
+    }
+}
+
 /// Debug builds only: `CB_SHOW_IN_CAPTURE` lets screenshots include the app's windows.
 fn show_in_capture() -> bool {
     cfg!(debug_assertions) && std::env::var_os("CB_SHOW_IN_CAPTURE").is_some()
@@ -401,8 +452,16 @@ struct App {
     peek_video: Option<peek_video::PeekVideo>,
     /// Annotations saved before their capture's file was written: they go on once it is.
     annotation_waiting: Option<(ItemId, Arc<Frame>, Vec<cb_annotate::Shape>)>,
-    /// What annotation text is written in: the bar's semibold font, as the editor shows it.
+    /// What annotation text is written in: the font Settings picked, else the bar's
+    /// semibold, as the editor shows it.
     annotation_font: Arc<[u8]>,
+    /// The OS interface fonts, kept to set the fonts again when the editor's changes.
+    system_fonts: Option<(Vec<u8>, Vec<u8>)>,
+    /// The fonts Settings offers for the editor, as name and file, once found.
+    font_list: Option<Vec<(String, String)>>,
+    font_list_rx: Option<mpsc::Receiver<Vec<(String, String)>>>,
+    /// The editor font being read, off the UI thread: its file and its bytes.
+    editor_font_rx: Option<mpsc::Receiver<(String, Option<Vec<u8>>)>>,
     /// Where annotated captures are kept as taken, out of sight (US-7.1).
     originals_dir: PathBuf,
     last_region: Option<Rect>,
@@ -438,6 +497,9 @@ struct App {
     demo: Option<demo::DemoSession>,
     /// The clap test, while a demo session records with `CB_CLAP_SECS` set (US-10.2).
     clap: Option<Clap>,
+    /// The repeated capture whose region lights up once it is taken, and the region.
+    highlight_after: Option<(ItemId, Rect)>,
+    highlight: Option<Highlight>,
     /// Give the bar's window the keyboard on the next frame.
     focus_bar: bool,
     /// Whether the bar starts at login, as the OS had it when Settings opened (US-8.3).
@@ -516,11 +578,11 @@ impl App {
         tracing::info!(file = %settings_file.display(), "settings");
         cb_ui::i18n::set_language(loaded.settings().language);
         let system_fonts = cb_platform::system_ui_fonts();
-        let annotation_font: Arc<[u8]> = match &system_fonts {
-            Some((_, semibold)) => semibold.as_slice().into(),
-            None => cb_annotate::fallback_font().into(),
-        };
-        cb_ui::install_fonts(&cc.egui_ctx, system_fonts);
+        // Read before the first frame, as the interface fonts are.
+        let editor_font = read_font(&loaded.settings().editor_font);
+        let annotation_font = annotation_font(editor_font.as_deref(), system_fonts.as_ref());
+        cb_ui::install_fonts_with(&cc.egui_ctx, system_fonts.clone(), editor_font);
+        cb_ui::set_editor_palette(loaded.settings().editor_palette());
         if let Err(e) = cb_platform::remove_window_frame(cc) {
             tracing::warn!(error = %e, "window frame stays visible around the bar");
         }
@@ -689,6 +751,10 @@ impl App {
             peek_video: None,
             annotation_waiting: None,
             annotation_font,
+            system_fonts,
+            font_list: None,
+            font_list_rx: None,
+            editor_font_rx: None,
             originals_dir,
             last_region: cc
                 .storage
@@ -713,6 +779,8 @@ impl App {
             demo_setup: None,
             demo: None,
             clap: None,
+            highlight_after: None,
+            highlight: None,
             focus_bar: false,
             autostart: false,
             autostart_done: None,
@@ -906,6 +974,10 @@ impl App {
             Command::RepeatLastRegion => match self.last_region {
                 Some(rect) if self.overlay.is_none() => {
                     self.capture_still(CaptureMode::Region, CaptureTarget::Region(rect));
+                    // While recording, the still comes from the video: no highlight in it.
+                    if self.prefs.repeat_highlight && self.recording.is_none() {
+                        self.highlight_after = self.buffer.newest().map(|i| (i.id, rect));
+                    }
                 }
                 _ => self.begin_capture(CaptureMode::Region),
             },
@@ -915,6 +987,7 @@ impl App {
                 if self.settings_window.is_none() {
                     self.autostart = cb_platform::autostart::enabled();
                 }
+                self.find_fonts();
                 self.settings_window
                     .get_or_insert_with(SettingsWindow::default)
                     .focus();
@@ -952,6 +1025,40 @@ impl App {
         self.demo_setup
             .get_or_insert_with(|| cb_ui::DemoSetup::new(mode, mic))
             .focus();
+    }
+
+    /// Draw the blue outline of a repeated capture while it lasts.
+    fn show_highlight(&mut self, ctx: &egui::Context) {
+        let Some(highlight) = &mut self.highlight else {
+            return;
+        };
+        // Its clock starts once the window shows: the moment it takes to place it is
+        // not lost from the effect.
+        if !highlight.shown {
+            highlight.since = Instant::now();
+        }
+        let Some(level) = highlight.level(Instant::now()) else {
+            self.highlight = None;
+            return;
+        };
+        let region = highlight.region;
+        let center = (
+            region.x + region.width as i32 / 2,
+            region.y + region.height as i32 / 2,
+        );
+        let scale = cb_core::display_at(center, &self.displays)
+            .map_or_else(|| ctx.pixels_per_point(), |d| d.scale_factor);
+        cb_ui::show_highlight(
+            ctx,
+            region,
+            scale,
+            level,
+            highlight.dressed,
+            &mut highlight.shown,
+        );
+        highlight.dressed =
+            highlight.dressed || dress_window(&tr!("highlight-title"), !show_in_capture());
+        ctx.request_repaint();
     }
 
     /// Clap when due, logging the clap on the session's clock, and draw the square.
@@ -1467,6 +1574,19 @@ impl App {
         self.bar.prefix = output::clean_prefix(&settings.prefix);
         self.bar.mic_on = settings.microphone;
         cb_ui::set_tooltips(settings.tooltips);
+        cb_ui::set_editor_palette(settings.editor_palette());
+        if settings.editor_font != self.prefs.editor_font {
+            let (tx, rx) = mpsc::channel();
+            let (path, repaint) = (settings.editor_font.clone(), self.repaint.clone());
+            let _ = std::thread::Builder::new()
+                .name("editor font".into())
+                .spawn(move || {
+                    let font = read_font(&path);
+                    let _ = tx.send((path, font));
+                    repaint.request_repaint();
+                });
+            self.editor_font_rx = Some(rx);
+        }
         self.prefs = settings;
         if rebind {
             cb_ui::set_shortcuts(&self.prefs);
@@ -1486,7 +1606,55 @@ impl App {
         }
     }
 
+    /// Take in the font list and the editor font once their threads are done.
+    fn receive_fonts(&mut self, ctx: &egui::Context) {
+        if let Some(list) = self.font_list_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.font_list = Some(list);
+            self.font_list_rx = None;
+        }
+        let Some((path, font)) = self
+            .editor_font_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        else {
+            return;
+        };
+        self.editor_font_rx = None;
+        // A later pick wins: one read for an older one is dropped.
+        if path != self.prefs.editor_font {
+            return;
+        }
+        self.annotation_font = annotation_font(font.as_deref(), self.system_fonts.as_ref());
+        cb_ui::install_fonts_with(ctx, self.system_fonts.clone(), font);
+    }
+
+    /// List the installed fonts for Settings, on a thread: it reads every font file.
+    fn find_fonts(&mut self) {
+        if self.font_list.is_some() || self.font_list_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let repaint = self.repaint.clone();
+        let _ = std::thread::Builder::new()
+            .name("font list".into())
+            .spawn(move || {
+                let mut list: Vec<(String, String)> = cb_platform::font_files()
+                    .into_iter()
+                    .filter_map(|path| {
+                        let name = cb_annotate::font_name(&std::fs::read(&path).ok()?)?;
+                        Some((name, path.to_string_lossy().into_owned()))
+                    })
+                    .collect();
+                list.sort_by_key(|(name, _)| name.to_lowercase());
+                list.dedup_by(|a, b| a.0 == b.0);
+                let _ = tx.send(list);
+                repaint.request_repaint();
+            });
+        self.font_list_rx = Some(rx);
+    }
+
     fn show_settings(&mut self, ctx: &egui::Context) {
+        self.receive_fonts(ctx);
         let monitor = self.bar_display();
         let before = self.settings();
         let mut settings = before.clone();
@@ -1501,6 +1669,7 @@ impl App {
             &self.settings_file,
             &mut autostart,
             &self.shortcut_conflicts,
+            self.font_list.as_deref(),
         );
         if out.recording_keys != self.shortcuts_suspended {
             self.shortcuts_suspended = out.recording_keys;
@@ -2288,6 +2457,16 @@ impl App {
                         self.open_overlay(mode, frame);
                     } else if let Some(item) = self.pending.remove(&request_id) {
                         self.store(item, frame);
+                        if let Some((_, region)) =
+                            self.highlight_after.take_if(|(after, _)| *after == item)
+                        {
+                            self.highlight = Some(Highlight {
+                                region,
+                                since: Instant::now(),
+                                dressed: false,
+                                shown: false,
+                            });
+                        }
                     }
                 }
                 CaptureEvent::Failed { request_id, error } => {
@@ -2782,6 +2961,7 @@ impl eframe::App for App {
         self.show_settings(ctx);
         self.show_demo_setup(ctx);
         self.show_clap(ctx);
+        self.show_highlight(ctx);
         if std::mem::take(&mut self.folder_requested) {
             self.choose_folder(ctx, frame);
         }
@@ -2912,6 +3092,28 @@ mod tests {
         assert_eq!(fire(7, HotKeyState::Pressed), Some(Command::Capture));
         assert_eq!(fire(7, HotKeyState::Released), None);
         assert_eq!(fire(8, HotKeyState::Pressed), None);
+    }
+
+    #[test]
+    fn the_repeat_highlight_holds_then_fades_out() {
+        let since = Instant::now();
+        let highlight = Highlight {
+            region: Rect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            },
+            since,
+            dressed: true,
+            shown: true,
+        };
+        let at = |ms| highlight.level(since + Duration::from_millis(ms));
+        assert_eq!(at(0), Some(1.0));
+        assert_eq!(at(300), Some(1.0));
+        let fading = at(525).unwrap();
+        assert!((fading - 0.5).abs() < 0.01, "{fading}");
+        assert_eq!(at(700), None);
     }
 
     #[test]

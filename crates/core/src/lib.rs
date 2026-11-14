@@ -462,9 +462,39 @@ pub fn create_unique(
     unreachable!("every name from -2 to -{} exists", u32::MAX)
 }
 
+impl Settings {
+    /// The capture editor's colours, each read from [`Settings::editor_colors`] or its
+    /// default.
+    pub fn editor_palette(&self) -> [[u8; 3]; 6] {
+        std::array::from_fn(|i| {
+            self.editor_colors
+                .get(i)
+                .and_then(|hex| parse_color(hex))
+                .or_else(|| parse_color(DEFAULT_EDITOR_COLORS[i]))
+                .unwrap_or_default()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_colours_read_back_or_keep_their_default() {
+        assert_eq!(parse_color("#FF3B30"), Some([0xFF, 0x3B, 0x30]));
+        assert_eq!(parse_color("00ff00"), Some([0, 0xFF, 0]));
+        assert_eq!(parse_color("#12"), None);
+        assert_eq!(color_hex([0xAB, 0x01, 0xFF]), "#AB01FF");
+        let settings = Settings {
+            editor_colors: vec!["#000080".into(), "nonsense".into()],
+            ..Settings::default()
+        };
+        let palette = settings.editor_palette();
+        assert_eq!(palette[0], [0, 0, 0x80]);
+        assert_eq!(palette[1], [0xFF, 0xCC, 0x00], "unreadable: its default");
+        assert_eq!(palette[5], [0xFF, 0xFF, 0xFF], "missing: its default");
+    }
 
     fn display(x: i32, y: i32, width: u32, height: u32) -> DisplayInfo {
         let bounds = Rect {
@@ -715,6 +745,27 @@ mod tests {
     }
 }
 
+/// The capture editor's colours as they come: red, yellow, green, blue, black, white.
+pub const DEFAULT_EDITOR_COLORS: [&str; 6] = [
+    "#FF3B30", "#FFCC00", "#34C759", "#3B82F6", "#111111", "#FFFFFF",
+];
+
+/// `#RRGGBB` (the `#` may be left out) as red, green and blue.
+pub fn parse_color(hex: &str) -> Option<[u8; 3]> {
+    let hex = hex.trim();
+    let hex = hex.strip_prefix('#').unwrap_or(hex);
+    if hex.len() != 6 {
+        return None;
+    }
+    let v = u32::from_str_radix(hex, 16).ok()?;
+    Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])
+}
+
+/// A colour as `#RRGGBB`.
+pub fn color_hex([r, g, b]: [u8; 3]) -> String {
+    format!("#{r:02X}{g:02X}{b:02X}")
+}
+
 /// What the settings panel changes (FR-29, US-8.2). Kept in a TOML file; fields missing
 /// from an older file take their default, so a file only ever gains keys.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -740,6 +791,15 @@ pub struct Settings {
     pub language: Language,
     /// Fade the bar to see-through while the cursor is away from it (FR-5).
     pub fade_when_away: bool,
+    /// Outline a repeated region in blue for a moment once it is taken, to show the
+    /// capture happened.
+    pub repeat_highlight: bool,
+    /// The capture editor's six colours, as `#RRGGBB`. One missing or unreadable keeps
+    /// its default.
+    pub editor_colors: Vec<String>,
+    /// The font file of the capture editor's text and step numbers; empty is the
+    /// interface font.
+    pub editor_font: String,
     /// Show tooltips on the bar's buttons; off once the user knows them. Screen readers
     /// still get each button's name.
     pub tooltips: bool,
@@ -952,6 +1012,9 @@ impl Default for Settings {
             countdown_secs: 3,
             language: Language::Auto,
             fade_when_away: true,
+            repeat_highlight: true,
+            editor_colors: DEFAULT_EDITOR_COLORS.map(String::from).to_vec(),
+            editor_font: String::new(),
             tooltips: true,
             bubble_shape: BubbleShape::default(),
             shortcuts: Default::default(),
