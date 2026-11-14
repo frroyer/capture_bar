@@ -296,8 +296,8 @@ Le Mode Démo ajoute 5 Epics et 22 User Stories, numérotés à la suite de la P
 
 - CA : `events.jsonl` contient clics, défilements, changements de fenêtre et positions curseur à 30 Hz ; aucune frappe de texte en clair.
 
-* [ ] Capture d'événements par OS (event tap, hooks Windows, XInput2)
-* [ ] Filtre de confidentialité des frappes
+* [x] Capture d'événements par OS — Windows (hooks bas niveau, curseur et fenêtre active échantillonnés à ~30 Hz) ; event tap macOS et XInput2 avec leurs backends
+* [x] Filtre de confidentialité des frappes (une touche qui tape n'est que « texte », journalisée par séries : nombre de caractères)
 * [ ] Demande de permission Accessibilité sur macOS
 
 **US-10.5** En tant que présentateur, je veux masquer des zones ou des fenêtres avant de tourner. *(DR-20, DNFR-7)*

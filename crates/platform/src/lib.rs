@@ -21,6 +21,8 @@ mod windows_bubble;
 #[cfg(windows)]
 mod windows_camera;
 #[cfg(windows)]
+mod windows_events;
+#[cfg(windows)]
 mod windows_mp4;
 #[cfg(windows)]
 mod windows_record;
@@ -511,6 +513,36 @@ pub fn clap_beep(played: Box<dyn FnOnce(Option<std::time::Instant>) + Send>) {
     windows_audio::beep(played);
     #[cfg(not(windows))]
     played(None);
+}
+
+/// Logs a demo session's clicks, scrolls, window changes, key combinations and cursor
+/// into `events.jsonl` (US-10.4) until dropped. Typed text is never logged (DR-6).
+pub struct EventRecorder {
+    #[cfg(windows)]
+    _inner: windows_events::Recorder,
+}
+
+/// Start logging the session's events on its `clock` into `path`, made with its folder
+/// on a thread of its own. `None` where the platform cannot log them yet.
+pub fn record_events(
+    path: std::path::PathBuf,
+    clock: cb_core::MediaClock,
+) -> Option<EventRecorder> {
+    #[cfg(windows)]
+    {
+        match windows_events::start(path, clock) {
+            Ok(inner) => Some(EventRecorder { _inner: inner }),
+            Err(error) => {
+                tracing::warn!(%error, "event log");
+                None
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, clock);
+        None
+    }
 }
 
 /// What [`clap_probes`] finds: each frame's time and centre luma, and the sound's levels.
