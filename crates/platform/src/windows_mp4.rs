@@ -491,6 +491,151 @@ pub(crate) fn video_clip(
     }
 }
 
+/// The mean luma (0–255) of the centred `patch`-pixel square of each frame of the video
+/// at `path`, with the frame's time: where the clap test (US-10.2) flashes.
+pub(crate) fn centre_luma(path: &Path, patch: usize) -> WinResult<Vec<(Duration, f32)>> {
+    ensure_mf()?;
+    let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+    // SAFETY: Media Foundation calls below only read arguments valid for each call; the
+    // locked slice is only used before Unlock.
+    unsafe {
+        let reader = MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), None)?;
+        let nv12 = MFCreateMediaType()?;
+        nv12.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+        nv12.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
+        reader.SetCurrentMediaType(stream, None, &nv12)?;
+        let mut out = Vec::new();
+        while let Some((sample, timestamp)) = next_picture(&reader)? {
+            let kind = reader.GetCurrentMediaType(stream)?;
+            let size = kind.GetUINT64(&MF_MT_FRAME_SIZE)?;
+            let (w, h) = ((size >> 32) as usize, (size & 0xffff_ffff) as usize);
+            let pitch = kind.GetUINT32(&MF_MT_DEFAULT_STRIDE).unwrap_or(w as u32) as usize;
+            let side = patch.min(w).min(h);
+            let (x0, y0) = ((w - side) / 2, (h - side) / 2);
+            let buffer = sample.ConvertToContiguousBuffer()?;
+            let mut data = std::ptr::null_mut();
+            let mut len = 0;
+            buffer.Lock(&mut data, None, Some(&mut len))?;
+            let bytes = std::slice::from_raw_parts(data as *const u8, len as usize);
+            let (mut sum, mut count) = (0u64, 0u64);
+            for row in (y0..y0 + side).map(|y| pitch * y + x0) {
+                if let Some(pixels) = bytes.get(row..row + side) {
+                    sum += pixels.iter().map(|&y| u64::from(y)).sum::<u64>();
+                    count += side as u64;
+                }
+            }
+            buffer.Unlock()?;
+            let luma = if count == 0 {
+                0.0
+            } else {
+                sum as f32 / count as f32
+            };
+            out.push((Duration::from_nanos(timestamp as u64 * 100), luma));
+        }
+        Ok(out)
+    }
+}
+
+/// The loudness (RMS, 0–1) of the sound track of the file at `path`, one value per
+/// `window` from its start: where the clap test (US-10.2) hears the beep. Empty without
+/// a sound track.
+pub(crate) fn audio_levels(path: &Path, window: Duration) -> WinResult<Vec<f32>> {
+    ensure_mf()?;
+    let stream = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
+    // SAFETY: as in `centre_luma`.
+    unsafe {
+        let reader = MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), None)?;
+        let pcm = MFCreateMediaType()?;
+        pcm.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+        pcm.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)?;
+        pcm.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
+        if reader.SetCurrentMediaType(stream, None, &pcm).is_err() {
+            return Ok(Vec::new());
+        }
+        let kind = reader.GetCurrentMediaType(stream)?;
+        let rate = u64::from(kind.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND)?);
+        let channels = kind.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS)?.max(1) as usize;
+        let mut levels = Levels::new((rate * window.as_micros() as u64 / 1_000_000).max(1));
+        loop {
+            let (mut flags, mut timestamp, mut sample) = (0u32, 0i64, None);
+            reader.ReadSample(
+                stream,
+                0,
+                None,
+                Some(&mut flags),
+                Some(&mut timestamp),
+                Some(&mut sample),
+            )?;
+            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                break;
+            }
+            let Some(sample): Option<IMFSample> = sample else {
+                continue;
+            };
+            // Placed by its time: a gap before it is silence.
+            levels.skip_to(timestamp.max(0) as u64 * rate / TICKS_PER_SECOND as u64);
+            let buffer = sample.ConvertToContiguousBuffer()?;
+            let mut data = std::ptr::null_mut();
+            let mut len = 0;
+            buffer.Lock(&mut data, None, Some(&mut len))?;
+            let pcm = std::slice::from_raw_parts(data as *const i16, len as usize / 2);
+            for frame in pcm.chunks_exact(channels) {
+                let power = frame
+                    .iter()
+                    .map(|&v| (f64::from(v) / 32768.0).powi(2))
+                    .sum::<f64>();
+                levels.add(power / channels as f64);
+            }
+            buffer.Unlock()?;
+        }
+        Ok(levels.finish())
+    }
+}
+
+/// RMS over fixed windows of audio frames.
+struct Levels {
+    per_window: u64,
+    frames: u64,
+    sum: f64,
+    out: Vec<f32>,
+}
+
+impl Levels {
+    fn new(per_window: u64) -> Self {
+        Self {
+            per_window,
+            frames: 0,
+            sum: 0.0,
+            out: Vec::new(),
+        }
+    }
+
+    fn add(&mut self, power: f64) {
+        self.sum += power;
+        self.frames += 1;
+        if self.frames.is_multiple_of(self.per_window) {
+            self.out
+                .push((self.sum / self.per_window as f64).sqrt() as f32);
+            self.sum = 0.0;
+        }
+    }
+
+    /// Silence up to frame `at`.
+    fn skip_to(&mut self, at: u64) {
+        while self.frames < at {
+            self.add(0.0);
+        }
+    }
+
+    fn finish(mut self) -> Vec<f32> {
+        let partial = self.frames % self.per_window;
+        if partial > 0 {
+            self.out.push((self.sum / partial as f64).sqrt() as f32);
+        }
+        self.out
+    }
+}
+
 pub(crate) fn decode_check(path: &Path, width: u32, height: u32) -> WinResult<Mp4Check> {
     ensure_mf()?;
     let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
@@ -822,6 +967,52 @@ mod tests {
         assert!(off(length, Duration::from_secs(3)) <= 40, "{length:?}");
         let onset = onset.expect("the tone");
         assert!(off(onset, Duration::from_secs(1)) <= 40, "{onset:?}");
+    }
+
+    /// The clap test's probes (US-10.2) see a flash and a beep where they were written.
+    #[test]
+    fn probes_find_a_flash_and_a_beep_at_their_time() {
+        let path = temp_mp4("clap.mp4");
+        let Ok(mp4) = Mp4Writer::new(&path, W, H, FPS, None, true) else {
+            eprintln!("skipped: no H.264 or AAC encoder on this machine");
+            return;
+        };
+        let (black, white) = (
+            vec![0u8; (W * H * 4) as usize],
+            vec![255u8; (W * H * 4) as usize],
+        );
+        let chunk = RATE as i64 / 100;
+        for i in 0..60 {
+            let frame = if i >= 30 { &white } else { &black };
+            mp4.write_frame(frame, (W * 4) as usize, i).unwrap();
+            for c in (i * 100 / 30)..((i + 1) * 100 / 30) {
+                let first = c as i64 * chunk;
+                let pcm: Vec<i16> = (first..first + chunk)
+                    .flat_map(|f| {
+                        let t = f as f32 / RATE as f32;
+                        let v = if f >= RATE as i64 {
+                            (t * 1000.0 * std::f32::consts::TAU).sin() * 16_000.0
+                        } else {
+                            0.0
+                        };
+                        [v as i16; CHANNELS]
+                    })
+                    .collect();
+                mp4.write_audio(&pcm, first).unwrap();
+            }
+        }
+        mp4.finish().unwrap();
+        let luma = centre_luma(&path, 40).unwrap();
+        let window = Duration::from_millis(5);
+        let levels = audio_levels(&path, window).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let flash = luma.iter().find(|(_, y)| *y > 128.0).expect("the flash").0;
+        let beep = window * levels.iter().position(|&l| l > 0.1).expect("the beep") as u32;
+        let off = |a: Duration| a.abs_diff(Duration::from_secs(1)).as_millis();
+        assert!(off(flash) <= 34, "{flash:?}");
+        assert!(off(beep) <= 40, "{beep:?}");
+        assert!(luma[0].1 < 40.0, "black first: {}", luma[0].1);
     }
 
     /// NFR-12: a recording cut off before `finish` (a crash) still plays up to

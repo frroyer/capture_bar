@@ -459,6 +459,40 @@ pub fn video_clip(
     }
 }
 
+/// Play a short 1 kHz beep on its own thread: the clap test's sound (US-10.2). `played`
+/// gets when its first sample played, by the sound card's clock, or `None` if it could
+/// not play.
+pub fn clap_beep(played: Box<dyn FnOnce(Option<std::time::Instant>) + Send>) {
+    #[cfg(windows)]
+    windows_audio::beep(played);
+    #[cfg(not(windows))]
+    played(None);
+}
+
+/// What [`clap_probes`] finds: each frame's time and centre luma, and the sound's levels.
+pub type ClapProbes = (Vec<(std::time::Duration, f32)>, Vec<f32>);
+
+/// The clap test's probes (US-10.2) on the recording at `path`: the mean luma (0–255) of
+/// the centred `patch`-pixel square of each frame, with its time, and the sound's RMS
+/// level (0–1) per `window`. Slow: call it from a worker thread.
+pub fn clap_probes(
+    path: &std::path::Path,
+    patch: usize,
+    window: std::time::Duration,
+) -> cb_core::CaptureResult<ClapProbes> {
+    #[cfg(windows)]
+    {
+        let luma = windows_mp4::centre_luma(path, patch).map_err(windows::platform_err)?;
+        let levels = windows_mp4::audio_levels(path, window).map_err(windows::platform_err)?;
+        Ok((luma, levels))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, patch, window);
+        Err(cb_core::CaptureError::NotImplemented("clap_probes"))
+    }
+}
+
 /// Move a file to the Recycle Bin or Trash, where the user can still get it back.
 /// Slow on some systems: call it from a worker thread.
 pub fn move_to_trash(path: &std::path::Path) -> cb_core::CaptureResult<()> {

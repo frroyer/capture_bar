@@ -406,6 +406,9 @@ pub struct Recording {
     pub dropped: u64,
     /// From the start request to the first frame written (US-5.1: at most 300 ms).
     pub start_latency: std::time::Duration,
+    /// The wall-clock time of its first frame: time zero of [`StreamHandle::media_time`]
+    /// (DR-2).
+    pub started_at: SystemTime,
 }
 
 /// A running recording. Dropping it stops it too.
@@ -421,6 +424,15 @@ pub trait StreamHandle: Send {
     /// video loses none (US-5.5). Returns at once; `done` runs on another thread.
     fn still(&self, done: Box<dyn FnOnce(CaptureResult<Frame>) + Send>) {
         done(Err(CaptureError::NotImplemented("capture while recording")));
+    }
+    /// Where `at` falls in the recording, on the clock its video and sound are written
+    /// with (DR-2): time since the first frame, pauses left out, as the file plays it. An
+    /// instant during the current pause gives the pause's point. `None` before the first
+    /// frame, or when the platform cannot tell. Ask promptly: a pause after `at` moves the
+    /// clock it is read on.
+    fn media_time(&self, at: std::time::Instant) -> Option<std::time::Duration> {
+        let _ = at;
+        None
     }
     /// Returns at once; the recording's `done` runs when the file is complete.
     fn stop(self: Box<Self>);

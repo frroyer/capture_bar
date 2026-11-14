@@ -281,9 +281,9 @@ Le Mode Démo ajoute 5 Epics et 22 User Stories, numérotés à la suite de la P
 
 - CA : sur une session de 30 min avec un clap test (bip + flash), décalage mesuré ≤ 50 ms entre audio, vidéo et événements.
 
-* [ ] Service d'horloge de session (monotone)
-* [ ] Horodatage à la source pour chaque piste
-* [ ] Outil de test « clap » et rapport de dérive
+* [x] Service d'horloge de session (monotone)
+* [x] Horodatage à la source pour chaque piste (écran, son, captures ; événements et webcam avec US-10.4 / US-10.6)
+* [x] Outil de test « clap » et rapport de dérive (`CB_CLAP_SECS`, `clap-report.json`) — réussi si chaque clap reste à ≤ 50 ms du décalage médian de sa piste (la vidéo seule varie d'un rafraîchissement d'écran plus une image)
 
 **US-10.3** En tant que présentateur, je veux poser des marqueurs de scène, de prise ratée et de moment fort sans m'arrêter. *(DR-4)*
 

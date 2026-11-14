@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX,
     D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
@@ -66,9 +66,16 @@ impl Control {
         self.timeline.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Time zero is now: the first frame is in.
-    fn start(&self) {
+    /// Time zero is now: the first frame is in. Returns its wall-clock time.
+    fn start(&self) -> SystemTime {
         self.timeline().origin = Some(Instant::now());
+        SystemTime::now()
+    }
+
+    /// See [`StreamHandle::media_time`].
+    fn media_time(&self, at: Instant) -> Option<Duration> {
+        let timeline = self.timeline();
+        media_time(timeline.origin?, timeline.paused_at, at)
     }
 
     /// The instant of time zero, or `None` while paused.
@@ -97,6 +104,13 @@ impl Control {
     }
 }
 
+/// `at` on a timeline that began at `origin` (moved later by each finished pause) and is
+/// paused since `paused_at`, if it is.
+fn media_time(origin: Instant, paused_at: Option<Instant>, at: Instant) -> Option<Duration> {
+    let at = paused_at.map_or(at, |paused| at.min(paused));
+    Some(at.saturating_duration_since(origin))
+}
+
 fn frames_between(from: Instant, to: Instant) -> i64 {
     let nanos = match to.checked_duration_since(from) {
         Some(after) => after.as_nanos() as i128,
@@ -120,6 +134,9 @@ impl StreamHandle for Handle {
     }
     fn mic_level(&self) -> Option<f32> {
         Some(f32::from_bits(self.0.mic_level.load(Relaxed))).filter(|level| *level >= 0.0)
+    }
+    fn media_time(&self, at: Instant) -> Option<Duration> {
+        self.0.media_time(at)
     }
     fn still(&self, done: StillDone) {
         self.0
@@ -348,7 +365,7 @@ fn record(
     // MAX_LAG_SLOTS (encoder overload, not scheduler jitter) skips slots: those are drops.
     const MAX_LAG_SLOTS: u64 = 4;
     let slot_time = |slot: u64| Duration::from_secs(slot) / fps;
-    control.start();
+    let started_at = control.start();
     let (mut slots, mut dropped) = (0u64, 0u64);
     let mut failure = None;
     let write_sound = |chunks: &Receiver<Chunk>| {
@@ -447,6 +464,7 @@ fn record(
         frames: slots - dropped,
         dropped,
         start_latency,
+        started_at,
     };
     tracing::info!(
         seconds = recording.duration.as_secs_f32(),
@@ -483,5 +501,32 @@ mod tests {
             resumed - paused < i64::from(RATE) / 100,
             "{resumed} vs {paused}"
         );
+    }
+
+    /// The media clock (DR-2) agrees with the audio timeline: it stands still during a
+    /// pause and goes on from there.
+    #[test]
+    fn media_time_leaves_out_pauses() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        assert_eq!(media_time(t0, None, t0 + ms(40)), Some(ms(40)));
+        assert_eq!(media_time(t0, None, t0), Some(ms(0)));
+        // Paused at 100 ms: later instants stay at 100.
+        assert_eq!(
+            media_time(t0, Some(t0 + ms(100)), t0 + ms(400)),
+            Some(ms(100))
+        );
+        assert_eq!(
+            media_time(t0, Some(t0 + ms(100)), t0 + ms(60)),
+            Some(ms(60))
+        );
+        // Resumed after a 300 ms pause: the origin moved by 300.
+        assert_eq!(media_time(t0 + ms(300), None, t0 + ms(450)), Some(ms(150)));
+
+        let control = Control::new();
+        assert_eq!(control.media_time(Instant::now()), None);
+        let wall = control.start();
+        assert!(SystemTime::now().duration_since(wall).unwrap() < ms(100));
+        assert!(control.media_time(Instant::now()).unwrap() < ms(100));
     }
 }

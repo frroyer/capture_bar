@@ -211,10 +211,126 @@ fn read(source: &Source, index: usize, control: &Control, mixer: &mut Mixer) -> 
                         .collect()
                 };
                 peak = pcm.iter().fold(peak, |max, s| max.max(s.unsigned_abs()));
-                mixer.add(index, at, &pcm);
+                // Gaps are normal (a quiet output sends nothing in loopback); a jump back,
+                // or flagged timestamps, are how a track would slip (US-10.2).
+                let ms = |frames: i64| frames * 1000 / i64::from(RATE);
+                if let Some(jump) = mixer.add(index, at, &pcm) {
+                    tracing::debug!(source = source.name, jump_ms = ms(jump), "sound re-synced");
+                }
+                if flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32 != 0 {
+                    tracing::warn!(source = source.name, "sound packet with a bad timestamp");
+                }
             }
             source.capture.ReleaseBuffer(frames)?;
         }
     }
     Ok(f32::from(peak) / f32::from(i16::MAX))
+}
+
+/// How long the clap test's beep lasts.
+const BEEP_MS: u32 = 120;
+
+/// Play the clap test's beep (US-10.2) on the default output, on a thread of its own, and
+/// tell `played` when its first sample played, by the device's clock.
+pub(crate) fn beep(played: Box<dyn FnOnce(Option<Instant>) + Send>) {
+    std::thread::Builder::new()
+        .name("clap beep".into())
+        .spawn(move || {
+            crate::windows::ensure_mta();
+            let at = play_beep()
+                .inspect_err(|e| tracing::warn!("clap beep: {e}"))
+                .ok();
+            played(at);
+        })
+        .expect("spawn clap beep thread");
+}
+
+/// Play the beep and return when it started playing. The stream is new each time, so its
+/// position 0 is the beep's first sample: the device clock says when that played.
+fn play_beep() -> WinResult<Instant> {
+    let block = (CHANNELS * 2) as u16;
+    let format = WAVEFORMATEX {
+        wFormatTag: WAVE_FORMAT_PCM as u16,
+        nChannels: CHANNELS as u16,
+        nSamplesPerSec: RATE,
+        nAvgBytesPerSec: RATE * u32::from(block),
+        nBlockAlign: block,
+        wBitsPerSample: 16,
+        cbSize: 0,
+    };
+    let tone = tone(RATE, 1000.0, BEEP_MS, 0.5);
+    // SAFETY: COM calls with arguments valid for each call; `format` outlives Initialize;
+    // the buffer from GetBuffer holds `frames` frames and is only written before
+    // ReleaseBuffer.
+    unsafe {
+        let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+        let device = devices.GetDefaultAudioEndpoint(eRender, eConsole)?;
+        let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
+        client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+            BUFFER_100NS,
+            0,
+            &format,
+            None,
+        )?;
+        let render: IAudioRenderClient = client.GetService()?;
+        let clock: IAudioClock = client.GetService()?;
+        let frames = (tone.len() as u32).min(client.GetBufferSize()?);
+        let data = render.GetBuffer(frames)?;
+        let out = std::slice::from_raw_parts_mut(data.cast::<i16>(), frames as usize * CHANNELS);
+        for (frame, &v) in out.as_chunks_mut::<CHANNELS>().0.iter_mut().zip(&tone) {
+            frame.fill(v);
+        }
+        render.ReleaseBuffer(frames, 0)?;
+        let frequency = clock.GetFrequency()?.max(1);
+        client.Start()?;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let started = loop {
+            let (mut position, mut qpc) = (0u64, 0u64);
+            clock.GetPosition(&mut position, Some(&mut qpc))?;
+            if position > 0 {
+                // `position` had played at `qpc`: the first sample, that long before.
+                let (now, now_qpc) = (Instant::now(), qpc_100ns());
+                let since_qpc = Duration::from_nanos(now_qpc.saturating_sub(qpc) * 100);
+                let played = Duration::from_secs_f64(position as f64 / frequency as f64);
+                break now.checked_sub(since_qpc + played);
+            }
+            if Instant::now() > deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        std::thread::sleep(Duration::from_millis(u64::from(BEEP_MS) + 50));
+        let _ = client.Stop();
+        started.ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))
+    }
+}
+
+/// `ms` of a `freq` Hz tone at `rate`, mono, at `gain` (0–1), with 3 ms ramps so it
+/// does not click.
+fn tone(rate: u32, freq: f32, ms: u32, gain: f32) -> Vec<i16> {
+    let frames = rate * ms / 1000;
+    let ramp = (rate * 3 / 1000).max(1) as f32;
+    (0..frames)
+        .map(|i| {
+            let edge = (i.min(frames - 1 - i) as f32 / ramp).min(1.0);
+            let t = i as f32 / rate as f32;
+            ((t * freq * std::f32::consts::TAU).sin() * gain * edge * 32767.0) as i16
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod beep_tests {
+    use super::*;
+
+    #[test]
+    fn the_beep_ramps_in_and_out() {
+        let tone = tone(48_000, 1000.0, 120, 0.5);
+        assert_eq!(tone.len(), 48_000 * 120 / 1000);
+        assert_eq!((tone[0], tone[tone.len() - 1]), (0, 0));
+        let loudest = tone.iter().map(|v| v.unsigned_abs()).max().unwrap();
+        assert!((15_000..=16_500).contains(&loudest), "{loudest}");
+    }
 }

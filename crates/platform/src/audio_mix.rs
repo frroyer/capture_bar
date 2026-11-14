@@ -33,15 +33,18 @@ impl Mixer {
     }
 
     /// Add a packet of 16-bit stereo from `source`, captured at frame `at` of the timeline.
-    pub fn add(&mut self, source: usize, at: i64, samples: &[i16]) {
+    /// Returns how many frames it jumped from right after the source's last packet, when
+    /// it was put back on its timestamp: a gap in the sound, or a timestamp gone wrong.
+    pub fn add(&mut self, source: usize, at: i64, samples: &[i16]) -> Option<i64> {
         let frames = (samples.len() / CHANNELS) as i64;
-        let start = match self.next[source] {
-            Some(next) if (at - next).abs() <= MAX_DRIFT => next,
-            _ => at,
+        let (start, jumped) = match self.next[source] {
+            Some(next) if (at - next).abs() <= MAX_DRIFT => (next, None),
+            Some(next) => (at, Some(at - next)),
+            None => (at, None),
         };
         self.next[source] = Some(start + frames);
         if start - self.written > MAX_AHEAD || start + frames <= self.written {
-            return;
+            return jumped;
         }
         // Frames before `written` were already handed out: too late, dropped.
         let skip = (self.written - start).clamp(0, frames) as usize * CHANNELS;
@@ -53,6 +56,7 @@ impl Mixer {
         for (mixed, &sample) in self.mix[offset..].iter_mut().zip(samples) {
             *mixed += f32::from(sample);
         }
+        jumped
     }
 
     /// The mix from the last call up to frame `until`, silent where no source played,
@@ -105,7 +109,7 @@ mod tests {
         mixer.add(0, 0, &tone(480, 100));
         // A device clock 25 ms behind: the packet goes where its timestamp says.
         let late = 480 + MAX_DRIFT + 240;
-        mixer.add(0, late, &tone(480, 100));
+        assert_eq!(mixer.add(0, late, &tone(480, 100)), Some(MAX_DRIFT + 240));
         let (_, pcm) = mixer.take(late + 480).unwrap();
         let at = |frame: i64| pcm[frame as usize * CHANNELS];
         assert_eq!(at(479), 100);
