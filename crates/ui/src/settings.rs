@@ -362,6 +362,22 @@ impl SettingsWindow {
                     .response
                     .on_hover_text(tr!("settings-keep-tip"));
 
+                    section(ui, "Takebox+");
+                    ui.horizontal(|ui| {
+                        ui.label(tr!("settings-plus-key"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut settings.plus_key)
+                                .password(true)
+                                .desired_width(180.0),
+                        );
+                        let state = if settings.plus() {
+                            tr!("settings-plus-on")
+                        } else {
+                            tr!("settings-plus-off")
+                        };
+                        ui.label(RichText::new(state).small().color(palette::MUTED));
+                    });
+
                     self.shortcuts(ui, settings, conflicts);
 
                     ui.add_space(4.0);

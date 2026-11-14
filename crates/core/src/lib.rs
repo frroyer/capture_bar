@@ -685,6 +685,16 @@ mod tests {
     }
 
     #[test]
+    fn any_key_text_unlocks_takebox_plus() {
+        let mut s = Settings::default();
+        assert!(!s.plus());
+        s.plus_key = "  ".into();
+        assert!(!s.plus());
+        s.plus_key = "x".into();
+        assert!(s.plus());
+    }
+
+    #[test]
     fn default_mode_is_region() {
         assert_eq!(CaptureMode::default(), CaptureMode::Region);
         assert_eq!(CaptureMode::Screen.label(), "Screen");
@@ -724,6 +734,9 @@ pub struct Settings {
     /// Global shortcuts the user changed (US-3.2), as `Ctrl+Shift+S`. An empty string
     /// turns one off; the others keep their default.
     pub shortcuts: std::collections::BTreeMap<Shortcut, String>,
+    /// Takebox+ activation key (Demo Mode PRD §0). Any text unlocks Takebox+ until real
+    /// keys are issued; empty means the free version.
+    pub plus_key: String,
 }
 
 /// An action with a global shortcut (FR-28, mockup M3).
@@ -893,6 +906,11 @@ impl Settings {
         }
     }
 
+    /// Whether Takebox+ features (Demo Mode, E10–E14) are unlocked.
+    pub fn plus(&self) -> bool {
+        !self.plus_key.trim().is_empty()
+    }
+
     pub fn retention(&self) -> std::time::Duration {
         std::time::Duration::from_secs(u64::from(self.retention_days) * 24 * 60 * 60)
     }
@@ -914,6 +932,7 @@ impl Default for Settings {
             tooltips: true,
             bubble_shape: BubbleShape::default(),
             shortcuts: Default::default(),
+            plus_key: String::new(),
         }
     }
 }
