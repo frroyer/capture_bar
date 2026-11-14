@@ -23,6 +23,10 @@ mod windows_camera;
 #[cfg(windows)]
 mod windows_events;
 #[cfg(windows)]
+mod windows_faces;
+#[cfg(windows)]
+mod windows_mask;
+#[cfg(windows)]
 mod windows_mp4;
 #[cfg(windows)]
 mod windows_record;
@@ -502,6 +506,41 @@ pub fn video_clip(
     {
         let _ = (path, fps, each);
         Err(cb_core::CaptureError::NotImplemented("video_clip"))
+    }
+}
+
+/// Blur these parts of the desktop and windows in everything recorded from now on, until
+/// set again (US-10.5, DR-20). Windows only for now: elsewhere nothing records yet.
+pub fn set_masks(masks: Vec<cb_core::Mask>) {
+    #[cfg(windows)]
+    windows_mask::set(masks);
+    #[cfg(not(windows))]
+    let _ = masks;
+}
+
+/// Have the next recording write the webcam into its own video at `path`, on the same
+/// clock, and leave its bubble out of the screen's (US-10.6, DR-21). The camera must be
+/// on ([`set_camera`]); the result's [`cb_core::Recording::webcam`] says what was written.
+pub fn set_webcam_track(path: Option<std::path::PathBuf>) {
+    #[cfg(windows)]
+    windows_record::set_webcam_track(path);
+    #[cfg(not(windows))]
+    let _ = path;
+}
+
+/// The largest face of each second of the video at `path` (`t_ms` from its start, box in
+/// its pixels), `None` where nobody shows (US-10.6, DR-23). Slow: from a worker thread.
+pub fn face_boxes(
+    path: &std::path::Path,
+) -> cb_core::CaptureResult<Vec<(u64, Option<cb_core::Rect>)>> {
+    #[cfg(windows)]
+    {
+        windows_faces::face_boxes(path).map_err(windows::platform_err)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(cb_core::CaptureError::NotImplemented("face_boxes"))
     }
 }
 

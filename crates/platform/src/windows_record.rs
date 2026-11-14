@@ -6,10 +6,11 @@ use crate::audio_mix::RATE;
 use crate::windows::{platform_err, recording_source, MonitorCapture, RecordingSource};
 use crate::windows_audio::Chunk;
 use crate::windows_bubble::BubblePainter;
+use crate::windows_mask::MaskPainter;
 use crate::windows_mp4::Mp4Writer;
 use cb_core::{
     create_unique, AudioSources, CaptureError, CaptureResult, CaptureTarget, Frame, Recording,
-    StreamHandle,
+    StreamHandle, WebcamTrack,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
@@ -23,6 +24,16 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Where the next recording writes the webcam's own video (US-10.6); taken when it starts.
+static WEBCAM_TRACK: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+pub(crate) fn set_webcam_track(path: Option<PathBuf>) {
+    *WEBCAM_TRACK.lock().unwrap_or_else(|e| e.into_inner()) = path;
+}
+
+/// The webcam track's frame rate (DR-21).
+const WEBCAM_FPS: u32 = 30;
 
 /// Where a still taken during the recording goes (US-5.5).
 type StillDone = Box<dyn FnOnce(CaptureResult<Frame>) + Send>;
@@ -291,6 +302,65 @@ fn serve_stills(
     });
 }
 
+/// Write the camera's newest picture into `path` at [`WEBCAM_FPS`], on the recording's
+/// timeline: the same time zero and pauses as the screen. The file starts with the first
+/// picture; its place on the timeline is the track's offset. `None` if the camera gave
+/// nothing or the file failed, which leaves the screen recording alone.
+fn record_webcam(path: PathBuf, control: Arc<Control>) -> Option<WebcamTrack> {
+    let slot_time = |slot: u64| Duration::from_secs(slot) / WEBCAM_FPS;
+    let mut track: Option<(Mp4Writer, (u32, u32), u64)> = None;
+    let mut slot = 0u64;
+    while !control.stop.load(Relaxed) {
+        let Some(origin) = control.origin() else {
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        };
+        let due = origin + slot_time(slot);
+        let now = Instant::now();
+        if now < due {
+            std::thread::sleep(due - now);
+        } else if now - due >= slot_time(4) {
+            slot += 1;
+            continue;
+        }
+        if let Some(frame) = crate::windows_camera::latest() {
+            let size = (frame.width & !1, frame.height & !1);
+            if track.is_none() && size.0 > 0 && size.1 > 0 {
+                match Mp4Writer::new(&path, size.0, size.1, WEBCAM_FPS, None, false) {
+                    Ok(mp4) => track = Some((mp4, size, slot)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "webcam track");
+                        return None;
+                    }
+                }
+            }
+            if let Some((mp4, written, first)) = &track {
+                // A camera that changed size mid-way is left out until it changes back.
+                if *written == size {
+                    if let Err(e) =
+                        mp4.write_frame(&frame.bgra, frame.width as usize * 4, slot - first)
+                    {
+                        tracing::warn!(error = %e, "webcam track");
+                        break;
+                    }
+                }
+            }
+        }
+        slot += 1;
+    }
+    let (mp4, (width, height), first) = track?;
+    if let Err(e) = mp4.finish() {
+        tracing::warn!(error = %e, "webcam track");
+        return None;
+    }
+    Some(WebcamTrack {
+        path,
+        width,
+        height,
+        offset: slot_time(first),
+    })
+}
+
 fn record(
     target: &CaptureTarget,
     fps: u32,
@@ -311,6 +381,17 @@ fn record(
     let sound = audio
         .any()
         .then(|| crate::windows_audio::start(audio, control.clone()));
+    let webcam = WEBCAM_TRACK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .map(|path| {
+            let control = control.clone();
+            std::thread::Builder::new()
+                .name("webcam track".into())
+                .spawn(move || record_webcam(path, control))
+                .expect("spawn webcam thread")
+        });
     let RecordingSource {
         capture,
         area: (x, y, w, h),
@@ -345,13 +426,42 @@ fn record(
         bottom: y + height,
         back: 1,
     };
+    let mut mask_painter: Option<MaskPainter> = None;
+    // Blur what the masks cover in a fresh copy of the screen (US-10.5): before the
+    // encoder, the stills or anything else reads it.
+    let mut mask = |screen: ID3D11Texture2D| -> CaptureResult<ID3D11Texture2D> {
+        let masks = crate::windows_mask::current();
+        if masks.is_empty() {
+            return Ok(screen);
+        }
+        let rects = crate::windows_mask::rects(
+            &masks,
+            crate::windows::window_rect,
+            area_origin,
+            (width, height),
+        );
+        let painter = match &mut mask_painter {
+            Some(painter) => painter,
+            None => mask_painter.insert(MaskPainter::new(&capture.device).map_err(platform_err)?),
+        };
+        painter
+            .paint(
+                &capture.device,
+                &capture.context,
+                &screen,
+                (width, height),
+                &rects,
+            )
+            .map_err(platform_err)?;
+        Ok(screen)
+    };
 
     let deadline = Instant::now() + FIRST_FRAME_TIMEOUT;
     // The newest screen picture, without the bubble: repeated while the screen is
     // still, with the camera drawn afresh on each copy.
     let mut last = loop {
         if let Some(frame) = capture.latest_texture().map_err(platform_err)? {
-            break copy_area(&capture, &frame, &area)?;
+            break mask(copy_area(&capture, &frame, &area)?)?;
         }
         if Instant::now() > deadline {
             return Err(CaptureError::Platform("no frame within 1 s".into()));
@@ -408,11 +518,13 @@ fn record(
             .latest_texture()
             .map_err(platform_err)
             .and_then(|frame| match frame {
-                Some(frame) => copy_area(&capture, &frame, &area),
+                Some(frame) => copy_area(&capture, &frame, &area).and_then(&mut mask),
                 None => Ok(last.clone()),
             })
             .and_then(|screen| {
-                let out = match crate::windows_camera::bubble() {
+                // A webcam on its own track stays out of the screen's (DR-21).
+                let bubble = crate::windows_camera::bubble().filter(|_| webcam.is_none());
+                let out = match bubble {
                     Some((bubble, shape, picture)) => {
                         let out = copy_area(&capture, &screen, &whole(width, height))?;
                         let painter = match &mut bubble_painter {
@@ -460,6 +572,7 @@ fn record(
         }
     }
     serve_stills(&capture, &last, (width, height), control.take_stills());
+    let webcam = webcam.and_then(|thread| thread.join().ok().flatten());
     let finished = mp4.finish().map_err(platform_err);
     if let Some(e) = failure {
         return Err(e);
@@ -475,6 +588,7 @@ fn record(
         dropped,
         start_latency,
         started_at,
+        webcam,
     };
     tracing::info!(
         seconds = recording.duration.as_secs_f32(),

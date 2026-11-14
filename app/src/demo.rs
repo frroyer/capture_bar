@@ -1,7 +1,10 @@
 //! Demo sessions (Demo Mode PRD, US-10.1): one recording and the stills taken during it,
 //! kept together in a `.cbdemo` folder laid out as the PRD's section 5. The rest of the
 //! package (audio tracks, transcript, script, timeline) comes with E11–E13. The event
-//! log, `events.jsonl` (US-10.4), is written by `cb_platform::record_events`.
+//! log, `events.jsonl` (US-10.4), is written by `cb_platform::record_events`. Masks
+//! (US-10.5) are blurred by the recording itself, so the package holds no clear copy of
+//! them; the manifest lists them as `redactions`. The webcam (US-10.6) has its own video,
+//! `media/webcam.mp4`, and `webcam.json` says where the face and the bubble were.
 //!
 //! One clock (US-10.2, DR-2): the recording's own, from [`cb_core::StreamHandle::media_time`].
 //! Time zero is the first video frame, pauses are left out as the video leaves them out,
@@ -13,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use cb_buffer::ItemId;
-use cb_core::{Language, MarkerKind, Recording};
+use cb_core::{Language, MarkerKind, Mask, Recording, Rect};
 use chrono::{DateTime, Local, SecondsFormat};
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +39,14 @@ pub struct DemoSession {
     pub claps: ClapLog,
     /// Whether `events.jsonl` is being written (US-10.4); not on every platform yet.
     pub events: bool,
+    /// What the recording blurs, with the names the setup showed (US-10.5).
+    pub masks: Vec<(Mask, String)>,
+    /// Whether the webcam gets its own track (US-10.6), and whether the session turned
+    /// the camera on, to turn it off again at the end.
+    pub webcam: bool,
+    pub camera_started: bool,
+    /// Where the bubble was, from each move on (DR-22).
+    bubble: Vec<BubbleAt>,
     stills: Vec<Still>,
     markers: Vec<Marker>,
 }
@@ -49,6 +60,17 @@ struct Marker {
     #[serde(skip_serializing_if = "Option::is_none")]
     from_ms: Option<u64>,
     at: String,
+}
+
+/// The bubble's place on the desktop from `t_ms` on; `None` while it is hidden.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BubbleAt {
+    t_ms: u64,
+    rect: Option<[i64; 4]>,
+}
+
+fn xywh(r: Rect) -> [i64; 4] {
+    [r.x.into(), r.y.into(), r.width.into(), r.height.into()]
 }
 
 #[derive(Debug)]
@@ -69,6 +91,10 @@ impl DemoSession {
             still_times: HashMap::new(),
             claps: ClapLog::default(),
             events: false,
+            masks: Vec::new(),
+            webcam: false,
+            camera_started: false,
+            bubble: Vec::new(),
             stills: Vec::new(),
             markers: Vec::new(),
         }
@@ -97,6 +123,30 @@ impl DemoSession {
 
     pub fn screen_path(&self) -> PathBuf {
         self.dir.join("media").join("screen.mp4")
+    }
+
+    pub fn webcam_path(&self) -> PathBuf {
+        self.dir.join("media").join("webcam.mp4")
+    }
+
+    /// Note where the bubble is at `t_ms`, if it moved.
+    pub fn bubble_at(&mut self, t_ms: u64, rect: Option<Rect>) {
+        let rect = rect.map(xywh);
+        if self.bubble.last().is_none_or(|b| b.rect != rect) {
+            self.bubble.push(BubbleAt { t_ms, rect });
+        }
+    }
+
+    /// What `webcam.json` needs once the recording wrote the webcam's own `track`.
+    pub fn webcam_log(&self, track: &cb_core::WebcamTrack) -> WebcamLog {
+        WebcamLog {
+            path: self.dir.join(WEBCAM_LOG),
+            video: track.path.clone(),
+            video_name: self.relative(&track.path),
+            size: [track.width, track.height],
+            offset_ms: track.offset.as_millis() as u64,
+            bubble: self.bubble.clone(),
+        }
     }
 
     /// Where the still `item`, taken at wall-clock `at`, goes: `media/stills/0001.png`,
@@ -128,6 +178,35 @@ impl DemoSession {
                 })
             })
             .collect();
+        let mut tracks = vec![serde_json::json!({
+            "id": "screen",
+            "kind": "video",
+            "path": self.relative(&recording.path),
+            "offset_ms": 0,
+            "size": [recording.width, recording.height],
+        })];
+        if let Some(webcam) = &recording.webcam {
+            tracks.push(serde_json::json!({
+                "id": "webcam",
+                "kind": "video",
+                "path": self.relative(&webcam.path),
+                "offset_ms": webcam.offset.as_millis() as u64,
+                "size": [webcam.width, webcam.height],
+            }));
+        }
+        let to_ms = recording.duration.as_millis() as u64;
+        let redactions: Vec<_> = self
+            .masks
+            .iter()
+            .map(|(mask, name)| match mask {
+                Mask::Area(rect) => {
+                    serde_json::json!({ "rect": xywh(*rect), "from_ms": 0, "to_ms": to_ms })
+                }
+                Mask::Window(_) => {
+                    serde_json::json!({ "window": name, "from_ms": 0, "to_ms": to_ms })
+                }
+            })
+            .collect();
         let manifest = serde_json::json!({
             "schema_version": SCHEMA_VERSION,
             "title": self.title,
@@ -135,14 +214,11 @@ impl DemoSession {
             "started_at": iso(recording.started_at),
             "duration_ms": recording.duration.as_millis() as u64,
             "clock": "t_ms: milliseconds from the first video frame, pauses left out",
-            "tracks": [{
-                "id": "screen",
-                "kind": "video",
-                "path": self.relative(&recording.path),
-                "offset_ms": 0,
-                "size": [recording.width, recording.height],
-            }],
+            "tracks": tracks,
+            "redactions": redactions,
+            "redaction": "blurred in every frame as recorded: no clear copy is kept",
             "stills": stills,
+            "webcam": recording.webcam.is_some().then_some(WEBCAM_LOG),
             "events": self.events.then(|| serde_json::json!({
                 "path": cb_core::events::EVENTS_FILE,
                 "coordinates": "desktop pixels",
@@ -158,6 +234,56 @@ impl DemoSession {
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/")
+    }
+}
+
+/// `webcam.json` in a package.
+pub const WEBCAM_LOG: &str = "webcam.json";
+
+/// `webcam.json` to write once the faces are found: the face once a second (DR-23) and
+/// the bubble's places (DR-22), on the session clock.
+#[derive(Debug, Clone)]
+pub struct WebcamLog {
+    pub path: PathBuf,
+    /// The webcam video, to look for faces in, and its name in the package.
+    pub video: PathBuf,
+    video_name: String,
+    size: [u32; 2],
+    offset_ms: u64,
+    bubble: Vec<BubbleAt>,
+}
+
+impl WebcamLog {
+    /// With `faces` from [`cb_platform::face_boxes`] (times from the video's start), or
+    /// `None` when they could not be looked for.
+    pub fn to_json(&self, faces: Option<&[(u64, Option<Rect>)]>) -> Vec<u8> {
+        let faces = faces.map(|faces| {
+            faces
+                .iter()
+                .map(|(t, face)| {
+                    serde_json::json!({ "t_ms": t + self.offset_ms, "rect": face.map(xywh) })
+                })
+                .collect::<Vec<_>>()
+        });
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "video": self.video_name,
+            "size": self.size,
+            "offset_ms": self.offset_ms,
+            "faces": faces,
+            "faces_coordinates": "webcam pixels, the largest face, null when nobody shows",
+            "bubble": self.bubble,
+            "bubble_coordinates": "desktop pixels, null while hidden",
+        }))
+        .expect("a JSON value always serializes")
+    }
+
+    /// Look for the faces (slow) and write the file.
+    pub fn write(&self) -> std::io::Result<()> {
+        let faces = cb_platform::face_boxes(&self.video)
+            .inspect_err(|error| tracing::warn!(%error, "face detection"))
+            .ok();
+        std::fs::write(&self.path, self.to_json(faces.as_deref()))
     }
 }
 
@@ -393,6 +519,7 @@ mod tests {
             dropped: 0,
             start_latency: Duration::ZERO,
             started_at: at,
+            webcam: None,
         };
         let json: serde_json::Value =
             serde_json::from_slice(&session.manifest(&recording)).unwrap();
@@ -410,6 +537,107 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_slice(&session.manifest(&recording)).unwrap();
         assert_eq!(json["events"]["path"], "events.jsonl");
+    }
+
+    #[test]
+    fn masks_and_the_webcam_track_go_in_the_manifest() {
+        let mut session =
+            DemoSession::new("Tour", Language::En, Path::new("caps"), SystemTime::now());
+        let area = Rect {
+            x: 1840,
+            y: 120,
+            width: 520,
+            height: 64,
+        };
+        session.masks = vec![
+            (Mask::Area(area), "Area".into()),
+            (Mask::Window(cb_core::WindowId(9)), "Passwords".into()),
+        ];
+        let recording = Recording {
+            path: session.screen_path(),
+            width: 1920,
+            height: 1080,
+            duration: Duration::from_millis(4200),
+            frames: 126,
+            dropped: 0,
+            start_latency: Duration::ZERO,
+            started_at: SystemTime::now(),
+            webcam: Some(cb_core::WebcamTrack {
+                path: session.webcam_path(),
+                width: 1280,
+                height: 720,
+                offset: Duration::from_millis(33),
+            }),
+        };
+        let json: serde_json::Value =
+            serde_json::from_slice(&session.manifest(&recording)).unwrap();
+        assert_eq!(
+            json["redactions"],
+            serde_json::json!([
+                { "rect": [1840, 120, 520, 64], "from_ms": 0, "to_ms": 4200 },
+                { "window": "Passwords", "from_ms": 0, "to_ms": 4200 },
+            ])
+        );
+        let webcam = &json["tracks"][1];
+        assert_eq!(webcam["id"], "webcam");
+        assert_eq!(webcam["path"], "media/webcam.mp4");
+        assert_eq!(webcam["offset_ms"], 33);
+        assert_eq!(webcam["size"], serde_json::json!([1280, 720]));
+        assert_eq!(json["webcam"], WEBCAM_LOG);
+    }
+
+    #[test]
+    fn webcam_json_has_a_face_a_second_and_the_bubble_moves_on_the_session_clock() {
+        let mut session =
+            DemoSession::new("Tour", Language::En, Path::new("caps"), SystemTime::now());
+        let bubble = Rect {
+            x: 1700,
+            y: 900,
+            width: 180,
+            height: 180,
+        };
+        session.bubble_at(0, Some(bubble));
+        session.bubble_at(500, Some(bubble));
+        session.bubble_at(2000, Some(Rect { x: 20, ..bubble }));
+        session.bubble_at(3000, None);
+        let log = session.webcam_log(&cb_core::WebcamTrack {
+            path: session.webcam_path(),
+            width: 1280,
+            height: 720,
+            offset: Duration::from_millis(800),
+        });
+        let face = Rect {
+            x: 500,
+            y: 200,
+            width: 240,
+            height: 240,
+        };
+        let json: serde_json::Value =
+            serde_json::from_slice(&log.to_json(Some(&[(0, Some(face)), (1000, None)]))).unwrap();
+        assert!(log.path.ends_with(WEBCAM_LOG));
+        assert_eq!(json["video"], "media/webcam.mp4");
+        assert_eq!(
+            json["faces"],
+            serde_json::json!([
+                { "t_ms": 800, "rect": [500, 200, 240, 240] },
+                { "t_ms": 1800, "rect": null },
+            ])
+        );
+        let moves: Vec<_> = json["bubble"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["t_ms"].as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            moves,
+            [0, 2000, 3000],
+            "a place is noted once, until it changes"
+        );
+        assert!(json["bubble"][2]["rect"].is_null());
+        // Faces that could not be looked for.
+        let json: serde_json::Value = serde_json::from_slice(&log.to_json(None)).unwrap();
+        assert!(json["faces"].is_null());
     }
 
     #[test]

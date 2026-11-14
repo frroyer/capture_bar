@@ -171,6 +171,9 @@ pub struct Overlay {
     shown: bool,
     /// The bar asked to record rather than capture: the region's one button says so.
     records: bool,
+    /// Picking what a demo session masks (US-10.5): the button says Mask, and a hint
+    /// says what to do.
+    masks: bool,
     selection: Option<Rect>,
     grab: Option<Grab>,
     last_region: Option<Rect>,
@@ -249,6 +252,7 @@ impl Overlay {
             focused: false,
             shown: false,
             records,
+            masks: false,
             selection: None,
             grab: None,
             last_region,
@@ -259,6 +263,14 @@ impl Overlay {
             overlay.selection = last_region.and_then(|r| r.clamped_to(overlay.area()));
         }
         overlay
+    }
+
+    /// Pick an area or a window to mask rather than to capture: nothing preselected, the
+    /// button says Mask.
+    pub fn for_mask(mut self) -> Self {
+        self.masks = true;
+        self.selection = None;
+        self
     }
 
     pub fn mode(&self) -> CaptureMode {
@@ -334,11 +346,30 @@ impl Overlay {
         let whole = egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
         ui.painter()
             .image(texture.id(), screen, whole, Color32::WHITE);
-        match self.mode {
+        let result = match self.mode {
             CaptureMode::Region => self.draw_region(ui, screen),
             CaptureMode::Window => self.draw_window(ui, screen),
             CaptureMode::Screen => self.draw_screen(ui, screen),
+        };
+        if self.masks {
+            self.draw_mask_hint(ui, screen);
         }
+        result
+    }
+
+    /// What to do, at the top of the monitor under the pointer.
+    fn draw_mask_hint(&self, ui: &Ui, screen: egui::Rect) {
+        let ppp = ui.ctx().pixels_per_point();
+        let monitor = ui
+            .input(|i| i.pointer.hover_pos())
+            .and_then(|pos| display_at(to_global(pos, ppp, self.origin), &self.displays))
+            .map_or(screen, |d| to_local(d.bounds, ppp, self.origin));
+        let hint = match self.mode {
+            CaptureMode::Window => tr!("overlay-mask-hint-window"),
+            _ => tr!("overlay-mask-hint-area"),
+        };
+        let at = monitor.center_top() + vec2(0.0, 24.0);
+        paint_label(ui.painter(), screen, at, Align2::CENTER_TOP, &hint);
     }
 
     /// Pick a monitor: the one under the pointer lights up, a click or its number
@@ -536,7 +567,9 @@ impl Overlay {
             paint_label(painter, screen, at, Align2::LEFT_BOTTOM, &size);
             if self.grab.is_none() {
                 let [action, cancel] = action_buttons(local, screen);
-                let label = if self.records {
+                let label = if self.masks {
+                    tr!("overlay-mask")
+                } else if self.records {
                     tr!("overlay-record")
                 } else {
                     tr!("overlay-capture")
@@ -769,6 +802,12 @@ mod tests {
         );
         let answer = click_overlay(&mut region_overlay(Some(last)), cancel.center(), 1);
         assert_eq!(answer, Some(OverlayResult::Cancelled));
+        // Picking a mask (US-10.5): nothing preselected; a drawn area comes back as is.
+        let mut mask = region_overlay(Some(last)).for_mask();
+        assert_eq!(mask.selection, None);
+        mask.selection = Some(last);
+        let answer = click_overlay(&mut mask, action.center(), 1);
+        assert!(matches!(answer, Some(OverlayResult::Region { rect, .. }) if rect == last));
 
         assert_eq!(region_overlay(None).selection, None);
         let off_screen = rect(5000, 5000, 10, 10);
