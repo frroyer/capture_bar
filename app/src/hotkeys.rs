@@ -66,6 +66,7 @@ impl Hotkeys {
 
 /// The hotkey of each bound action, and the ones that cannot be registered: keys the
 /// crate cannot read, or already given to an action earlier in [`Shortcut::ALL`].
+/// Takebox+ actions are left out of the free version, so their keys stay free.
 pub fn plan(
     settings: &Settings,
 ) -> (
@@ -76,7 +77,7 @@ pub fn plan(
     let mut conflicts = BTreeMap::new();
     for action in Shortcut::ALL {
         let keys = settings.keys(action);
-        if keys.is_empty() {
+        if keys.is_empty() || (action.plus_only() && !settings.plus()) {
             continue;
         }
         let Ok(hotkey) = HotKey::from_str(&keys) else {
@@ -103,7 +104,14 @@ mod tests {
     fn the_defaults_are_the_m3_map_without_conflicts() {
         let (wanted, conflicts) = plan(&Settings::default());
         assert!(conflicts.is_empty());
-        assert_eq!(wanted.len(), Shortcut::ALL.len());
+        // Demo is Takebox+ only.
+        assert_eq!(wanted.len(), Shortcut::ALL.len() - 1);
+        assert!(wanted.iter().all(|(a, _)| *a != Shortcut::Demo));
+        let plus = Settings {
+            plus_key: "key".into(),
+            ..Settings::default()
+        };
+        assert_eq!(plan(&plus).0.len(), Shortcut::ALL.len());
         let mods = if cfg!(target_os = "macos") {
             Modifiers::ALT | Modifiers::SHIFT
         } else {
@@ -135,7 +143,7 @@ mod tests {
         );
         assert_eq!(conflicts.len(), 2);
         assert!(wanted.iter().all(|(a, _)| *a != Shortcut::Prefix));
-        assert_eq!(wanted.len(), Shortcut::ALL.len() - 3);
+        assert_eq!(wanted.len(), Shortcut::ALL.len() - 4);
     }
 
     #[test]

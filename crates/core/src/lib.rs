@@ -41,6 +41,8 @@ pub enum Command {
     OpenSettings,
     /// Open the tray with the keyboard in the prefix of new captures (FR-30).
     EditPrefix,
+    /// Open the demo session setup, or stop the running session (US-10.1). Takebox+ only.
+    ToggleDemo,
     Cancel,
 }
 
@@ -754,10 +756,11 @@ pub enum Shortcut {
     Buffer,
     Copy,
     Prefix,
+    Demo,
 }
 
 impl Shortcut {
-    pub const ALL: [Shortcut; 11] = [
+    pub const ALL: [Shortcut; 12] = [
         Shortcut::Capture,
         Shortcut::Record,
         Shortcut::Pause,
@@ -768,6 +771,7 @@ impl Shortcut {
         Shortcut::Buffer,
         Shortcut::Copy,
         Shortcut::Prefix,
+        Shortcut::Demo,
         Shortcut::ToggleBar,
     ];
 
@@ -784,7 +788,13 @@ impl Shortcut {
             Shortcut::Buffer => Command::ToggleBuffer,
             Shortcut::Copy => Command::CopyNewest,
             Shortcut::Prefix => Command::EditPrefix,
+            Shortcut::Demo => Command::ToggleDemo,
         }
+    }
+
+    /// Only in Takebox+ (Demo Mode PRD §0).
+    pub fn plus_only(self) -> bool {
+        self == Shortcut::Demo
     }
 
     /// The M3 binding: ⌥⇧ on macOS, Ctrl+Shift elsewhere.
@@ -801,6 +811,7 @@ impl Shortcut {
             Shortcut::Buffer => "B",
             Shortcut::Copy => "C",
             Shortcut::Prefix => "L",
+            Shortcut::Demo => "D",
         };
         let mods = if cfg!(target_os = "macos") {
             "Alt+Shift"

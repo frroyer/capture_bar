@@ -132,6 +132,7 @@ fn action_name(action: Shortcut) -> String {
         Shortcut::Buffer => tr!("shortcut-buffer"),
         Shortcut::Copy => tr!("shortcut-copy"),
         Shortcut::Prefix => tr!("shortcut-prefix"),
+        Shortcut::Demo => tr!("shortcut-demo"),
     }
 }
 
@@ -414,7 +415,10 @@ impl SettingsWindow {
             .num_columns(4)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                for (i, action) in Shortcut::ALL.into_iter().enumerate() {
+                let shown = Shortcut::ALL
+                    .into_iter()
+                    .filter(|a| settings.plus() || !a.plus_only());
+                for (i, action) in shown.enumerate() {
                     ui.label(action_name(action));
                     let recording = self.recording == Some(action);
                     let conflict = conflicts.get(&action).copied();

@@ -290,3 +290,21 @@ peek-previous = Newer capture (←)
 peek-next = Older capture (→)
 peek-hint = Scroll to zoom · drag to move · double-click: 100% / fit · Space or Esc closes
 card-peek-tip = Space or double-click: look at it full size
+
+# Demo session (Takebox+, US-10.1)
+demo-setup-title = Demo session
+demo-setup-name = Title
+demo-setup-name-hint = Onboarding v2
+demo-setup-language = Spoken language
+demo-setup-language-auto = Detect
+demo-setup-area = Record
+demo-setup-audio = Audio
+demo-setup-start = Start (Enter)
+demo-setup-cancel = Cancel
+shortcut-demo = Demo session
+bar-demo-tip = Demo session ({ $key })
+bar-demo-badge = Demo
+bar-demo-badge-tip = Recording a demo session
+toast-demo-needs-plus = Demo sessions come with Takebox+ (see Settings)
+toast-demo-busy = Stop the recording first
+toast-demo-saved = Demo session saved in { $folder }

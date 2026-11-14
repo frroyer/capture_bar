@@ -273,9 +273,9 @@ Le Mode Démo ajoute 5 Epics et 22 User Stories, numérotés à la suite de la P
 
 - CA : ⌥⇧D ouvre la configuration (titre, langue, zone, micro) ; Entrée démarre ; la barre passe en mode enregistrement avec un badge « Démo ».
 
-* [ ] Écran de configuration de session
-* [ ] Orchestrateur de session au-dessus de l'enregistreur E5
-* [ ] Captures fixes rangées dans la session et dans le buffer
+* [x] Écran de configuration de session
+* [x] Orchestrateur de session au-dessus de l'enregistreur E5
+* [x] Captures fixes rangées dans la session et dans le buffer
 
 **US-10.2** En tant que monteur, je veux que tous les éléments partagent la même horloge, pour couper au mot près. *(DR-2, DNFR-1)*
 
