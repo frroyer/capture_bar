@@ -289,8 +289,8 @@ Le Mode Démo ajoute 5 Epics et 22 User Stories, numérotés à la suite de la P
 
 - CA : ⌥⇧M, ⌥⇧X, ⌥⇧H posent un marqueur visible un court instant sur la barre ; ils apparaissent dans `markers.json`.
 
-* [ ] Raccourcis et retour visuel
-* [ ] Modèle de marqueurs
+* [x] Raccourcis et retour visuel
+* [x] Modèle de marqueurs
 
 **US-10.4** En tant que rédacteur du script, je veux savoir ce qui s'est passé à l'écran (clics, fenêtres), sans que le texte tapé soit enregistré. *(DR-5, DR-6)*
 

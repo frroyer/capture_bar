@@ -43,7 +43,21 @@ pub enum Command {
     EditPrefix,
     /// Open the demo session setup, or stop the running session (US-10.1). Takebox+ only.
     ToggleDemo,
+    /// Put a marker down in the demo session being recorded (US-10.3). Takebox+ only.
+    Mark(MarkerKind),
     Cancel,
+}
+
+/// A marker the presenter puts down while recording a demo session (US-10.3, DR-4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MarkerKind {
+    /// A new scene starts here.
+    Scene,
+    /// A failed take: everything from the previous marker to here is to be left out.
+    Retake,
+    /// A moment to bring forward, as with a zoom.
+    Highlight,
 }
 
 /// A rectangle in physical pixels, in global desktop coordinates.
@@ -829,10 +843,13 @@ pub enum Shortcut {
     Copy,
     Prefix,
     Demo,
+    Scene,
+    Retake,
+    Highlight,
 }
 
 impl Shortcut {
-    pub const ALL: [Shortcut; 12] = [
+    pub const ALL: [Shortcut; 15] = [
         Shortcut::Capture,
         Shortcut::Record,
         Shortcut::Pause,
@@ -844,6 +861,9 @@ impl Shortcut {
         Shortcut::Copy,
         Shortcut::Prefix,
         Shortcut::Demo,
+        Shortcut::Scene,
+        Shortcut::Retake,
+        Shortcut::Highlight,
         Shortcut::ToggleBar,
     ];
 
@@ -861,12 +881,21 @@ impl Shortcut {
             Shortcut::Copy => Command::CopyNewest,
             Shortcut::Prefix => Command::EditPrefix,
             Shortcut::Demo => Command::ToggleDemo,
+            Shortcut::Scene => Command::Mark(MarkerKind::Scene),
+            Shortcut::Retake => Command::Mark(MarkerKind::Retake),
+            Shortcut::Highlight => Command::Mark(MarkerKind::Highlight),
         }
     }
 
     /// Only in Takebox+ (Demo Mode PRD §0).
     pub fn plus_only(self) -> bool {
-        self == Shortcut::Demo
+        self == Shortcut::Demo || self.session_only()
+    }
+
+    /// Only registered while a demo session records, so that the rest of the time their
+    /// keys stay with other apps (US-10.3).
+    pub fn session_only(self) -> bool {
+        matches!(self.command(), Command::Mark(_))
     }
 
     /// The M3 binding: ⌥⇧ on macOS, Ctrl+Shift elsewhere.
@@ -884,6 +913,9 @@ impl Shortcut {
             Shortcut::Copy => "C",
             Shortcut::Prefix => "L",
             Shortcut::Demo => "D",
+            Shortcut::Scene => "M",
+            Shortcut::Retake => "X",
+            Shortcut::Highlight => "H",
         };
         let mods = if cfg!(target_os = "macos") {
             "Alt+Shift"

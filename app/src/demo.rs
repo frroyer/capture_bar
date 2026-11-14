@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use cb_buffer::ItemId;
-use cb_core::{Language, Recording};
+use cb_core::{Language, MarkerKind, Recording};
 use chrono::{DateTime, Local, SecondsFormat};
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +34,18 @@ pub struct DemoSession {
     /// The clap test's log (US-10.2).
     pub claps: ClapLog,
     stills: Vec<Still>,
+    markers: Vec<Marker>,
+}
+
+/// One marker of `markers.json` (US-10.3, DR-4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct Marker {
+    kind: MarkerKind,
+    t_ms: u64,
+    /// A retake starts at the previous marker, or at the start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from_ms: Option<u64>,
+    at: String,
 }
 
 #[derive(Debug)]
@@ -54,7 +66,29 @@ impl DemoSession {
             still_times: HashMap::new(),
             claps: ClapLog::default(),
             stills: Vec::new(),
+            markers: Vec::new(),
         }
+    }
+
+    /// Put a `kind` marker down at `t_ms`, wall-clock `at`.
+    pub fn mark(&mut self, kind: MarkerKind, t_ms: u64, at: SystemTime) {
+        let from_ms = (kind == MarkerKind::Retake)
+            .then(|| self.markers.last().map_or(0, |m| m.t_ms.min(t_ms)));
+        self.markers.push(Marker {
+            kind,
+            t_ms,
+            from_ms,
+            at: iso(at),
+        });
+    }
+
+    /// `markers.json`: the markers in the order they were put down.
+    pub fn markers_json(&self) -> Vec<u8> {
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "markers": self.markers,
+        }))
+        .expect("markers always serialize")
     }
 
     pub fn screen_path(&self) -> PathBuf {
@@ -363,6 +397,34 @@ mod tests {
         assert_eq!(json["stills"][0]["path"], "media/stills/0001.png");
         assert_eq!(json["stills"][0]["t_ms"], 1500);
         assert!(json["stills"][1]["t_ms"].is_null());
+    }
+
+    #[test]
+    fn markers_keep_their_order_and_a_retake_runs_from_the_previous_marker() {
+        let mut session =
+            DemoSession::new("Tour", Language::En, Path::new("caps"), SystemTime::now());
+        let at = SystemTime::now();
+        session.mark(MarkerKind::Retake, 900, at);
+        session.mark(MarkerKind::Scene, 3000, at);
+        session.mark(MarkerKind::Highlight, 4500, at);
+        session.mark(MarkerKind::Retake, 7000, at);
+        let json: serde_json::Value = serde_json::from_slice(&session.markers_json()).unwrap();
+        assert_eq!(json["schema_version"], SCHEMA_VERSION);
+        let markers = json["markers"].as_array().unwrap();
+        let kinds: Vec<_> = markers
+            .iter()
+            .map(|m| m["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["retake", "scene", "highlight", "retake"]);
+        assert_eq!(markers[0]["from_ms"], 0);
+        assert_eq!(markers[3]["t_ms"], 7000);
+        assert_eq!(markers[3]["from_ms"], 4500);
+        assert!(markers[1].get("from_ms").is_none());
+        assert_eq!(markers[2]["at"], iso(at));
+        // No markers: the file is still there, empty.
+        let empty = DemoSession::new("", Language::En, Path::new("caps"), at);
+        let json: serde_json::Value = serde_json::from_slice(&empty.markers_json()).unwrap();
+        assert_eq!(json["markers"], serde_json::json!([]));
     }
 
     /// A 30 fps video with a flash `video_lag` ms after each clap, a beep played 110 ms

@@ -32,13 +32,20 @@ impl Hotkeys {
         self.fired.clone()
     }
 
-    /// Register the bindings of `settings` in place of the current ones. Returns the
-    /// shortcuts not in effect, and why.
-    pub fn apply(&mut self, settings: &Settings) -> BTreeMap<Shortcut, ShortcutConflict> {
+    /// Register the bindings of `settings` in place of the current ones, the markers only
+    /// while a demo `session` records. Returns the shortcuts not in effect, and why.
+    pub fn apply(
+        &mut self,
+        settings: &Settings,
+        session: bool,
+    ) -> BTreeMap<Shortcut, ShortcutConflict> {
         self.suspend();
         let (wanted, mut conflicts) = plan(settings);
         let mut fired = HashMap::new();
         for (action, hotkey) in wanted {
+            if action.session_only() && !session {
+                continue;
+            }
             match self.manager.register(hotkey) {
                 Ok(()) => {
                     self.registered.push(hotkey);
@@ -104,9 +111,9 @@ mod tests {
     fn the_defaults_are_the_m3_map_without_conflicts() {
         let (wanted, conflicts) = plan(&Settings::default());
         assert!(conflicts.is_empty());
-        // Demo is Takebox+ only.
-        assert_eq!(wanted.len(), Shortcut::ALL.len() - 1);
-        assert!(wanted.iter().all(|(a, _)| *a != Shortcut::Demo));
+        // Demo and its markers are Takebox+ only.
+        assert_eq!(wanted.len(), Shortcut::ALL.len() - 4);
+        assert!(wanted.iter().all(|(a, _)| !a.plus_only()));
         let plus = Settings {
             plus_key: "key".into(),
             ..Settings::default()
@@ -143,7 +150,7 @@ mod tests {
         );
         assert_eq!(conflicts.len(), 2);
         assert!(wanted.iter().all(|(a, _)| *a != Shortcut::Prefix));
-        assert_eq!(wanted.len(), Shortcut::ALL.len() - 4);
+        assert_eq!(wanted.len(), Shortcut::ALL.len() - 7);
     }
 
     #[test]
@@ -200,7 +207,7 @@ mod tests {
         let mut hotkeys = Hotkeys::new().unwrap();
         let mut settings = Settings::default();
         settings.set_keys(Shortcut::Capture, keys.into());
-        let conflicts = hotkeys.apply(&settings);
+        let conflicts = hotkeys.apply(&settings, false);
         assert_eq!(
             conflicts.get(&Shortcut::Capture),
             Some(&ShortcutConflict::Taken)
@@ -208,12 +215,39 @@ mod tests {
 
         // A new binding takes effect at once.
         settings.set_keys(Shortcut::Capture, "Ctrl+Alt+Shift+F14".into());
-        let conflicts = hotkeys.apply(&settings);
+        let conflicts = hotkeys.apply(&settings, false);
         assert!(!conflicts.contains_key(&Shortcut::Capture), "{conflicts:?}");
         let f14 = HotKey::from_str("Ctrl+Alt+Shift+F14").unwrap();
         assert_eq!(
             hotkeys.fired().lock().unwrap().get(&f14.id()),
             Some(&Command::Capture)
+        );
+    }
+
+    /// US-10.3: the marker keys are only held while a demo session records.
+    #[cfg(windows)]
+    #[test]
+    fn marker_keys_are_only_registered_during_a_session() {
+        let keys = "Ctrl+Alt+Shift+F15";
+        let mut hotkeys = Hotkeys::new().unwrap();
+        let mut settings = Settings {
+            plus_key: "key".into(),
+            ..Settings::default()
+        };
+        settings.set_keys(Shortcut::Scene, keys.into());
+        let id = HotKey::from_str(keys).unwrap().id();
+        let fired = |h: &Hotkeys| h.fired().lock().unwrap().get(&id).cloned();
+        let conflicts = hotkeys.apply(&settings, false);
+        assert!(!conflicts.contains_key(&Shortcut::Scene), "{conflicts:?}");
+        assert_eq!(fired(&hotkeys), None);
+        // Free for another app meanwhile.
+        let other = GlobalHotKeyManager::new().unwrap();
+        other.register(HotKey::from_str(keys).unwrap()).unwrap();
+        other.unregister(HotKey::from_str(keys).unwrap()).unwrap();
+        hotkeys.apply(&settings, true);
+        assert_eq!(
+            fired(&hotkeys),
+            Some(Command::Mark(cb_core::MarkerKind::Scene))
         );
     }
 }

@@ -133,6 +133,9 @@ fn action_name(action: Shortcut) -> String {
         Shortcut::Copy => tr!("shortcut-copy"),
         Shortcut::Prefix => tr!("shortcut-prefix"),
         Shortcut::Demo => tr!("shortcut-demo"),
+        Shortcut::Scene => tr!("shortcut-scene"),
+        Shortcut::Retake => tr!("shortcut-retake"),
+        Shortcut::Highlight => tr!("shortcut-highlight"),
     }
 }
 

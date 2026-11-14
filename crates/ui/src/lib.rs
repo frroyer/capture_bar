@@ -22,7 +22,7 @@ pub use place::points_for_pixel;
 pub use settings::{record_key, Recorded, SettingsOutput, SettingsWindow};
 
 use cb_buffer::{Buffer, BufferItem, ItemId, ItemKind, ItemState, Selection};
-use cb_core::{CaptureMode, Command, Shortcut};
+use cb_core::{CaptureMode, Command, MarkerKind, Shortcut};
 use chrono::{DateTime, Local};
 use egui::{
     emath::RectAlign, vec2, Align2, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions,
@@ -88,6 +88,8 @@ pub struct BarState {
     pub plus: bool,
     /// The recording is a demo session: the bar wears a Demo badge (US-10.1).
     pub demo: bool,
+    /// A marker was just put down: the Demo badge shows it a moment (US-10.3).
+    pub marker: Option<MarkerKind>,
 }
 
 /// Which side of the bar has room for tooltips, reserved by the host.
@@ -654,14 +656,35 @@ pub fn bar(ui: &mut Ui, state: &BarState, buffer: &Buffer) -> BarOutput {
 
                 let record_key = shortcut(Shortcut::Record);
                 if state.recording && state.demo {
+                    let (text, style) = match state.marker {
+                        None => (
+                            tr!("bar-demo-badge"),
+                            ChipStyle::new(ACCENT, Color32::WHITE),
+                        ),
+                        Some(MarkerKind::Scene) => (
+                            tr!("bar-marker-scene"),
+                            ChipStyle::new(PRIMARY, PRIMARY_TEXT),
+                        ),
+                        Some(MarkerKind::Retake) => (
+                            tr!("bar-marker-retake"),
+                            ChipStyle::new(RECORD, Color32::WHITE),
+                        ),
+                        Some(MarkerKind::Highlight) => (
+                            tr!("bar-marker-highlight"),
+                            ChipStyle::new(WARNING, PRIMARY_TEXT),
+                        ),
+                    };
+                    let tip = tr!(
+                        "bar-demo-badge-tip",
+                        scene = shortcut(Shortcut::Scene),
+                        retake = shortcut(Shortcut::Retake),
+                        highlight = shortcut(Shortcut::Highlight)
+                    );
                     chip(
                         ui,
-                        &[
-                            Piece::Icon(Icon::Clapper),
-                            Piece::Text(&tr!("bar-demo-badge")),
-                        ],
-                        &ChipStyle::new(ACCENT, Color32::WHITE),
-                        &tr!("bar-demo-badge-tip"),
+                        &[Piece::Icon(Icon::Clapper), Piece::Text(&text)],
+                        &style,
+                        &tip,
                     );
                 }
                 if state.recording {

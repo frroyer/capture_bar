@@ -252,6 +252,9 @@ enum Taskbar {
     In,
 }
 
+/// How long the bar shows a marker just put down (US-10.3).
+const MARKER_SHOWN: Duration = Duration::from_millis(1500);
+
 /// The clap test's period (US-10.2): `CB_CLAP_SECS=10` claps every 10 s through each
 /// demo session, to measure how the tracks keep in sync. Off when unset or 0.
 fn clap_every() -> Option<Duration> {
@@ -495,6 +498,8 @@ struct App {
     demo_setup: Option<cb_ui::DemoSetup>,
     /// The demo session being recorded, or about to be once what to record is picked.
     demo: Option<demo::DemoSession>,
+    /// The marker just put down, and when: the bar shows it a moment (US-10.3).
+    marker: Option<(cb_core::MarkerKind, Instant)>,
     /// The clap test, while a demo session records with `CB_CLAP_SECS` set (US-10.2).
     clap: Option<Clap>,
     /// The repeated capture whose region lights up once it is taken, and the region.
@@ -604,7 +609,7 @@ impl App {
             .ok();
         let shortcut_conflicts = hotkeys
             .as_mut()
-            .map(|h| h.apply(loaded.settings()))
+            .map(|h| h.apply(loaded.settings(), false))
             .unwrap_or_default();
         let shortcut_map = hotkeys.as_ref().map(hotkeys::Hotkeys::fired);
         let shortcuts_work = shortcut_map
@@ -778,6 +783,7 @@ impl App {
             settings_window: None,
             demo_setup: None,
             demo: None,
+            marker: None,
             clap: None,
             highlight_after: None,
             highlight: None,
@@ -1000,6 +1006,7 @@ impl App {
                 self.focus_prefix = true;
             }
             Command::ToggleDemo => self.toggle_demo(),
+            Command::Mark(kind) => self.mark(kind),
             Command::Cancel => {}
         }
     }
@@ -1025,6 +1032,21 @@ impl App {
         self.demo_setup
             .get_or_insert_with(|| cb_ui::DemoSetup::new(mode, mic))
             .focus();
+    }
+
+    /// Put a marker down in the demo session being recorded, on its clock (US-10.3).
+    fn mark(&mut self, kind: cb_core::MarkerKind) {
+        let (Some(recording), Some(demo)) = (&self.recording, &mut self.demo) else {
+            return;
+        };
+        if demo.item != Some(recording.item) {
+            return;
+        }
+        let now = Instant::now();
+        if let Some(t) = recording.handle.media_time(now) {
+            demo.mark(kind, t.as_millis() as u64, SystemTime::now());
+            self.marker = Some((kind, now));
+        }
     }
 
     /// Draw the blue outline of a repeated capture while it lasts.
@@ -1602,7 +1624,7 @@ impl App {
         if self.shortcuts_suspended {
             hotkeys.suspend();
         } else {
-            self.shortcut_conflicts = hotkeys.apply(&self.prefs);
+            self.shortcut_conflicts = hotkeys.apply(&self.prefs, self.bar.demo);
         }
     }
 
@@ -2409,6 +2431,10 @@ impl App {
                             path: demo.dir.join("manifest.json"),
                             bytes: demo.manifest(&recording),
                         });
+                        let _ = self.output.send(output::Job::Write {
+                            path: demo.dir.join("markers.json"),
+                            bytes: demo.markers_json(),
+                        });
                         if !demo.claps.claps.is_empty() {
                             // Kept first, so the report can be made again if this one is
                             // cut short: `takebox clap-report <folder>`.
@@ -2938,7 +2964,19 @@ impl eframe::App for App {
         }
         self.bar.has_last_region = self.last_region.is_some();
         self.bar.plus = self.prefs.plus();
-        self.bar.demo = self.demo.as_ref().is_some_and(|d| d.item.is_some());
+        let demo = self.demo.as_ref().is_some_and(|d| d.item.is_some());
+        if demo != self.bar.demo {
+            // The marker shortcuts are only registered while a session records.
+            self.bar.demo = demo;
+            self.rebind_shortcuts();
+        }
+        self.marker = self
+            .marker
+            .filter(|(_, at)| demo && at.elapsed() < MARKER_SHOWN);
+        self.bar.marker = self.marker.map(|(kind, _)| kind);
+        if let Some((_, at)) = self.marker {
+            ctx.request_repaint_after(MARKER_SHOWN.saturating_sub(at.elapsed()));
+        }
         let (shown, fade) =
             animated_opacity(ctx, self.hidden, cursor_near || !self.prefs.fade_when_away);
         self.bar_fade = fade;
