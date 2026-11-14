@@ -304,16 +304,16 @@ Le Mode Démo ajoute 5 Epics et 22 User Stories, numérotés à la suite de la P
 
 - CA : une zone définie est floutée dans `screen.mp4`, les captures, les vignettes et `get_frame`.
 
-* [ ] Outil de sélection de zones et de fenêtres
-* [ ] Flou appliqué à l'export
+* [x] Outil de sélection de zones et de fenêtres (configuration de session : + Zone / + Fenêtre par l'overlay ; repris d'une session à l'autre)
+* [x] Flou appliqué à la source sur Windows (moyenne 32 px sur le GPU, avant l'encodeur et les captures) : `screen.mp4`, les captures et leurs vignettes n'ont jamais de copie nette ; `get_frame` (E13) lira ces médias. Une fenêtre masquée est floutée là où elle est, même recouverte
 
 **US-10.6** En tant que présentateur, je veux apparaître dans ma démo via la webcam, sur une piste séparée. *(DR-21–23, DR-25)*
 
 - CA : la webcam s'active dans la configuration de session ; `webcam.mp4` est synchronisée à ≤ 50 ms ; la bulle n'apparaît pas dans `screen.mp4` ; `webcam.json` contient un cadre de visage par seconde.
 
-* [ ] Piste webcam dans l'orchestrateur de session (réutilise la capture caméra de US-5.4)
-* [ ] Bulle d'aperçu exclue de l'enregistrement d'écran
-* [ ] Détection de visage par OS et écriture de `webcam.json`
+* [x] Piste webcam dans l'orchestrateur de session (réutilise la capture caméra de US-5.4) — Windows : `media/webcam.mp4` à 30 i/s, même origine et mêmes pauses que l'écran, `offset_ms` au manifeste. Décalage ≤ 50 ms non mesuré (le clap test ne couvre pas la webcam)
+* [x] Bulle d'aperçu exclue de l'enregistrement d'écran ; ses positions sont dans `webcam.json`
+* [x] Détection de visage par OS et écriture de `webcam.json` — Windows (Windows.Media.FaceAnalysis, après la session, une image par seconde) ; macOS (Vision) et Linux à faire
 
 ### E11 · Audio et transcription
 

@@ -498,6 +498,10 @@ struct App {
     settings_window: Option<SettingsWindow>,
     /// The demo session setup, while open (US-10.1).
     demo_setup: Option<cb_ui::DemoSetup>,
+    /// The overlay is open to pick an area or a window for the setup to mask (US-10.5).
+    picking_mask: bool,
+    /// The masks of the last session, offered again by the next setup.
+    last_masks: Vec<(cb_core::Mask, String)>,
     /// The demo session being recorded, or about to be once what to record is picked.
     demo: Option<demo::DemoSession>,
     /// The marker just put down, and when: the bar shows it a moment (US-10.3).
@@ -784,6 +788,8 @@ impl App {
             settings_writer,
             settings_window: None,
             demo_setup: None,
+            picking_mask: false,
+            last_masks: Vec::new(),
             demo: None,
             marker: None,
             clap: None,
@@ -861,6 +867,7 @@ impl App {
     /// closes it: the way out if the overlay did not get the keyboard for Esc.
     fn begin_capture(&mut self, mode: CaptureMode) {
         self.overlay_records = false;
+        self.picking_mask = false;
         if self.overlay.take().is_some() || self.overlay_request.is_some() {
             return;
         }
@@ -895,7 +902,14 @@ impl App {
             displays,
             self.last_region,
             self.overlay_records,
-        ));
+        ))
+        .map(|overlay| {
+            if self.picking_mask {
+                overlay.for_mask()
+            } else {
+                overlay
+            }
+        });
         self.overlay_dressed = false;
     }
 
@@ -908,6 +922,13 @@ impl App {
         // Once its window exists it loses the frame Windows 11 draws round borderless
         // windows, before it shows.
         self.overlay_dressed = self.overlay_dressed || dress_window(&tr!("overlay-title"), false);
+        if self.picking_mask {
+            if let Some(result) = result {
+                self.overlay = None;
+                self.add_mask(result);
+            }
+            return;
+        }
         match result {
             None => {}
             Some(OverlayResult::Display(id)) => {
@@ -1032,7 +1053,7 @@ impl App {
         self.hidden = false;
         let (mode, mic) = (self.bar.mode, self.bar.mic_on);
         self.demo_setup
-            .get_or_insert_with(|| cb_ui::DemoSetup::new(mode, mic))
+            .get_or_insert_with(|| cb_ui::DemoSetup::new(mode, mic, self.last_masks.clone()))
             .focus();
     }
 
@@ -1138,12 +1159,16 @@ impl App {
 
     fn show_demo_setup(&mut self, ctx: &egui::Context) {
         let monitor = self.bar_display();
-        let Some(setup) = &mut self.demo_setup else {
+        // Out of the way while the overlay picks a mask: it would be in its picture.
+        let picking = self.picking_mask;
+        let Some(setup) = self.demo_setup.as_mut().filter(|_| !picking) else {
             return;
         };
         match setup.show(ctx, monitor.as_ref()) {
             cb_ui::DemoSetupOutput::Open => {}
             cb_ui::DemoSetupOutput::Cancel => self.demo_setup = None,
+            cb_ui::DemoSetupOutput::PickArea => self.pick_mask(CaptureMode::Region),
+            cb_ui::DemoSetupOutput::PickWindow => self.pick_mask(CaptureMode::Window),
             cb_ui::DemoSetupOutput::Start => {
                 let setup = self.demo_setup.take().expect("checked above");
                 if self.recording.is_some() || self.countdown.is_some() {
@@ -1151,14 +1176,69 @@ impl App {
                 }
                 self.bar.mode = setup.mode;
                 self.bar.mic_on = setup.mic;
-                self.demo = Some(demo::DemoSession::new(
+                let mut session = demo::DemoSession::new(
                     &setup.title,
                     setup.language,
                     &self.captures_dir,
                     SystemTime::now(),
-                ));
+                );
+                session.masks = setup.masks.clone();
+                session.webcam = setup.webcam;
+                // The camera opens now, during the countdown, to be ready for the start.
+                session.camera_started = setup.webcam && !self.bar.cam_on;
+                self.bar.cam_on |= setup.webcam;
+                self.last_masks = setup.masks;
+                self.demo = Some(session);
                 self.toggle_recording();
             }
+        }
+    }
+
+    /// Open the overlay to pick an area or a window that the setup masks (US-10.5).
+    fn pick_mask(&mut self, mode: CaptureMode) {
+        if self.overlay.is_some() || self.overlay_request.is_some() {
+            return;
+        }
+        self.picking_mask = true;
+        self.overlay_records = false;
+        let request = self.capture.request_still(CaptureTarget::Desktop);
+        self.overlay_request = Some((request, mode));
+    }
+
+    /// The overlay's pick as a mask for the setup, named as it lists it.
+    fn add_mask(&mut self, result: OverlayResult) {
+        self.picking_mask = false;
+        let area = |rect: cb_core::Rect| {
+            let name = tr!(
+                "demo-setup-mask-area-name",
+                width = rect.width,
+                height = rect.height
+            );
+            (cb_core::Mask::Area(rect), name)
+        };
+        let mask = match result {
+            OverlayResult::Cancelled => None,
+            OverlayResult::Region { rect, .. } => Some(area(rect)),
+            OverlayResult::Display(id) => self
+                .displays
+                .iter()
+                .find(|d| d.id == id)
+                .map(|d| area(d.bounds)),
+            OverlayResult::Window(id) => {
+                let title = self
+                    .screen
+                    .windows()
+                    .ok()
+                    .and_then(|all| all.into_iter().find(|w| w.id == id))
+                    .map_or_else(|| tr!("mode-window"), |w| w.title);
+                Some((cb_core::Mask::Window(id), title))
+            }
+        };
+        if let Some(setup) = &mut self.demo_setup {
+            if let Some(mask) = mask.filter(|m| !setup.masks.iter().any(|(had, _)| *had == m.0)) {
+                setup.masks.push(mask);
+            }
+            setup.focus();
         }
     }
 
@@ -2300,6 +2380,14 @@ impl App {
         // Recordings draw the camera only once there is a picture to draw.
         let running = state == cb_platform::CameraState::Running;
         cb_platform::set_camera_bubble(rect.filter(|_| running).map(|r| (r, shape)));
+        // Where the bubble sits, for the layout at editing time (DR-22).
+        if let (Some(recording), Some(demo)) = (&self.recording, &mut self.demo) {
+            if demo.webcam && demo.item == Some(recording.item) {
+                if let Some(t) = recording.handle.media_time(Instant::now()) {
+                    demo.bubble_at(t.as_millis() as u64, rect.filter(|_| running));
+                }
+            }
+        }
         if !self.camera.dressed && dress_window(&tr!("bubble-title"), true) {
             self.camera.dressed = true;
             // Dragged across monitors of different scales, a resize could bounce it
@@ -2355,6 +2443,13 @@ impl App {
             let _ = sender.send((item, result));
             repaint.request_repaint();
         });
+        // A demo session's masks and webcam track (US-10.5, US-10.6); plain recordings
+        // have neither.
+        let session = self.demo.as_ref().filter(|_| demo);
+        cb_platform::set_masks(
+            session.map_or_else(Vec::new, |d| d.masks.iter().map(|m| m.0).collect()),
+        );
+        cb_platform::set_webcam_track(session.filter(|d| d.webcam).map(|d| d.webcam_path()));
         match self.screen.start_recording(
             &target,
             self.prefs.frame_rate,
@@ -2402,17 +2497,30 @@ impl App {
             }
             Err(error) => {
                 if demo {
-                    self.demo = None;
+                    let session = self.demo.take();
+                    self.end_demo(session);
                 }
+                cb_platform::set_webcam_track(None);
                 self.buffer.remove(item);
                 self.flash(tr!("toast-record-failed", error = error.to_string()));
             }
         }
     }
 
+    /// Stop what a demo session started: its masks, and the camera if it turned it on.
+    fn end_demo(&mut self, demo: Option<demo::DemoSession>) -> Option<demo::DemoSession> {
+        let session = demo.as_ref()?;
+        cb_platform::set_masks(Vec::new());
+        if session.camera_started {
+            self.bar.cam_on = false;
+        }
+        demo
+    }
+
     fn poll_recordings(&mut self) {
         while let Ok((item, result)) = self.recorded.1.try_recv() {
             let demo = self.demo.take_if(|d| d.item == Some(item));
+            let demo = self.end_demo(demo);
             // A recording that failed while running has nothing left to stop.
             if self.recording.as_ref().is_some_and(|r| r.item == item) {
                 self.recording = None;
@@ -2448,6 +2556,10 @@ impl App {
                             path: demo.dir.join("markers.json"),
                             bytes: demo.markers_json(),
                         });
+                        if let Some(track) = &recording.webcam {
+                            let log = demo.webcam_log(track);
+                            let _ = self.output.send(output::Job::WebcamLog(log));
+                        }
                         if !demo.claps.claps.is_empty() {
                             // Kept first, so the report can be made again if this one is
                             // cut short: `takebox clap-report <folder>`.

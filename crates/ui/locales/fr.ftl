@@ -126,6 +126,9 @@ overlay-title = Sélection Takebox
 overlay-record = Enregistrer
 overlay-capture = Capturer
 overlay-cancel = Annuler
+overlay-mask = Masquer
+overlay-mask-hint-area = Tracez la zone à flouter, puis Masquer ou Entrée. Échap annule.
+overlay-mask-hint-window = Cliquez sur la fenêtre à flouter. Échap annule.
 
 ## Éditeur d'annotations (US-7.1)
 
@@ -330,6 +333,17 @@ demo-setup-area = Enregistrer
 demo-setup-audio = Audio
 demo-setup-start = Démarrer (Entrée)
 demo-setup-cancel = Annuler
+demo-setup-webcam = Webcam
+demo-setup-webcam-track = Sur sa propre piste (webcam.mp4)
+demo-setup-masks = Masques
+demo-setup-masks-none = Rien n’est masqué. Ajoutez les zones ou fenêtres qui montrent mots de passe ou données client.
+demo-setup-mask-area = Ajouter une zone
+demo-setup-mask-window = Ajouter une fenêtre
+demo-setup-masks-help = Floutés dans la vidéo et les captures dès l’enregistrement : aucune copie nette n’est gardée.
+demo-setup-mask-area-help = Tracer un rectangle
+demo-setup-mask-window-help = Suivie quand elle bouge
+demo-setup-mask-area-name = Zone { $width } × { $height }
+demo-setup-mask-remove = Retirer le masque { $name }
 shortcut-demo = Session démo
 shortcut-scene = Marqueur : nouvelle scène
 shortcut-retake = Marqueur : prise ratée

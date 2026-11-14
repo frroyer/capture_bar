@@ -425,6 +425,27 @@ pub struct Recording {
     /// The wall-clock time of its first frame: time zero of [`StreamHandle::media_time`]
     /// (DR-2).
     pub started_at: SystemTime,
+    /// The webcam's own video, when one was asked for and the camera ran (US-10.6).
+    pub webcam: Option<WebcamTrack>,
+}
+
+/// A webcam video recorded beside the screen, on its clock (US-10.6, DR-21).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebcamTrack {
+    pub path: std::path::PathBuf,
+    pub width: u32,
+    pub height: u32,
+    /// Where its first frame lies on the screen's timeline: the camera may start late.
+    pub offset: std::time::Duration,
+}
+
+/// What a demo session hides in everything it records (US-10.5, DR-20).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Mask {
+    /// A fixed part of the desktop, in global physical pixels.
+    Area(Rect),
+    /// A window, wherever it moves; nothing while it is minimized.
+    Window(WindowId),
 }
 
 /// A running recording. Dropping it stops it too.

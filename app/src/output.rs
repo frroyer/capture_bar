@@ -103,6 +103,8 @@ pub enum Job {
     /// Find a demo session's claps in its `video` and write the drift report to `to`
     /// (US-10.2). Says how it went.
     ClapReport(PathBuf),
+    /// Find the face in a demo session's webcam track and write `webcam.json` (US-10.6).
+    WebcamLog(crate::demo::WebcamLog),
     /// Make a GIF of the recording at `from`, next to it (US-6.7). Exports queue and run
     /// one at a time, in order, reporting progress (US-6.2).
     ExportGif {
@@ -502,6 +504,7 @@ fn one_off(clipboard: &mut Option<arboard::Clipboard>, job: Job) -> String {
         | Job::Remove(_)
         | Job::Write { .. }
         | Job::ClapReport(_)
+        | Job::WebcamLog(_)
         | Job::ExportGif { .. } => {
             unreachable!("not a one-off job")
         }
@@ -697,6 +700,18 @@ pub fn spawn(wake: impl Fn() + Send + Sync + 'static) -> (mpsc::Sender<Job>, mps
                                 let _ = done.send(Done::Message(clap_message(&dir)));
                                 wake();
                             });
+                        continue;
+                    }
+                    Job::WebcamLog(log) => {
+                        // Decodes the whole track: on its own thread, not in the queue.
+                        let log = log.clone();
+                        let _ = std::thread::Builder::new().name("webcam log".into()).spawn(
+                            move || {
+                                if let Err(error) = log.write() {
+                                    tracing::warn!(%error, "webcam.json");
+                                }
+                            },
+                        );
                         continue;
                     }
                     Job::CopyFile(_)

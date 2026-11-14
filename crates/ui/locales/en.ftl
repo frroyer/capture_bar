@@ -123,6 +123,9 @@ overlay-title = Takebox selection
 overlay-record = Record
 overlay-capture = Capture
 overlay-cancel = Cancel
+overlay-mask = Mask
+overlay-mask-hint-area = Drag over what to blur, then press Mask or Enter. Esc cancels.
+overlay-mask-hint-window = Click the window to blur. Esc cancels.
 
 ## Annotation editor (US-7.1)
 
@@ -312,6 +315,17 @@ demo-setup-area = Record
 demo-setup-audio = Audio
 demo-setup-start = Start (Enter)
 demo-setup-cancel = Cancel
+demo-setup-webcam = Webcam
+demo-setup-webcam-track = On its own track (webcam.mp4)
+demo-setup-masks = Masks
+demo-setup-masks-none = Nothing is masked. Add the areas or windows that show passwords or client data.
+demo-setup-mask-area = Add an area
+demo-setup-mask-window = Add a window
+demo-setup-masks-help = Blurred in the video and stills as they are recorded: no clear copy is kept.
+demo-setup-mask-area-help = Drag a rectangle
+demo-setup-mask-window-help = Followed as it moves
+demo-setup-mask-area-name = Area { $width } × { $height }
+demo-setup-mask-remove = Remove the mask { $name }
 shortcut-demo = Demo session
 shortcut-scene = Marker: new scene
 shortcut-retake = Marker: failed take

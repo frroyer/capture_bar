@@ -47,15 +47,16 @@ pub(crate) struct BubblePainter {
     picture: Option<(ID3D11Texture2D, ID3D11ShaderResourceView, (u32, u32), u64)>,
 }
 
-fn compile(entry: PCSTR, target: PCSTR) -> WinResult<ID3DBlob> {
+/// Compile `entry` of the HLSL `source` for `target` (e.g. `ps_4_0`).
+pub(crate) fn compile(source: &str, entry: PCSTR, target: PCSTR) -> WinResult<ID3DBlob> {
     let mut code = None;
     let mut errors = None;
     // SAFETY: the source outlives the call; the out-pointers are valid.
     let compiled = unsafe {
         D3DCompile(
-            SHADER.as_ptr().cast(),
-            SHADER.len(),
-            s!("bubble"),
+            source.as_ptr().cast(),
+            source.len(),
+            s!("takebox"),
             None,
             None,
             entry,
@@ -74,13 +75,13 @@ fn compile(entry: PCSTR, target: PCSTR) -> WinResult<ID3DBlob> {
                 errors.GetBufferSize(),
             )
         };
-        tracing::error!("bubble shader: {e}: {}", String::from_utf8_lossy(text));
+        tracing::error!("shader: {e}: {}", String::from_utf8_lossy(text));
     }
     compiled?;
     Ok(code.expect("D3DCompile succeeded without code"))
 }
 
-fn bytes(blob: &ID3DBlob) -> &[u8] {
+pub(crate) fn bytes(blob: &ID3DBlob) -> &[u8] {
     // SAFETY: the blob owns this many bytes for its lifetime.
     unsafe {
         std::slice::from_raw_parts(blob.GetBufferPointer() as *const u8, blob.GetBufferSize())
@@ -90,8 +91,8 @@ fn bytes(blob: &ID3DBlob) -> &[u8] {
 impl BubblePainter {
     pub fn new(device: &ID3D11Device) -> WinResult<Self> {
         let (vs_code, ps_code) = (
-            compile(s!("vs"), s!("vs_4_0"))?,
-            compile(s!("ps"), s!("ps_4_0"))?,
+            compile(SHADER, s!("vs"), s!("vs_4_0"))?,
+            compile(SHADER, s!("ps"), s!("ps_4_0"))?,
         );
         let (mut vs, mut ps, mut sampler, mut blend, mut constants) =
             (None, None, None, None, None);
@@ -272,11 +273,14 @@ impl BubblePainter {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
+    /// Tests drawing on the shared device's one immediate context take turns.
+    pub(crate) static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// BGRA of `texture` (`side` x `side`), read back through a staging copy.
-    fn read_back(
+    pub(crate) fn read_back(
         device: &ID3D11Device,
         context: &ID3D11DeviceContext,
         texture: &ID3D11Texture2D,
@@ -329,6 +333,7 @@ mod tests {
             eprintln!("skipped: no hardware D3D11 device");
             return None;
         };
+        let _turn = GPU.lock().unwrap_or_else(|e| e.into_inner());
         let device = &gpu.device;
         // SAFETY: no preconditions.
         let context = &unsafe { device.GetImmediateContext() }.unwrap();

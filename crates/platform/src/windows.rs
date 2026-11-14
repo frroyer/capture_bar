@@ -742,6 +742,35 @@ fn monitor_origin(monitor: HMONITOR) -> (i32, i32) {
     monitor_bounds(monitor).map_or((0, 0), |(r, ..)| (r.left, r.top))
 }
 
+/// Where a window shows on the desktop, without its invisible border; `None` when it is
+/// gone, hidden or minimized.
+pub(crate) fn window_rect(id: WindowId) -> Option<Rect> {
+    let hwnd = HWND(id.0 as *mut _);
+    let mut r = RECT::default();
+    // SAFETY: these accept any handle; the out-pointer fits a RECT.
+    unsafe {
+        if !IsWindow(Some(hwnd)).as_bool()
+            || !IsWindowVisible(hwnd).as_bool()
+            || IsIconic(hwnd).as_bool()
+        {
+            return None;
+        }
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut r as *mut _ as *mut _,
+            std::mem::size_of::<RECT>() as u32,
+        )
+        .ok()?;
+    }
+    (r.right > r.left && r.bottom > r.top).then(|| Rect {
+        x: r.left,
+        y: r.top,
+        width: (r.right - r.left) as u32,
+        height: (r.bottom - r.top) as u32,
+    })
+}
+
 /// The top-left corner of a window as captured, without its invisible border.
 fn window_origin(id: WindowId) -> (i32, i32) {
     let mut r = RECT::default();
