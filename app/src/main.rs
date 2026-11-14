@@ -365,6 +365,8 @@ struct ActiveRecording {
     /// Its place in the buffer, there from the start.
     item: ItemId,
     clock: Stopwatch,
+    /// A demo session's event log (US-10.4): it stops with the recording.
+    _events: Option<cb_platform::EventRecorder>,
 }
 
 /// Recorded time: runs from the start, stands still while paused (US-5.2). The video
@@ -2364,10 +2366,21 @@ impl App {
             done,
         ) {
             Ok(handle) => {
+                let session = self.demo.as_mut().filter(|_| demo);
+                let events = session.as_ref().and_then(|d| {
+                    cb_platform::record_events(
+                        d.dir.join(cb_core::events::EVENTS_FILE),
+                        handle.clock()?,
+                    )
+                });
+                if let Some(d) = session {
+                    d.events = events.is_some();
+                }
                 self.recording = Some(ActiveRecording {
                     handle,
                     item,
                     clock: Stopwatch::start(Instant::now()),
+                    _events: events,
                 });
                 self.bar.recording = true;
                 if let Some(d) = self.demo.as_mut().filter(|_| demo) {

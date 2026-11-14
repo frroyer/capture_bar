@@ -1,6 +1,7 @@
 //! Demo sessions (Demo Mode PRD, US-10.1): one recording and the stills taken during it,
 //! kept together in a `.cbdemo` folder laid out as the PRD's section 5. The rest of the
-//! package (audio tracks, transcript, script, timeline) comes with E11–E13.
+//! package (audio tracks, transcript, script, timeline) comes with E11–E13. The event
+//! log, `events.jsonl` (US-10.4), is written by `cb_platform::record_events`.
 //!
 //! One clock (US-10.2, DR-2): the recording's own, from [`cb_core::StreamHandle::media_time`].
 //! Time zero is the first video frame, pauses are left out as the video leaves them out,
@@ -33,6 +34,8 @@ pub struct DemoSession {
     pub still_times: HashMap<ItemId, u64>,
     /// The clap test's log (US-10.2).
     pub claps: ClapLog,
+    /// Whether `events.jsonl` is being written (US-10.4); not on every platform yet.
+    pub events: bool,
     stills: Vec<Still>,
     markers: Vec<Marker>,
 }
@@ -65,6 +68,7 @@ impl DemoSession {
             item: None,
             still_times: HashMap::new(),
             claps: ClapLog::default(),
+            events: false,
             stills: Vec::new(),
             markers: Vec::new(),
         }
@@ -139,6 +143,10 @@ impl DemoSession {
                 "size": [recording.width, recording.height],
             }],
             "stills": stills,
+            "events": self.events.then(|| serde_json::json!({
+                "path": cb_core::events::EVENTS_FILE,
+                "coordinates": "desktop pixels",
+            })),
             "generator": { "app": "Takebox", "version": env!("CARGO_PKG_VERSION") },
         });
         serde_json::to_vec_pretty(&manifest).expect("a JSON value always serializes")
@@ -397,6 +405,11 @@ mod tests {
         assert_eq!(json["stills"][0]["path"], "media/stills/0001.png");
         assert_eq!(json["stills"][0]["t_ms"], 1500);
         assert!(json["stills"][1]["t_ms"].is_null());
+        assert!(json["events"].is_null());
+        session.events = true;
+        let json: serde_json::Value =
+            serde_json::from_slice(&session.manifest(&recording)).unwrap();
+        assert_eq!(json["events"]["path"], "events.jsonl");
     }
 
     #[test]

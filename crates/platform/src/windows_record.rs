@@ -138,6 +138,16 @@ impl StreamHandle for Handle {
     fn media_time(&self, at: Instant) -> Option<Duration> {
         self.0.media_time(at)
     }
+    fn clock(&self) -> Option<cb_core::MediaClock> {
+        let control = self.0.clone();
+        Some(Arc::new(move |at| {
+            let timeline = control.timeline();
+            match timeline.paused_at {
+                Some(_) => None,
+                None => media_time(timeline.origin?, None, at),
+            }
+        }))
+    }
     fn still(&self, done: StillDone) {
         self.0
             .stills

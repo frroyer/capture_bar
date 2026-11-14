@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
+pub mod events;
+
 /// What the next Capture / Record acts on (FR-7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum CaptureMode {
@@ -448,9 +450,18 @@ pub trait StreamHandle: Send {
         let _ = at;
         None
     }
+    /// [`Self::media_time`] for another thread, as the event log's (US-10.4), except that
+    /// it gives `None` while paused: nothing then is in the video.
+    fn clock(&self) -> Option<MediaClock> {
+        None
+    }
     /// Returns at once; the recording's `done` runs when the file is complete.
     fn stop(self: Box<Self>);
 }
+
+/// See [`StreamHandle::clock`].
+pub type MediaClock =
+    std::sync::Arc<dyn Fn(std::time::Instant) -> Option<std::time::Duration> + Send + Sync>;
 
 /// Create `path`, or `<stem>-2.<ext>`, `-3`… when it exists: a file is never overwritten (FR-30).
 pub fn create_unique(
