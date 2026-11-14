@@ -361,6 +361,50 @@ pub fn system_ui_fonts() -> Option<(Vec<u8>, Vec<u8>)> {
     }
 }
 
+/// The font files installed on this computer (`.ttf`, `.otf`, `.ttc`), for the editor's
+/// font setting. Slow: walks the font folders.
+pub fn font_files() -> Vec<std::path::PathBuf> {
+    let home = std::env::var_os(if cfg!(windows) {
+        "LOCALAPPDATA"
+    } else {
+        "HOME"
+    })
+    .map(std::path::PathBuf::from);
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    if cfg!(windows) {
+        let windir = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
+        dirs.push(std::path::PathBuf::from(windir).join("Fonts"));
+        dirs.extend(home.map(|h| h.join("Microsoft\\Windows\\Fonts")));
+    } else if cfg!(target_os = "macos") {
+        dirs.extend(["/System/Library/Fonts", "/Library/Fonts"].map(Into::into));
+        dirs.extend(home.map(|h| h.join("Library/Fonts")));
+    } else {
+        dirs.extend(["/usr/share/fonts", "/usr/local/share/fonts"].map(Into::into));
+        if let Some(h) = home {
+            dirs.push(h.join(".local/share/fonts"));
+            dirs.push(h.join(".fonts"));
+        }
+    }
+    let mut files = Vec::new();
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for path in entries.flatten().map(|e| e.path()) {
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_lowercase);
+            if path.is_dir() {
+                dirs.push(path);
+            } else if matches!(ext.as_deref(), Some("ttf" | "otf" | "ttc")) {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
 /// Whether the primary mouse button is held right now, or `None` if this OS cannot
 /// tell. The app does not see the release that ends an OS window drag.
 pub fn primary_button_down() -> Option<bool> {

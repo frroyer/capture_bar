@@ -164,6 +164,7 @@ impl SettingsWindow {
         file: &Path,
         autostart: &mut bool,
         conflicts: &BTreeMap<Shortcut, ShortcutConflict>,
+        fonts: Option<&[(String, String)]>,
     ) -> SettingsOutput {
         let size = vec2(560.0, 640.0);
         let opening = *self
@@ -181,7 +182,7 @@ impl SettingsWindow {
                 if let Some(opening) = &mut self.opening {
                     opening.settle(ui.ctx());
                 }
-                self.ui(ui, settings, file, autostart, conflicts)
+                self.ui(ui, settings, file, autostart, conflicts, fonts)
             },
         )
     }
@@ -193,6 +194,7 @@ impl SettingsWindow {
         file: &Path,
         autostart: &mut bool,
         conflicts: &BTreeMap<Shortcut, ShortcutConflict>,
+        fonts: Option<&[(String, String)]>,
     ) -> SettingsOutput {
         let ctx = ui.ctx().clone();
         if !self.focused {
@@ -326,9 +328,16 @@ impl SettingsWindow {
                             ui.end_row();
                         });
 
+                    section(ui, &tr!("settings-editor"));
+                    editor_settings(ui, settings, fonts);
+
                     section(ui, &tr!("settings-general"));
                     ui.checkbox(autostart, tr!("settings-autostart"));
                     ui.checkbox(&mut settings.fade_when_away, tr!("settings-fade"));
+                    ui.checkbox(
+                        &mut settings.repeat_highlight,
+                        tr!("settings-repeat-highlight"),
+                    );
                     ui.checkbox(&mut settings.tooltips, tr!("settings-tooltips"));
                     ui.horizontal(|ui| {
                         ui.label(tr!("settings-language"));
@@ -460,6 +469,70 @@ impl SettingsWindow {
             );
         }
     }
+}
+
+/// The capture editor's colours and font.
+fn editor_settings(ui: &mut Ui, settings: &mut Settings, fonts: Option<&[(String, String)]>) {
+    egui::Grid::new("editor settings")
+        .num_columns(2)
+        .spacing([16.0, 10.0])
+        .show(ui, |ui| {
+            ui.label(tr!("settings-editor-colors"));
+            ui.horizontal(|ui| {
+                let mut palette = settings.editor_palette();
+                let mut changed = false;
+                for color in &mut palette {
+                    let response = egui::color_picker::color_edit_button_srgb(ui, color);
+                    changed |= response.changed();
+                }
+                if changed {
+                    settings.editor_colors = palette.map(cb_core::color_hex).to_vec();
+                }
+                let defaults = cb_core::DEFAULT_EDITOR_COLORS.map(String::from).to_vec();
+                if ui
+                    .add_enabled(
+                        settings.editor_colors != defaults,
+                        egui::Button::new(tr!("settings-editor-colors-reset")),
+                    )
+                    .clicked()
+                {
+                    settings.editor_colors = defaults;
+                }
+            });
+            ui.end_row();
+            ui.label(tr!("settings-editor-font"));
+            let default = tr!("settings-editor-font-default");
+            let shown = if settings.editor_font.is_empty() {
+                default.clone()
+            } else {
+                fonts
+                    .and_then(|f| f.iter().find(|(_, path)| *path == settings.editor_font))
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| {
+                        Path::new(&settings.editor_font)
+                            .file_name()
+                            .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+                    })
+            };
+            egui::ComboBox::from_id_salt("editor font")
+                .selected_text(shown)
+                .width(260.0)
+                .height(320.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut settings.editor_font, String::new(), default);
+                    match fonts {
+                        Some(fonts) => {
+                            for (name, path) in fonts {
+                                ui.selectable_value(&mut settings.editor_font, path.clone(), name);
+                            }
+                        }
+                        None => {
+                            ui.label(tr!("settings-editor-font-loading"));
+                        }
+                    }
+                });
+            ui.end_row();
+        });
 }
 
 fn section(ui: &mut Ui, title: &str) {
